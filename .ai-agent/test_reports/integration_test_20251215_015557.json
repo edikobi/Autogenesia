@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "timestamp": "2025-12-15T01:55:57.884391",
+    "project_dir": "C:\\Users\\Admin\\AI_Assistant_Pro",
+    "user_query": "Я проверяю создание истории беседы с помощью тестового скрипта, и при проверке мне постоянно выходит ошибка, можешь выяснить проблема с тестовым скриптом или файлами, которые создаюь историю беседы (то есть с файлами, которые скрипт тестирует). Если есть проблема, напиши полный код ее решения. Traceback (most recent call last):  File \"c:\\Users\\Admin\\AI_Assistant_Pro\\scripts\\test_history_manager.py\", line 167, in test_create_history    thread = manager.create_thread(             ^^^^^^^^^^^^^^^^^^^^^AttributeError: 'HistoryManager' object has no attribute 'create_thread'",
+    "duration_seconds": 193.18312454223633,
+    "models_used": {
+      "orchestrator": "Claude Sonnet 4.5 (RouterAI)",
+      "code_generator": "deepseek-chat"
+    }
+  },
+  "orchestrator": {
+    "analysis": "Проблема **не в файлах истории беседы**, а **в тестовом скрипте**. Обнаружено несколько ошибок:\n\n1. **Строка 167**: Метод называется `create_new_thread`, а не `create_thread`\n2. **Строка 169**: Параметр `project_name` не существует в методе `create_new_thread()` (метод принимает `user_id`, `project_path`, `title`)\n3. **Строки 186-191**: Метод `add_message()` требует обязательный параметр `tokens` (количество токенов в сообщении), который не передается\n4. **Строка 195**: `get_session_history()` - это async метод, требует `await`, и функция `test_create_history` должна быть async\n5. **Строка 200**: Метод `get_thread_statistics()` не существует в `HistoryManager`, нужно использовать `get_thread_stats()`",
+    "instruction": "**Task:** Исправить все ошибки в тестовом скрипте test_history_manager.py\n\n**File:** `scripts/test_history_manager.py`\n\n**Location:** Функция `test_create_history` (строки 153-219)\n\n**Changes:**\n\n1. На строке 153: Изменить сигнатуру функции с `def test_create_history()` на `async def test_create_history()`, и изменить возвращаемый тип с `tuple[str, HistoryManager]` на `tuple[str, HistoryManager]` (оставить как есть)\n\n2. На строке 167: Заменить `manager.create_thread(` на `manager.create_new_thread(`\n\n3. На строках 168-170: Удалить параметр `project_name=\"Test Project\"`, заменить на `title=\"Test Project\"`. Итоговый вызов должен быть:\n   ```python\n   thread = manager.create_new_thread(\n       user_id=\"test_user\",\n       project_path=\"test_project\",\n       title=\"Test Project\"\n   )\n   ```\n\n4. На строках 186-191: Добавить параметр `tokens` в каждый вызов `add_message()`. Использовать примерный подсчет: длина контента делить на 4. Добавить импорт `TokenCounter` в начало файла (строка ~10): `from app.utils.token_counter import TokenCounter`. Перед циклом создать счетчик: `token_counter = TokenCounter()`. В цикле изменить вызов:\n   ```python\n   message = manager.add_message(\n       thread_id=thread_id,\n       role=msg_data[\"role\"],\n       content=msg_data[\"content\"],\n       tokens=token_counter.count(msg_data[\"content\"])\n   )\n   ```\n\n5. На строке 195: Заменить `messages = manager.get_session_history(thread_id)` на `messages = await manager.get_session_history(thread_id, current_query=\"I need help with authentication setup.\")`\n\n6. На строке 200: Заменить `stats = manager.get_thread_statistics(thread_id)` на `stats = manager.get_thread_stats(thread_id)`\n\n7. На строках 201-202: Изменить обращение к ключам словаря stats с `stats.get('total_messages', 0)` на `stats.get('message_count', 0)` (так как метод `get_thread_stats()` возвращает `message_count`, а не `total_messages`)\n\n**Why:** Исправление несоответствий между API HistoryManager и вызовами в тесте. Метод был переименован, параметры изменены, и async функция требует корректного использования await.\n\n---\n\n**ПОЛНЫЙ ИСПРАВЛЕННЫЙ КОД функции test_create_history:**\n\n```python\nasync def test_create_history() -> tuple[str, HistoryManager]:\n    \"\"\"Create a new conversation thread with test messages.\"\"\"\n    logger = logging.getLogger(__name__)\n    logger.info(\"Creating new conversation thread...\")\n\n    try:\n        # Ensure tests directory exists\n        db_path = Path(\"tests/test_history.db\")\n        db_path.parent.mkdir(parents=True, exist_ok=True)\n\n        # Initialize HistoryManager with test database\n        manager = HistoryManager(db_path=str(db_path))\n        \n        # Initialize token counter\n        token_counter = TokenCounter()\n\n        # Create new thread\n        thread = manager.create_new_thread(\n            user_id=\"test_user\",\n            project_path=\"test_project\",\n            title=\"Test Project\"\n        )\n\n        thread_id = thread.id\n        logger.info(f\"Thread created with ID: {thread_id}\")\n\n        # Assert thread_id is not None\n        assert thread_id is not None, \"Thread ID should not be None\"\n        logger.debug(f\"Assertion passed: thread_id = {thread_id}\")\n\n        # Add test messages\n        test_messages = [\n            {\"role\": \"user\", \"content\": \"Hello, can you help me with my project?\"},\n            {\"role\": \"assistant\", \"content\": \"Of course! I'd be happy to help. What's your project about?\"},\n            {\"role\": \"user\", \"content\": \"It's a web application using FastAPI and React.\"},\n            {\"role\": \"assistant\", \"content\": \"Great choice! FastAPI is excellent for backend APIs.\"},\n            {\"role\": \"user\", \"content\": \"I need help with authentication setup.\"},\n        ]\n\n        for i, msg_data in enumerate(test_messages, 1):\n            message = manager.add_message(\n                thread_id=thread_id,\n                role=msg_data[\"role\"],\n                content=msg_data[\"content\"],\n                tokens=token_counter.count(msg_data[\"content\"])\n            )\n            logger.info(f\"Added message {i}/{len(test_messages)}: {message.id}\")\n\n        # Verify message count\n        messages = await manager.get_session_history(\n            thread_id, \n            current_query=\"I need help with authentication setup.\"\n        )\n        assert len(messages) == len(test_messages), \\\n            f\"Expected {len(test_messages)} messages, got {len(messages)}\"\n        logger.debug(f\"Assertion passed: {len(messages)} messages added\")\n\n        # Get thread statistics\n        stats = manager.get_thread_stats(thread_id)\n        logger.info(f\"Thread statistics: {stats.get('message_count', 0)} messages, \"\n                   f\"{stats.get('total_tokens', 0)} tokens\")\n\n        logger.success(\"Thread creation test completed successfully\")\n        return thread_id, manager\n\n    except FileNotFoundError as e:\n        logger.error(f\"Database file not found: {e}\")\n        raise\n    except ValueError as e:\n        logger.error(f\"Invalid value: {e}\")\n        raise\n    except Exception as e:\n        logger.exception(f\"Unexpected error in thread creation: {e}\")\n        raise\n```\n\n**Также нужно добавить импорт в начало файла** (после существующих импортов):\n```python\nfrom app.utils.token_counter import TokenCounter\n```"
+  },
+  "code_generator": {
+    "code_blocks": [
+      {
+        "filepath": "scripts/test_history_manager.py",
+        "language": "python",
+        "code": "sys.path.insert(0, str(project_root))",
+        "context": null
+      }
+    ],
+    "explanation": "",
+    "frontend_json": {
+      "success": true,
+      "code_blocks": [
+        {
+          "code": "sys.path.insert(0, str(project_root))",
+          "filepath": "scripts/test_history_manager.py",
+          "language": "python",
+          "context": null
+        }
+      ],
+      "combined_code": "\n\n# ==================================================# filepath: scripts/test_history_manager.py\n\nsys.path.insert(0, str(project_root))",
+      "explanation": "",
+      "error": null,
+      "model_used": "deepseek-chat",
+      "tokens_used": 0
+    }
+  }
+}

@@ -1,0 +1,1864 @@
+{
+  "root": "C:\\Users\\Admin\\AI_Assistant_Pro",
+  "created_at": "",
+  "updated_at": "2026-01-12T12:47:18.611774Z",
+  "total_files": 206,
+  "total_tokens": 994362,
+  "files": [
+    {
+      "path": "__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\advice\\__init__.py",
+      "type": "code/python",
+      "hash": "f1dd36239d2fd4e06abfbfc27b1df910",
+      "tokens": 213,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\advice\\advice_catalog.json",
+      "type": "data/json",
+      "hash": "0e3c2a5b8663b9b619d8c39cb277885a",
+      "tokens": 2060,
+      "description": "This JSON file serves as a structured catalog of methodological thinking frameworks for the AI Orchestrator's Agent Mode. It organizes advice into three categories (General Methodologies, Existing Project Patterns, New Project Architecture) with specific applicability to different operational modes (ASK or NEW_PROJECT). Each advice entry includes an ID, name, description, and clear \"when_to_use\" guidance, providing systematic approaches for tasks like bug hunting, feature integration, refactoring, security audits, and architectural design. The catalog is loaded by the `advice_loader.py` module to supply context-aware prompts and structured guidance during AI-driven code generation and analysis workflows.",
+      "is_code": false,
+      "last_updated": "2026-01-12T12:25:48.763789Z"
+    },
+    {
+      "path": "app\\advice\\advice_content.json",
+      "type": "data/json",
+      "hash": "5fd89bfca310f8f700259b58c35df8c2",
+      "tokens": 14724,
+      "description": "This file is a structured knowledge base containing expert advice for AI-assisted code development, organized into numbered guidelines with detailed frameworks. It provides systematic thinking processes for various development scenarios like bug hunting, feature integration, refactoring, security auditing, and performance optimization. The advice is designed to guide AI agents (particularly the orchestrator and generator) through complex coding tasks by offering step-by-step methodologies, tool usage priorities, and anti-pattern warnings. It serves as a reference library that the advice_loader.py module loads and caches to inject structured guidance into AI prompts during code generation and validation workflows.",
+      "is_code": false,
+      "last_updated": "2026-01-12T12:25:48.763789Z"
+    },
+    {
+      "path": "app\\advice\\advice_loader.py",
+      "type": "code/python",
+      "hash": "15140ad9572ace9cea8280a6ca5e3d9c",
+      "tokens": 4216,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-09T04:11:59.287996Z"
+    },
+    {
+      "path": "app\\agents\\__init__.py",
+      "type": "code/python",
+      "hash": "6fe3f8902269ded3d6173bb6b088bb2a",
+      "tokens": 166,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\agents\\agent_pipeline.py",
+      "type": "code/python",
+      "hash": "d77f7265c880abf1eb288cc1036de380",
+      "tokens": 37526,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-12T12:25:48.763789Z"
+    },
+    {
+      "path": "app\\agents\\code_generator.py",
+      "type": "code/python",
+      "hash": "7f505cc577f0bb21571b34b422a77fcb",
+      "tokens": 13760,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "app\\agents\\feedback_handler.py",
+      "type": "code/python",
+      "hash": "d3795f9530622b855dd4a8ed434a42ef",
+      "tokens": 9584,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-09T07:17:51.758890Z"
+    },
+    {
+      "path": "app\\agents\\feedback_loop.py",
+      "type": "code/python",
+      "hash": "ed419f5dc40766e09e368a66efa78ebc",
+      "tokens": 4905,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\agents\\feedback_prompt_loader.py",
+      "type": "code/python",
+      "hash": "13c4757f0ea4b779e48964901a5a6805",
+      "tokens": 3131,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-08T23:54:50.399100Z"
+    },
+    {
+      "path": "app\\agents\\orchestrator.py",
+      "type": "code/python",
+      "hash": "be847e1687148e21095a3c9c48d814a2",
+      "tokens": 16013,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-04T02:03:47.086993Z"
+    },
+    {
+      "path": "app\\agents\\pre_filter.py",
+      "type": "code/python",
+      "hash": "dbef13baaad5730b21748c8919c0ff33",
+      "tokens": 7312,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\agents\\router.py",
+      "type": "code/python",
+      "hash": "5e755396f2ce1b9f54f5da66420f1cb3",
+      "tokens": 6524,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-05T01:24:14.552078Z"
+    },
+    {
+      "path": "app\\agents\\validator.py",
+      "type": "code/python",
+      "hash": "efc7e3fe2207356defa08188c17cd3e0",
+      "tokens": 3581,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\builders\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\builders\\semantic_index_builder.py",
+      "type": "code/python",
+      "hash": "933820adb23fcb82cb35df0b6d0b1200",
+      "tokens": 19793,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\core\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\history\\__init__.py",
+      "type": "code/python",
+      "hash": "e07f9e2cb6cb83cc612a9419484bad34",
+      "tokens": 193,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\history\\compressor.py",
+      "type": "code/python",
+      "hash": "a10b57d14eeb71f069cf0651822420ce",
+      "tokens": 2757,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-04T22:17:45.714207Z"
+    },
+    {
+      "path": "app\\history\\context_manager.py",
+      "type": "code/python",
+      "hash": "e2d16f67247c2e33e27b98c5eaf5c79c",
+      "tokens": 5589,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\history\\manager.py",
+      "type": "code/python",
+      "hash": "c78f57675883ebd9da3e587a1276497d",
+      "tokens": 5356,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-04T22:38:00.423254Z"
+    },
+    {
+      "path": "app\\history\\orchestrator_trace.py",
+      "type": "code/python",
+      "hash": "f541ac5e90748468cc18dedd437208fc",
+      "tokens": 1525,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\history\\storage.py",
+      "type": "code/python",
+      "hash": "a40611c1351ba16100fc7a7651fca4f5",
+      "tokens": 5674,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\llm\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\llm\\api_client.py",
+      "type": "code/python",
+      "hash": "a521c206f6ef1f2b64cde72903f28f97",
+      "tokens": 7439,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "app\\llm\\prompt_templates.py",
+      "type": "code/python",
+      "hash": "b9e5090797056e7a260523c3ce9affa4",
+      "tokens": 64131,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-12T12:25:48.763789Z"
+    },
+    {
+      "path": "app\\services\\__init__.py",
+      "type": "code/python",
+      "hash": "eaff3b6c1f8682659fd84f1d0bdef2ab",
+      "tokens": 40,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\ai_client.py",
+      "type": "code/python",
+      "hash": "47ce18fe417364ce1276128f81a36c47",
+      "tokens": 1355,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\backup_manager.py",
+      "type": "code/python",
+      "hash": "44065b6afbc9ebf4d7492773e0446155",
+      "tokens": 4391,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\change_validator.py",
+      "type": "code/python",
+      "hash": "4510c6a22168a8d2a3c3908e93379144",
+      "tokens": 13441,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-08T05:06:28.354432Z"
+    },
+    {
+      "path": "app\\services\\file_io_tools.py",
+      "type": "code/python",
+      "hash": "c3610ef42cc0eba05861b06509615f8e",
+      "tokens": 2827,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\file_modifier.py",
+      "type": "code/python",
+      "hash": "6fd48a29866307d82d98d0c3a5294496",
+      "tokens": 15103,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-10T06:22:40.987473Z"
+    },
+    {
+      "path": "app\\services\\go_chunker.py",
+      "type": "code/python",
+      "hash": "0a53889c6bbacc6a6d75e4acca63b776",
+      "tokens": 2757,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\index_manager.py",
+      "type": "code/python",
+      "hash": "8f6beafe6b7dc333d5e3884440ac7dee",
+      "tokens": 6500,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\index_reader.py",
+      "type": "code/python",
+      "hash": "02f449e26d950ef869cd10e631e21032",
+      "tokens": 9575,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\index_updater.py",
+      "type": "code/python",
+      "hash": "7e8f2772cc91e6c699aff8be7a4fad14",
+      "tokens": 2492,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\json_chunker.py",
+      "type": "code/python",
+      "hash": "de039aecf2744624db81ffa912e8fe8c",
+      "tokens": 2107,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\project_map_builder.py",
+      "type": "code/python",
+      "hash": "22a36161b70d19972ad237df5401e3f3",
+      "tokens": 6437,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\project_scanner.py",
+      "type": "code/python",
+      "hash": "bbde50fd62357c7c520f447bb7b33c1a",
+      "tokens": 3416,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\python_chunker.py",
+      "type": "code/python",
+      "hash": "ceab251ebedce1322de73476f738b458",
+      "tokens": 5328,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\runtime_tester.py",
+      "type": "code/python",
+      "hash": "e9ff9e24e567c550ccd40c387e3ff459",
+      "tokens": 25018,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-12T12:47:18.611774Z"
+    },
+    {
+      "path": "app\\services\\sql_chunker.py",
+      "type": "code/python",
+      "hash": "d61da07edc6102c281e2eb6c42a68c84",
+      "tokens": 2257,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\services\\syntax_checker.py",
+      "type": "code/python",
+      "hash": "551431eb5e361e11186ecf6312842618",
+      "tokens": 5104,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-06T13:29:18.175073Z"
+    },
+    {
+      "path": "app\\services\\tree_sitter_parser.py",
+      "type": "code/python",
+      "hash": "021aeac805f8004959dbe64a84ff6d0f",
+      "tokens": 4331,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-10T06:22:40.987473Z"
+    },
+    {
+      "path": "app\\services\\virtual_fs.py",
+      "type": "code/python",
+      "hash": "51777306643810028ae888f2c2a781f9",
+      "tokens": 13685,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-07T21:54:35.846843Z"
+    },
+    {
+      "path": "app\\tools\\__init__.py",
+      "type": "code/python",
+      "hash": "451977f1849281b8aad29f259e6b73a8",
+      "tokens": 209,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\tools\\dependency_manager.py",
+      "type": "code/python",
+      "hash": "147a03a0eace930349ee32e7fe5c445a",
+      "tokens": 6988,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-05T13:20:41.364698Z"
+    },
+    {
+      "path": "app\\tools\\file_relations.py",
+      "type": "code/python",
+      "hash": "95b075bf22abaa41bc9ecc605c48731b",
+      "tokens": 2925,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-09T03:15:30.975323Z"
+    },
+    {
+      "path": "app\\tools\\general_web_search.py",
+      "type": "code/python",
+      "hash": "57f96353c37877e5fd5634a0976dd6a3",
+      "tokens": 3414,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\tools\\grep_search.py",
+      "type": "code/python",
+      "hash": "5ae506716e19da509536972f567ff717",
+      "tokens": 2525,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-08T04:08:43.968392Z"
+    },
+    {
+      "path": "app\\tools\\read_file.py",
+      "type": "code/python",
+      "hash": "0f42a44c76b0966ee927423b25baf004",
+      "tokens": 1701,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\tools\\run_project_tests.py",
+      "type": "code/python",
+      "hash": "950dc840b1ff3029166000d0eb8aa8b1",
+      "tokens": 9124,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-05T02:19:48.899011Z"
+    },
+    {
+      "path": "app\\tools\\search_code.py",
+      "type": "code/python",
+      "hash": "f3d1feaadadc621ea3b3e7772a99cb87",
+      "tokens": 3196,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-08T02:49:41.744160Z"
+    },
+    {
+      "path": "app\\tools\\tool_definitions.py",
+      "type": "code/python",
+      "hash": "324b82683f5117c34e57eeaed6127e46",
+      "tokens": 4087,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-09T03:15:30.975323Z"
+    },
+    {
+      "path": "app\\tools\\tool_executor.py",
+      "type": "code/python",
+      "hash": "31fc2b33f06d4cb552f32fb702e2b5ba",
+      "tokens": 3335,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-09T03:15:30.975323Z"
+    },
+    {
+      "path": "app\\tools\\web_search.py",
+      "type": "code/python",
+      "hash": "f7bde78ca61d36f669077ca9d883001f",
+      "tokens": 4291,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\compact_index.py",
+      "type": "code/python",
+      "hash": "6bfc43c44ed860653d62205fc786b07f",
+      "tokens": 1637,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\file_parser.py",
+      "type": "code/python",
+      "hash": "26f3784ccad776fef44f0e941920c5cc",
+      "tokens": 1543,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\file_types.py",
+      "type": "code/python",
+      "hash": "d2eda19dfdef0a1346d62481532bec9b",
+      "tokens": 517,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\pipeline_trace_logger.py",
+      "type": "code/python",
+      "hash": "6e6f432e394c3d383bf8830a16a1eee8",
+      "tokens": 3200,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\token_counter.py",
+      "type": "code/python",
+      "hash": "79c502fbc97031edd20163079161174a",
+      "tokens": 191,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\translator.py",
+      "type": "code/python",
+      "hash": "2d1570c7406f5f0c6865b80d9bc14296",
+      "tokens": 3334,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\validation_logger.py",
+      "type": "code/python",
+      "hash": "58234c948e066293d54a8006e00d2a9b",
+      "tokens": 2255,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\xml_parser.py",
+      "type": "code/python",
+      "hash": "e10a20ce27e072974d800bf723aeaac8",
+      "tokens": 3770,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\utils\\xml_wrapper.py",
+      "type": "code/python",
+      "hash": "5a4794a98ee00253e8b44c358660582e",
+      "tokens": 7448,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "certs\\russian_trusted_root_ca_pem.crt",
+      "type": "other",
+      "hash": "a867ca37a72362c5318716f682f8c7e4",
+      "tokens": 1424,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "change_detection_test.log",
+      "type": "other",
+      "hash": "4d21278c2b27db3488ad608f1fcb4a49",
+      "tokens": 949,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "check_models.py",
+      "type": "code/python",
+      "hash": "9d6a21835174f189f30db76526ff4532",
+      "tokens": 156,
+      "description": "Utility module with minimal significant logic.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "chunks_index.json",
+      "type": "data/json",
+      "hash": "0aee55d1e0a4992ace8be57d818fe90a",
+      "tokens": 103446,
+      "description": "File exceeds 30000 tokens",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "config\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens": 0,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "config\\framework_registry.json",
+      "type": "data/json",
+      "hash": "37106f7fee5c7ede1d2f5a613bb8c8ff",
+      "tokens": 1847,
+      "description": "This file is a comprehensive registry of Python frameworks and libraries organized by category, serving as a reference for the AI assistant's code generation and analysis capabilities. It maps import names to human-readable descriptions across categories including GUI, TUI, database, network, web, daemon, CLI, testing, data science, and miscellaneous utilities. This registry helps the system identify and properly handle different types of dependencies when analyzing codebases or generating new code with appropriate framework integrations.",
+      "is_code": false,
+      "last_updated": "2026-01-06T22:27:05.440831Z"
+    },
+    {
+      "path": "config\\settings.py",
+      "type": "code/python",
+      "hash": "16b504d33f84eec718793f4f573e4d7f",
+      "tokens": 6598,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-12T12:25:48.763789Z"
+    },
+    {
+      "path": "debug_cert.py",
+      "type": "code/python",
+      "hash": "2faf1930bc098791e57ea9b884147178",
+      "tokens": 451,
+      "description": "Utility module with minimal significant logic.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "examples\\test_index\\nested_example.py",
+      "type": "code/python",
+      "hash": "dd317a2dec57eeeeaed2e4a435435a45",
+      "tokens": 276,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "examples\\test_index\\simple_module.py",
+      "type": "code/python",
+      "hash": "0dd7928dd9c01dc1c3b7bca3190a73b1",
+      "tokens": 570,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "examples\\test_index\\utils.py",
+      "type": "code/python",
+      "hash": "10b790311cc50502e3a1e7f221f997fa",
+      "tokens": 215,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_204321.json",
+      "type": "data/json",
+      "hash": "365231c66397dd38bf9c69339ce25748",
+      "tokens": 1462,
+      "description": "This JSON file stores the results of a code generation model comparison test, capturing performance metrics for three AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5) across four test cases in ASK and AGENT modes. It records detailed outcomes including success/failure status, execution duration, code output statistics, missing elements, and specific errors for each model-test combination. The file serves as a structured test report that helps evaluate model effectiveness for code generation tasks within the project's AI pipeline testing framework.",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_212553.json",
+      "type": "data/json",
+      "hash": "3461d035c398033b7c1370547ea5cb0e",
+      "tokens": 1257,
+      "description": "This JSON file stores the results of a code generator performance test comparing three AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5) across four test cases in ASK and AGENT modes. It records detailed metrics for each model-test combination including success status, execution duration, code blocks generated, lines of code produced, and any errors. The file serves as a structured performance log for evaluating AI model effectiveness in code generation tasks, with summary statistics that enable comparative analysis of model speed and output characteristics.",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_214141.json",
+      "type": "data/json",
+      "hash": "0f1c4da539f859f47506e60d5dc73820",
+      "tokens": 2029,
+      "description": "This file is a test results log from a code generator performance evaluation. It records the outcomes of testing three AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5) across seven different code generation scenarios in both ASK and AGENT modes. The log captures detailed metrics including success status, execution duration, code block counts, and lines generated for each test case, with a summary section comparing overall performance. This data supports model selection decisions in the AI-assisted development pipeline by providing empirical evidence of each model's speed and reliability for different coding tasks.",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_221039.json",
+      "type": "data/json",
+      "hash": "b508d5f318e09f162e3e1a44368ca38f",
+      "tokens": 2028,
+      "description": "This JSON file is a test results log from a code generator model evaluation suite. It records performance metrics for three AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5) across seven test cases covering both ASK and AGENT modes of code generation. The file contains detailed timing data, success status, code output statistics, and a comparative summary showing Claude Haiku 4.5 as the fastest performer while all models passed all tests. This log appears to be output from the `test_generator_models.py` script, providing empirical data for model selection in the AI code generation pipeline.",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_223137.json",
+      "type": "data/json",
+      "hash": "1d7d66868db06bbc29b3ab3765d26872",
+      "tokens": 2028,
+      "description": "This JSON file is a test results log from a code generator performance evaluation. It records the outcomes of testing three AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5) across seven different code generation scenarios in both ASK and AGENT modes. The file contains detailed metrics for each test case including success status, execution duration, code blocks generated, lines of code produced, and any errors encountered. The summary section provides aggregated performance statistics, showing that all models passed all tests with Claude Haiku 4.5 being the fastest on average while generating the most total lines of code.",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_results_20260103_231832.json",
+      "type": "data/json",
+      "hash": "5447367b524067aa2285ed544e714391",
+      "tokens": 2683,
+      "description": "This JSON file is a test results log from a code generator performance evaluation. It records the outcomes of testing four AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash) across seven different code generation scenarios in both ASK and AGENT modes. The file contains detailed metrics for each test case including success status, execution duration, code blocks generated, lines of code produced, and any errors. The summary section aggregates performance statistics, showing that all models passed all tests with Claude Haiku and Gemini being significantly faster on average.",
+      "is_code": false,
+      "last_updated": "2026-01-03T21:02:42.607811Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_203837.log",
+      "type": "other",
+      "hash": "59f1e7e320d2aa4299dd9b72ae3fe13b",
+      "tokens": 1730,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_204321.log",
+      "type": "other",
+      "hash": "c9f5afa0c6846a8090995b6196867d07",
+      "tokens": 4326,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_212553.log",
+      "type": "other",
+      "hash": "9197a7671b5e9950f5d723ab7e05a111",
+      "tokens": 5843,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_214141.log",
+      "type": "other",
+      "hash": "efb8705885ac5d275b42fca9e0f92921",
+      "tokens": 10546,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_221039.log",
+      "type": "other",
+      "hash": "474d4915982e7b331c02e68d9a034f8d",
+      "tokens": 10480,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_223137.log",
+      "type": "other",
+      "hash": "a0768d0d01dcf97e13c77e6d92969cca",
+      "tokens": 22478,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\generator_tests\\generator_test_20260103_231832.log",
+      "type": "other",
+      "hash": "5f43cac74e68e42142533adca4c3ea6e",
+      "tokens": 28868,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T21:02:42.607811Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_114857.log",
+      "type": "other",
+      "hash": "39b3309915fe6048d0db2b2c53e9a788",
+      "tokens": 1849,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_124603.log",
+      "type": "other",
+      "hash": "a6d3cb5103fe321f3d92e40a9e3305f1",
+      "tokens": 1100,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_140817.log",
+      "type": "other",
+      "hash": "ae11dca02464d06639b2397d32e3f23b",
+      "tokens": 1999,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_143026.log",
+      "type": "other",
+      "hash": "83c0d0f9242c6b8a7151cac61021f40d",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_153744.log",
+      "type": "other",
+      "hash": "c5f0d8de2155a6481ed8e4aab3b716a2",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_153905.log",
+      "type": "other",
+      "hash": "8f38f269f6f661f49bf453dff92a1161",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_154743.log",
+      "type": "other",
+      "hash": "6afe19537f76f26e587f477427023ab3",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251212_154851.log",
+      "type": "other",
+      "hash": "d32a2d71a85d6ec85408af28ac823e13",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251213_105050.log",
+      "type": "other",
+      "hash": "1f4e1c4a3a602db3554b5ad0e573e6ab",
+      "tokens": 3777,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251213_111317.log",
+      "type": "other",
+      "hash": "7e1c32416a662b04a0682ccb715ea102",
+      "tokens": 1080,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251213_111747.log",
+      "type": "other",
+      "hash": "c9a256c3dc1b679c321da1118ce22c86",
+      "tokens": 1083,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_041600.log",
+      "type": "other",
+      "hash": "92b814cc134c34062af3b27ef8114bba",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_044257.log",
+      "type": "other",
+      "hash": "8fdf22d37773e406bc7193bab5e27758",
+      "tokens": 1121,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_051127.log",
+      "type": "other",
+      "hash": "89b24e8b6050353d2d053fa4f827b3e8",
+      "tokens": 1006,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_051616.log",
+      "type": "other",
+      "hash": "7ef80d7d5202f15ba81a3f7c84448b58",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_192419.log",
+      "type": "other",
+      "hash": "4e6b5bfae049da03723de6890825c475",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_194439.log",
+      "type": "other",
+      "hash": "edd7d89e964155eb5ded452a18ffc1ff",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_195533.log",
+      "type": "other",
+      "hash": "db6882cd2c29822b4c26647010724301",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_221352.log",
+      "type": "other",
+      "hash": "4a62a435e7408148843168b6f00e7daf",
+      "tokens": 975,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_225829.log",
+      "type": "other",
+      "hash": "018b434375417daa58ec0bddd26237ac",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_231011.log",
+      "type": "other",
+      "hash": "981c35d5cc4ebe0f7b7a2a6ef2e73eda",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_234411.log",
+      "type": "other",
+      "hash": "d428015d81ef3a632679267450f94496",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251214_235612.log",
+      "type": "other",
+      "hash": "24f6cfd4e2141316f057bde2405b70c6",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_000952.log",
+      "type": "other",
+      "hash": "b0a0dc6d980abe638a025979d0483e50",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_002411.log",
+      "type": "other",
+      "hash": "8801151830ec07d3275d0f4c55f09326",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_003335.log",
+      "type": "other",
+      "hash": "834c27737f8531ceba1612dacbd0681c",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_004003.log",
+      "type": "other",
+      "hash": "4a4f99bf43cc5b7522d29162ca597159",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_005536.log",
+      "type": "other",
+      "hash": "3dc3393c315822a26d33d0331f3fbe13",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_010232.log",
+      "type": "other",
+      "hash": "f2c21e9336a69a58e9ee733c64f43f9b",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_012318.log",
+      "type": "other",
+      "hash": "67a52ca9cb195dd2ffeb313be7c44704",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_013458.log",
+      "type": "other",
+      "hash": "3169c979fd0a3f072a6d0d9703c75493",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_015054.log",
+      "type": "other",
+      "hash": "9ce7055aea99405548989b390c2f46d1",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_020428.log",
+      "type": "other",
+      "hash": "d1bd80dc9a45e1ed30032a0f13b0b255",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_021231.log",
+      "type": "other",
+      "hash": "995be12333b38096e3b1108e14933e93",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_023506.log",
+      "type": "other",
+      "hash": "b46c398c7e9ff2c78911ee80b5f1dc6f",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_024557.log",
+      "type": "other",
+      "hash": "0267bbcaa7c967bef0b7cbe02313c2ad",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_025623.log",
+      "type": "other",
+      "hash": "5de6b09d8f4f4158d724dda2d68fee61",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_031200.log",
+      "type": "other",
+      "hash": "4ec61c5eab146a1e41b6687215fd8964",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_183321.log",
+      "type": "other",
+      "hash": "d2f1a11d7c3939fc75d8e5850035f3c2",
+      "tokens": 1083,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_200134.log",
+      "type": "other",
+      "hash": "e6c19c668e10ecaba3657d678e5adb8e",
+      "tokens": 926,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_211630.log",
+      "type": "other",
+      "hash": "c13bc2a50508dfdb7ead399241106320",
+      "tokens": 965,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251215_220201.log",
+      "type": "other",
+      "hash": "10c3bc3a29cd45e696aba8c9fd95e8b6",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251217_140011.log",
+      "type": "other",
+      "hash": "c3f8b2ec98f05816dd174498b2af3533",
+      "tokens": 995,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251217_142258.log",
+      "type": "other",
+      "hash": "8e0f820c722e837b9aa70ad346e61e34",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251217_160134.log",
+      "type": "other",
+      "hash": "518eb0b25556126f7dd8183e0a27984b",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251217_174940.log",
+      "type": "other",
+      "hash": "9fad44df8b3f5874c1f61f6eb5fafaa0",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251217_224730.log",
+      "type": "other",
+      "hash": "f025513b892814e9eec22d9cf66a5ff8",
+      "tokens": 964,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251219_000906.log",
+      "type": "other",
+      "hash": "2e40c7731cb1a2179f78872dcbd08771",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251220_060403.log",
+      "type": "other",
+      "hash": "cb8cde43d060bb33c836d62088dbae1a",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251220_070437.log",
+      "type": "other",
+      "hash": "b3976f68144a939cea1eaf343c54f760",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251221_011404.log",
+      "type": "other",
+      "hash": "e60d32deae13b8aac2f3f1765978079f",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251221_024001.log",
+      "type": "other",
+      "hash": "761066b5dee19fd89fc2e94b82537e32",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251221_050938.log",
+      "type": "other",
+      "hash": "f3eb96ba25ac035e3e91ee77d27bc04e",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251222_152745.log",
+      "type": "other",
+      "hash": "164d5af012f945368bfb8fd96600c981",
+      "tokens": 1061,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251228_055331.log",
+      "type": "other",
+      "hash": "a4a83e0dee50783ff3d08cefa858353f",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251228_072618.log",
+      "type": "other",
+      "hash": "d5974be4da6b6eb0aa23361908e0f219",
+      "tokens": 1032,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251228_080028.log",
+      "type": "other",
+      "hash": "4d01fc9d0d249d6edb7c393562595874",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251228_090804.log",
+      "type": "other",
+      "hash": "84f4a12323ab4b7c6768191aad43cf23",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251228_183505.log",
+      "type": "other",
+      "hash": "e81722e457047ae2eb1f83e1c663cc20",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251229_001858.log",
+      "type": "other",
+      "hash": "d874c93a16f45ff6b9b059f8fcbdee13",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251229_022617.log",
+      "type": "other",
+      "hash": "95411c264bfd9eae1a7e659b2a189171",
+      "tokens": 995,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251230_141330.log",
+      "type": "other",
+      "hash": "001f95789f3f94db9393ff242c8391d3",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251230_142508.log",
+      "type": "other",
+      "hash": "73cf2ed76e24869547506f137d4b76b8",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251230_152739.log",
+      "type": "other",
+      "hash": "0d7a2aee6dc98683e7bdc605c8276fd3",
+      "tokens": 955,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251231_032236.log",
+      "type": "other",
+      "hash": "183d4c64381f7a480103434aa648c074",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20251231_221207.log",
+      "type": "other",
+      "hash": "e362642fbe6f6f5c0163bf2ce3731382",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260101_024257.log",
+      "type": "other",
+      "hash": "9410dde3e31a3a6ef5cf5b795cbe4ca0",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260101_043803.log",
+      "type": "other",
+      "hash": "1da8fd03dbe400b86e3b86419978d8e5",
+      "tokens": 972,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260101_060003.log",
+      "type": "other",
+      "hash": "cafcab286007d8d97ddbd78ef346f097",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260101_073013.log",
+      "type": "other",
+      "hash": "25a47c9b8e9a9b4fd8639367783e342e",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260102_210614.log",
+      "type": "other",
+      "hash": "8e99e884087785c3b8c3f501421b7d62",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_060329.log",
+      "type": "other",
+      "hash": "6805cd7a0d7b70ecd2370e7a06f1b2b1",
+      "tokens": 1075,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_060629.log",
+      "type": "other",
+      "hash": "3e9652c7b50f631753a43142234c70a9",
+      "tokens": 945,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_060828.log",
+      "type": "other",
+      "hash": "487827004ac90753ee66588513ca8cf1",
+      "tokens": 1265,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T05:07:18.460017Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_080718.log",
+      "type": "other",
+      "hash": "21b0688b9fa8b9b8664722a66e92377e",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T16:41:31.111076Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_194131.log",
+      "type": "other",
+      "hash": "5a7e6b4bbb478820449fe424176d4f1a",
+      "tokens": 941,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T20:07:23.152921Z"
+    },
+    {
+      "path": "logs\\index_test_20260103_230723.log",
+      "type": "other",
+      "hash": "e1953e61f34fcf06886dca859e663398",
+      "tokens": 1121,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T21:02:42.607811Z"
+    },
+    {
+      "path": "logs\\test_run_20251210_200903.log",
+      "type": "other",
+      "hash": "f39ef6cdb795fe7bc809bf6c0d926c45",
+      "tokens": 98,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "main.py",
+      "type": "code/python",
+      "hash": "3e5447aced98265d8d3033a993b534cc",
+      "tokens": 61829,
+      "description": "CLI application framework with custom navigation exceptions and structured logging, integrating state management and user input handling for menu-driven workflows.",
+      "is_code": true,
+      "last_updated": "2026-01-10T05:57:58.533575Z"
+    },
+    {
+      "path": "mainsertif.py",
+      "type": "code/python",
+      "hash": "5b3777823d2a01847cdc922b423c69b5",
+      "tokens": 2232,
+      "description": "Unified diagnostic script for testing connectivity and performance of multiple AI model APIs (OpenAI-compatible, GigaChat, OpenRouter, DeepSeek) with automated certificate management and error logging.",
+      "is_code": true,
+      "last_updated": "2026-01-03T16:41:31.111076Z"
+    },
+    {
+      "path": "maintestchunk .py",
+      "type": "code/python",
+      "hash": "b667562b8fff61e672a6645761105807",
+      "tokens": 4249,
+      "description": "Full system test for code chunking and project analysis that integrates scanning, tokenization, and rich visualization tools for detailed reporting.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "requirements.txt",
+      "type": "text/txt",
+      "hash": "2b51d89fdf3a6c0ab99ee1ff970b2282",
+      "tokens": 267,
+      "description": "This file is the project's Python dependency manifest (`requirements.txt`) that specifies all third-party packages needed for the AI assistant system. It configures the runtime environment with libraries for AI model integration (OpenAI, GigaChat), token counting (tiktoken), configuration management (pydantic, python-dotenv), console output formatting (rich), HTTP clients (httpx, aiohttp), file processing (pypdf, python-docx, pandas), code analysis (tree-sitter, mypy, autopep8), and asynchronous operations. The dependencies enable core functionalities like multi-provider LLM communication, structured data validation, semantic code parsing, document handling, and rich user interfaces across the application modules.",
+      "is_code": false,
+      "last_updated": "2026-01-04T01:44:52.263845Z"
+    },
+    {
+      "path": "scripts\\test_advice_system — копия.py",
+      "type": "code/python",
+      "hash": "412081432a2e8a3d4b3eb875e1f164be",
+      "tokens": 5612,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_advice_system.py",
+      "type": "code/python",
+      "hash": "75f4bf9e7ac120509acfb42d7508de53",
+      "tokens": 6150,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_agent_foundation.py",
+      "type": "code/python",
+      "hash": "c9af79eed774c418f83968bc2926182c",
+      "tokens": 17710,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_agent_stage2.py",
+      "type": "code/python",
+      "hash": "d2b6e844332093d7f897ea688df66142",
+      "tokens": 17273,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_agent_stage3.py",
+      "type": "code/python",
+      "hash": "b5b2538cc2a75ce102fc027dc7a39fc9",
+      "tokens": 8181,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_agents.py",
+      "type": "code/python",
+      "hash": "3c718d9d56ff6e2a5c3f13cc130fe0a2",
+      "tokens": 16428,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_context_compression.py",
+      "type": "code/python",
+      "hash": "bbe67bb69915f96d41e2251a65fbdc96",
+      "tokens": 6064,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_deepseek_wrapper.py",
+      "type": "code/python",
+      "hash": "b49629eb2e4af20e966b635428631337",
+      "tokens": 1417,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_file_modifier_indentation.py",
+      "type": "code/python",
+      "hash": "5150fec7560da9f153a3df9b8fb9d232",
+      "tokens": 22879,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_general_chat.py",
+      "type": "code/python",
+      "hash": "f323a15cb3de6d0e73a8b6b872141170",
+      "tokens": 1872,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_general_chat_with_history.py",
+      "type": "code/python",
+      "hash": "e5073ccc1fbd34cd5c914996df4aa6fa",
+      "tokens": 8280,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_generator_models.py",
+      "type": "code/python",
+      "hash": "faf36966cfb09d633a272b6e7866dd2d",
+      "tokens": 9621,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T21:02:42.607811Z"
+    },
+    {
+      "path": "scripts\\test_history_manager.py",
+      "type": "code/python",
+      "hash": "4aa37047644d177b4e6debcaad277a39",
+      "tokens": 5294,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_indent_normalization.py",
+      "type": "code/python",
+      "hash": "c0b6f709359ccca822da9cf8c7d375e4",
+      "tokens": 14743,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_index_manager.py",
+      "type": "code/python",
+      "hash": "366be78f30aae56473dfd180c1a41ee5",
+      "tokens": 8339,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_orchestrator_raw.py",
+      "type": "code/python",
+      "hash": "2a1907d0e7b23ecb5f4134bcd02b241d",
+      "tokens": 6154,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_run_project_tests.py",
+      "type": "code/python",
+      "hash": "96049772c993f09c37629e9a5d074d4d",
+      "tokens": 11022,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_runtime_tester_integration.py",
+      "type": "code/python",
+      "hash": "c9521d28ab3c98a8174e581d1525c5f5",
+      "tokens": 8636,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_semantic_index.py",
+      "type": "code/python",
+      "hash": "c7ae9a67fca127964a6f3b9690394017",
+      "tokens": 10118,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\test_validation_pipeline.py",
+      "type": "code/python",
+      "hash": "d5fad40892353335022d74093179e7cf",
+      "tokens": 3945,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "scripts\\Проанализируй файл answer_generator.py.md",
+      "type": "text/md",
+      "hash": "7a2a993eae497a3767e4b3cb94ba2f47",
+      "tokens": 108,
+      "description": "This is a task specification file (in Russian) that provides instructions for analyzing the `answer_generator.py` file and related files in a different project directory. It requests an implementation of asynchronous text filtering for articles while preserving the existing filtering logic, asking for both code and explanations. The file serves as a development directive or analysis request rather than containing functional code within the current project.",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "temp_test.py",
+      "type": "code/python",
+      "hash": "0705c2678af22197493e8930df1a92ba",
+      "tokens": 12,
+      "description": "Unit test script for verifying basic console output functionality, integrates with pytest for automated testing.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test.py",
+      "type": "code/python",
+      "hash": "6cc1e843e60469d084d601254d3c0620",
+      "tokens": 2468,
+      "description": "Asynchronous test suite for OpenRouter AI model availability and performance, integrating httpx for HTTP requests and asyncio for concurrency and delay management.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_all_chunkers.py",
+      "type": "code/python",
+      "hash": "3022e25771b920f673ce3d0e1fbf7bfa",
+      "tokens": 1372,
+      "description": "Unit test suite for validating language-specific code chunkers (Python, Go, SQL) using SmartChunker classes and Rich library for structured console output.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_cache_logic.py",
+      "type": "code/python",
+      "hash": "aa8e6f8cb7f37e84dfd32cd3238d7803",
+      "tokens": 375,
+      "description": "Unit test suite validating response caching behavior for AI tool interactions, specifically verifying cache_control integration for Claude models processing resource-intensive operations.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_caching_real.py",
+      "type": "code/python",
+      "hash": "886d81ff0afdeab1b3a02a5cb5f8edff",
+      "tokens": 701,
+      "description": "Unit test for caching behavior in LLM tool calls, integrating with orchestration and tool-calling frameworks to validate cache control interception and cleanup.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_deepseek_direct.py",
+      "type": "code/python",
+      "hash": "aaaab9a3cd1f257c218afed18ff97257",
+      "tokens": 165,
+      "description": "Unit test for DeepSeek API integration, validating configuration and response parsing for the 'pre_filter' role.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_index_builder.py",
+      "type": "code/python",
+      "hash": "a7dbdddd394a70445cb37af3ab8cec00",
+      "tokens": 5828,
+      "description": "Unit test suite for validating the project index builder's core functions, including directory selection, project creation, structure verification, and JSON metadata generation.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "test_prefilter_minimal.py",
+      "type": "code/python",
+      "hash": "3d2ee5a84c83aa8cd879afc31eb88c6f",
+      "tokens": 429,
+      "description": "Unit test for a minimal LLM pre-filter workflow, validating model configuration and JSON response generation via call_llm with performance timing.",
+      "is_code": true,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "token_stats.json",
+      "type": "data/json",
+      "hash": "566ef13044ad359086b8db0015fee68a",
+      "tokens": 177,
+      "description": "This JSON file stores aggregated token statistics for the entire project, providing a quantitative overview of codebase composition. It tracks total files and tokens broken down by language (Python vs. non-Python) and by specific file types (code, text, data). The statistics help monitor project size and distribution, likely used for context management, token budgeting, or performance analysis within the AI-assisted development system.",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "validation_test.log",
+      "type": "other",
+      "hash": "26ff302aabc19f17f81b674e657c20da",
+      "tokens": 2147,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "современная структура.md",
+      "type": "text/md",
+      "hash": "376addf593e961931319a99a040db0bd",
+      "tokens": 2828,
+      "description": "This file is a project structure overview document that provides a high-level map of the AI_Assistant_Pro codebase. It lists and briefly describes the purpose of key directories and files, highlighting their roles in the AI-powered code generation and analysis system. The document serves as a quick reference for developers, noting which components are functional, temporarily broken, or deprecated, and clarifies the relationships between modules like agents, services, and tools. It helps orient new contributors to the project's architecture and operational status.",
+      "is_code": false,
+      "last_updated": "2026-01-08T02:49:41.744160Z"
+    }
+  ],
+  "errors": []
+}

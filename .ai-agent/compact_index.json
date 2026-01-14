@@ -1,0 +1,633 @@
+{
+  "version": "1.2",
+  "updated_at": "2026-01-12T12:47:17.920771+00:00",
+  "root_path": "C:\\Users\\Admin\\AI_Assistant_Pro",
+  "total_files": 104,
+  "total_tokens": 688906,
+  "files": [
+    {
+      "name": "__init__.py",
+      "path": "__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/advice/__init__.py",
+      "tokens": 213,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "advice_loader.py",
+      "path": "app/advice/advice_loader.py",
+      "tokens": 4216,
+      "description": "Advice data management system for loading, caching, and querying structured advice from JSON files, providing formatted catalogs for prompt generation and on-demand content retrieval."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/agents/__init__.py",
+      "tokens": 166,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "agent_pipeline.py",
+      "path": "app/agents/agent_pipeline.py",
+      "tokens": 37526,
+      "description": "Multi-stage AI code generation pipeline with orchestrator-driven feedback loops, integrating virtual filesystem staging and multi-level validation (syntax, AI, tests)."
+    },
+    {
+      "name": "code_generator.py",
+      "path": "app/agents/code_generator.py",
+      "tokens": 13760,
+      "description": "Code generation and validation engine for ASK mode, integrating structured code blocks, automated error correction, and retry logic with frontend display support."
+    },
+    {
+      "name": "feedback_handler.py",
+      "path": "app/agents/feedback_handler.py",
+      "tokens": 9584,
+      "description": "Feedback orchestration system for processing and prioritizing diverse feedback types (user, validator, test, staging) with structured metadata and integration into decision-making workflows."
+    },
+    {
+      "name": "feedback_loop.py",
+      "path": "app/agents/feedback_loop.py",
+      "tokens": 4905,
+      "description": "State management and orchestration for iterative AI validation cycles, integrating validation attempts, feedback handling, orchestrator revisions, and test run tracking."
+    },
+    {
+      "name": "feedback_prompt_loader.py",
+      "path": "app/agents/feedback_prompt_loader.py",
+      "tokens": 3131,
+      "description": "Singleton-managed lazy loader for structured feedback handling prompts, enabling thread-safe retrieval and session reset in code generation systems."
+    },
+    {
+      "name": "orchestrator.py",
+      "path": "app/agents/orchestrator.py",
+      "tokens": 16013,
+      "description": "Core orchestration engine for managing multi-step LLM workflows with tool execution, file processing, and usage tracking, integrating with LLM models, search tools, and token-limited batch operations."
+    },
+    {
+      "name": "pre_filter.py",
+      "path": "app/agents/pre_filter.py",
+      "tokens": 7312,
+      "description": "Pre-filtering module for selecting and prioritizing relevant code chunks from a semantic index based on a user query and token budget, integrating with LLM ranking and file extraction utilities."
+    },
+    {
+      "name": "router.py",
+      "path": "app/agents/router.py",
+      "tokens": 6524,
+      "description": "AI model router for classifying coding tasks by complexity and risk, then routing them to appropriate orchestrator models with fallback and logging."
+    },
+    {
+      "name": "validator.py",
+      "path": "app/agents/validator.py",
+      "tokens": 3581,
+      "description": "AI validation system for code generation that processes validation requests through AI models with structured feedback, integrating with token counting, logging, and LLM orchestration."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/builders/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "semantic_index_builder.py",
+      "path": "app/builders/semantic_index_builder.py",
+      "tokens": 19793,
+      "description": "Semantic indexing pipeline for source code analysis, integrating LLM-based metadata extraction with structured data models for dependency tracking and performance monitoring."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/core/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/history/__init__.py",
+      "tokens": 193,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "compressor.py",
+      "path": "app/history/compressor.py",
+      "tokens": 2757,
+      "description": "LLM-based message history compression module with dynamic token thresholding, code block preservation, and irrelevant context pruning for conversational AI systems."
+    },
+    {
+      "name": "context_manager.py",
+      "path": "app/history/context_manager.py",
+      "tokens": 5589,
+      "description": "Context compression manager for LLM sessions, handling proactive and reactive compression strategies with model-specific caching and error detection."
+    },
+    {
+      "name": "manager.py",
+      "path": "app/history/manager.py",
+      "tokens": 5356,
+      "description": "History management service for dialog systems, handling storage, compression, display, and tracing via integration with HistoryStorage, OrchestratorTraceStorage, and compression modules."
+    },
+    {
+      "name": "orchestrator_trace.py",
+      "path": "app/history/orchestrator_trace.py",
+      "tokens": 1525,
+      "description": "Centralized SQLite-based trace management for orchestrator workflow steps, enabling detailed bilingual logging and session-integrated serialization."
+    },
+    {
+      "name": "storage.py",
+      "path": "app/history/storage.py",
+      "tokens": 5674,
+      "description": "SQLite-based storage manager for conversation threads, messages, and agent file changes, integrating JSON metadata serialization and persistent data handling."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/llm/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "api_client.py",
+      "path": "app/llm/api_client.py",
+      "tokens": 7439,
+      "description": "Universal LLM client with multi-provider support, automatic routing, and standardized request/response handling for external AI service integration."
+    },
+    {
+      "name": "prompt_templates.py",
+      "path": "app/llm/prompt_templates.py",
+      "tokens": 64131,
+      "description": "Centralized prompt template generator for multi-agent AI workflows, dynamically adapting instructions based on model cognitive type classification and operational mode (ASK/NEW PROJECT/AGENT)."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/services/__init__.py",
+      "tokens": 40,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "ai_client.py",
+      "path": "app/services/ai_client.py",
+      "tokens": 1355,
+      "description": "Unified LLM API client with OpenAI-compatible interface for configurable model selection and structured response handling across multiple providers."
+    },
+    {
+      "name": "backup_manager.py",
+      "path": "app/services/backup_manager.py",
+      "tokens": 4391,
+      "description": "Manages file backup sessions with metadata serialization, integrating filesystem operations and JSON storage for session persistence and cleanup."
+    },
+    {
+      "name": "change_validator.py",
+      "path": "app/services/change_validator.py",
+      "tokens": 13441,
+      "description": "Multi-level code change validator integrated with VirtualFileSystem, supporting syntax, import, type, integration, runtime, and test validation with configurable rules and detailed issue reporting."
+    },
+    {
+      "name": "file_io_tools.py",
+      "path": "app/services/file_io_tools.py",
+      "tokens": 2827,
+      "description": "File I/O toolkit with token-aware chunking and XML-wrapping for AI document processing, integrating read/write operations with automatic type detection and syntax validation."
+    },
+    {
+      "name": "file_modifier.py",
+      "path": "app/services/file_modifier.py",
+      "tokens": 15103,
+      "description": "File modification engine for structured code changes using Tree-sitter parsing, supporting insert/replace/append operations with instruction-based targeting and result tracking."
+    },
+    {
+      "name": "go_chunker.py",
+      "path": "app/services/go_chunker.py",
+      "tokens": 2757,
+      "description": "Go source code parser for hierarchical semantic segmentation, outputs structured chunks and aggregated context for indexing or AI model consumption."
+    },
+    {
+      "name": "index_manager.py",
+      "path": "app/services/index_manager.py",
+      "tokens": 6500,
+      "description": "Core index management system for AI-powered code analysis projects, providing full/incremental indexing with semantic compression and statistical monitoring."
+    },
+    {
+      "name": "index_reader.py",
+      "path": "app/services/index_reader.py",
+      "tokens": 9575,
+      "description": "Semantic index query engine for Python codebases with configurable detail levels, fuzzy search, and CLI integration for structured metadata retrieval."
+    },
+    {
+      "name": "index_updater.py",
+      "path": "app/services/index_updater.py",
+      "tokens": 2492,
+      "description": "Semantic index updater for codebases using Qwen via OpenRouter API, processes changed files into XML chunks and updates a JSON-based semantic index with structured analysis."
+    },
+    {
+      "name": "json_chunker.py",
+      "path": "app/services/json_chunker.py",
+      "tokens": 2107,
+      "description": "Token-aware JSON file chunker for LLM context management, integrating adaptive splitting strategies with distributed processing metadata."
+    },
+    {
+      "name": "project_map_builder.py",
+      "path": "app/services/project_map_builder.py",
+      "tokens": 6437,
+      "description": "Project map builder for structured codebase analysis with AI-generated file descriptions, integrating semantic indexing and incremental updates for efficient change tracking."
+    },
+    {
+      "name": "project_scanner.py",
+      "path": "app/services/project_scanner.py",
+      "tokens": 3416,
+      "description": "Recursive directory scanner that builds a JSON project map with file hashes and token counts, supporting incremental sync and language-specific chunking."
+    },
+    {
+      "name": "python_chunker.py",
+      "path": "app/services/python_chunker.py",
+      "tokens": 5328,
+      "description": "AST-based Python source code analyzer that generates both flat chunk lists and hierarchical tree structures for modular code segmentation, supporting contextual assembly and tree navigation for AI processing."
+    },
+    {
+      "name": "runtime_tester.py",
+      "path": "app/services/runtime_tester.py",
+      "tokens": 25018,
+      "description": "Runtime testing framework with dynamic timeout calculation and framework-specific execution strategies, integrating project analysis, framework detection, and result summarization for multi-application testing."
+    },
+    {
+      "name": "sql_chunker.py",
+      "path": "app/services/sql_chunker.py",
+      "tokens": 2257,
+      "description": "SQL statement chunker with regex-based classification for DDL/DML operations, integrates token counting and line tracking for structured file segmentation."
+    },
+    {
+      "name": "syntax_checker.py",
+      "path": "app/services/syntax_checker.py",
+      "tokens": 5104,
+      "description": "Syntax validation and auto-correction engine for Python and JSON code, integrating with autopep8 and Black for formatting."
+    },
+    {
+      "name": "tree_sitter_parser.py",
+      "path": "app/services/tree_sitter_parser.py",
+      "tokens": 4331,
+      "description": "Fault-tolerant Python AST parser using Tree-sitter that extracts classes, functions, and imports into structured data classes for code analysis and transformation."
+    },
+    {
+      "name": "virtual_fs.py",
+      "path": "app/services/virtual_fs.py",
+      "tokens": 13685,
+      "description": "Virtual file system manager for staging, analyzing, and committing file changes with dependency tracking and integrated backup/history for rollback support."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/tools/__init__.py",
+      "tokens": 209,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "dependency_manager.py",
+      "path": "app/tools/dependency_manager.py",
+      "tokens": 6988,
+      "description": "Dependency management system for Python AI agents, handling package installation, import mapping, and PyPI integration with virtual environment support and XML/JSON reporting."
+    },
+    {
+      "name": "file_relations.py",
+      "path": "app/tools/file_relations.py",
+      "tokens": 2925,
+      "description": "File relationship analyzer for Python projects that extracts imports, importers, tests, and sibling files, supporting virtual file systems and outputting structured XML."
+    },
+    {
+      "name": "general_web_search.py",
+      "path": "app/tools/general_web_search.py",
+      "tokens": 3414,
+      "description": "Asynchronous web search tool using DuckDuckGo with structured result parsing, ranking, and token-limited result selection, providing both async and synchronous interfaces for integration."
+    },
+    {
+      "name": "grep_search.py",
+      "path": "app/tools/grep_search.py",
+      "tokens": 2525,
+      "description": "Grep-like search tool for project directories and virtual file systems, returning XML-formatted results with regex support, file filtering, and context-aware match formatting."
+    },
+    {
+      "name": "read_file.py",
+      "path": "app/tools/read_file.py",
+      "tokens": 1701,
+      "description": "File reading and analysis utility with XML-wrapped output, integrating token counting, file type detection, and security checks for structured content delivery."
+    },
+    {
+      "name": "run_project_tests.py",
+      "path": "app/tools/run_project_tests.py",
+      "tokens": 9124,
+      "description": "Isolated unit test runner with virtual filesystem integration, supporting chunked execution and XML result generation via subprocess."
+    },
+    {
+      "name": "search_code.py",
+      "path": "app/tools/search_code.py",
+      "tokens": 3196,
+      "description": "Semantic code search tool for project indexing with unified regular/compressed index support, returning structured XML results with metadata and error handling."
+    },
+    {
+      "name": "tool_definitions.py",
+      "path": "app/tools/tool_definitions.py",
+      "tokens": 4087,
+      "description": "Centralized registry for tool discovery and retrieval, enabling dynamic integration of code navigation, file operations, dependency management, and external search capabilities."
+    },
+    {
+      "name": "tool_executor.py",
+      "path": "app/tools/tool_executor.py",
+      "tokens": 3335,
+      "description": "Tool execution orchestrator for file operations, code search, web queries, and package management, integrating with semantic indexing and virtual file systems."
+    },
+    {
+      "name": "web_search.py",
+      "path": "app/tools/web_search.py",
+      "tokens": 4291,
+      "description": "Web search module using DuckDuckGo for asynchronous querying, parallel page fetching, and semantic relevance ranking, returning structured results with token management."
+    },
+    {
+      "name": "__init__.py",
+      "path": "app/utils/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "compact_index.py",
+      "path": "app/utils/compact_index.py",
+      "tokens": 1637,
+      "description": "Utility module for generating compact project overviews and chunk metadata from semantic indexes, supporting navigation and pre-filtering in the Orchestrator system."
+    },
+    {
+      "name": "file_parser.py",
+      "path": "app/utils/file_parser.py",
+      "tokens": 1543,
+      "description": "Unified file parsing and conversion to text across multiple formats (txt, pdf, docx, xlsx, csv) with token limit handling, producing a standardized ParsedFile output structure for downstream processing."
+    },
+    {
+      "name": "file_types.py",
+      "path": "app/utils/file_types.py",
+      "tokens": 517,
+      "description": "File type classifier using extension mapping for code, text, data, SQL, and config files, with chunking and encoding support methods for system-wide file handling and processing."
+    },
+    {
+      "name": "pipeline_trace_logger.py",
+      "path": "app/utils/pipeline_trace_logger.py",
+      "tokens": 3200,
+      "description": "Real-time pipeline execution logger that serializes tool call, iteration, and request lifecycle traces to JSON files with integrated logging and automatic cleanup."
+    },
+    {
+      "name": "token_counter.py",
+      "path": "app/utils/token_counter.py",
+      "tokens": 191,
+      "description": "Token counting utility for text strings using tiktoken encodings, supporting batch processing and defaulting to cl100k_base encoding."
+    },
+    {
+      "name": "translator.py",
+      "path": "app/utils/translator.py",
+      "tokens": 3334,
+      "description": "Russian translation service for code and technical text using Gemini 2.0 Flash, with caching, async/sync wrappers, and pre-translation filters for Russian content and code blocks."
+    },
+    {
+      "name": "validation_logger.py",
+      "path": "app/utils/validation_logger.py",
+      "tokens": 2255,
+      "description": "Session-specific logging utility for validation pipelines, integrating with Python's logging system and file management for structured error tracking and traceback capture."
+    },
+    {
+      "name": "xml_parser.py",
+      "path": "app/utils/xml_parser.py",
+      "tokens": 3770,
+      "description": "XML parsing and validation system for extracting and processing AI-generated code blocks from XML responses, integrating syntax validation, language detection, and structured metadata handling."
+    },
+    {
+      "name": "xml_wrapper.py",
+      "path": "app/utils/xml_wrapper.py",
+      "tokens": 7448,
+      "description": "XML serialization framework for code/text preservation with CDATA encapsulation, supporting hierarchical metadata embedding and context-aware chunk wrapping for AI analysis workflows."
+    },
+    {
+      "name": "check_models.py",
+      "path": "check_models.py",
+      "tokens": 156,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "__init__.py",
+      "path": "config/__init__.py",
+      "tokens": 0,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "settings.py",
+      "path": "config/settings.py",
+      "tokens": 6598,
+      "description": "Central configuration management for AI agent settings and provider routing, with integrated console logging for configuration summary and API key status."
+    },
+    {
+      "name": "debug_cert.py",
+      "path": "debug_cert.py",
+      "tokens": 451,
+      "description": "Utility module with minimal significant logic."
+    },
+    {
+      "name": "nested_example.py",
+      "path": "examples/test_index/nested_example.py",
+      "tokens": 276,
+      "description": "A nested class hierarchy for organizational encapsulation and database connection management, integrating SQL query execution with automatic connection handling."
+    },
+    {
+      "name": "simple_module.py",
+      "path": "examples/test_index/simple_module.py",
+      "tokens": 570,
+      "description": "A Python module providing user and admin entity classes with authentication and persistence, alongside utility functions for statistical computation and asynchronous data fetching."
+    },
+    {
+      "name": "utils.py",
+      "path": "examples/test_index/utils.py",
+      "tokens": 215,
+      "description": "Utility module providing a thread-safe singleton for configuration, string formatting for names, and email validation via regex."
+    },
+    {
+      "name": "main.py",
+      "path": "main.py",
+      "tokens": 61829,
+      "description": "CLI application framework with custom navigation exceptions and structured logging, integrating state management and user input handling for menu-driven workflows."
+    },
+    {
+      "name": "mainsertif.py",
+      "path": "mainsertif.py",
+      "tokens": 2232,
+      "description": "Unified diagnostic script for testing connectivity and performance of multiple AI model APIs (OpenAI-compatible, GigaChat, OpenRouter, DeepSeek) with automated certificate management and error logging."
+    },
+    {
+      "name": "maintestchunk .py",
+      "path": "maintestchunk .py",
+      "tokens": 4249,
+      "description": "Full system test for code chunking and project analysis that integrates scanning, tokenization, and rich visualization tools for detailed reporting."
+    },
+    {
+      "name": "test_advice_system — копия.py",
+      "path": "scripts/test_advice_system — копия.py",
+      "tokens": 5612,
+      "description": "Unit test suite for validating the file structure, data integrity, and consistency of an advice system module, integrating with JSON data files and a custom test runner for execution and reporting."
+    },
+    {
+      "name": "test_advice_system.py",
+      "path": "scripts/test_advice_system.py",
+      "tokens": 6150,
+      "description": "Unit test suite for an advice system, validating JSON file integrity, lazy loading, content retrieval, catalog generation, mode filtering, singleton behavior, and LLM prompt integration."
+    },
+    {
+      "name": "test_agent_foundation.py",
+      "path": "scripts/test_agent_foundation.py",
+      "tokens": 17710,
+      "description": "Unit test suite for a Virtual File System (VFS) component, integrating test fixtures, runners, and statistics for staging and reading operations."
+    },
+    {
+      "name": "test_agent_stage2.py",
+      "path": "scripts/test_agent_stage2.py",
+      "tokens": 17273,
+      "description": "Unit test suite for VirtualFileSystem operations, integrating command-line configuration, isolated test fixtures, and result reporting."
+    },
+    {
+      "name": "test_agent_stage3.py",
+      "path": "scripts/test_agent_stage3.py",
+      "tokens": 8181,
+      "description": "Unit test suite for validating code generation agent components, including file modification, code block parsing, and import verification."
+    },
+    {
+      "name": "test_agents.py",
+      "path": "scripts/test_agents.py",
+      "tokens": 16428,
+      "description": "Unit testing framework for agent-based systems with color-coded console output and structured result reporting."
+    },
+    {
+      "name": "test_context_compression.py",
+      "path": "scripts/test_context_compression.py",
+      "tokens": 6064,
+      "description": "Unit test suite for proactive and non-proactive LLM context compression, integrating with token counting, logging, and real API calls to validate compression behavior and message integrity."
+    },
+    {
+      "name": "test_deepseek_wrapper.py",
+      "path": "scripts/test_deepseek_wrapper.py",
+      "tokens": 1417,
+      "description": "Unit test for XML-to-AI processing via DeepSeek/OpenRouter, integrating XMLWrapper and AIService with logging and file output."
+    },
+    {
+      "name": "test_file_modifier_indentation.py",
+      "path": "scripts/test_file_modifier_indentation.py",
+      "tokens": 22879,
+      "description": "Unit test suite for validating indentation normalization in a FileModifier class, integrating with custom logging, test fixtures, and command-line argument parsing."
+    },
+    {
+      "name": "test_general_chat.py",
+      "path": "scripts/test_general_chat.py",
+      "tokens": 1872,
+      "description": "Unit test suite for a general chat orchestrator, validating dynamic model selection, operational modes, file attachments, and tool execution through integration with configuration, parsing, and orchestration modules."
+    },
+    {
+      "name": "test_general_chat_with_history.py",
+      "path": "scripts/test_general_chat_with_history.py",
+      "tokens": 8280,
+      "description": "Unit test suite for a chat system's history management and interactive viewing features, integrating HistoryManager and ChatViewer for data retrieval, pagination, search, export, and display."
+    },
+    {
+      "name": "test_generator_models.py",
+      "path": "scripts/test_generator_models.py",
+      "tokens": 9621,
+      "description": "Unit test suite for evaluating code generation models across ASK and AGENT modes, integrating structured test cases, performance logging, and result reporting."
+    },
+    {
+      "name": "test_history_manager.py",
+      "path": "scripts/test_history_manager.py",
+      "tokens": 5294,
+      "description": "Unit test suite for HistoryManager functionality, integrating with logging, SQLite databases, TokenCounter, and LLM API clients for comprehensive validation."
+    },
+    {
+      "name": "test_indent_normalization.py",
+      "path": "scripts/test_indent_normalization.py",
+      "tokens": 14743,
+      "description": "Unit test suite for validating indentation normalization and code structure preservation during Python code modifications, integrating with custom utilities and the unittest framework."
+    },
+    {
+      "name": "test_index_manager.py",
+      "path": "scripts/test_index_manager.py",
+      "tokens": 8339,
+      "description": "Unit test suite for an index manager, integrating color-coded logging, progress tracking, and dependency validation for system health checks."
+    },
+    {
+      "name": "test_orchestrator_raw.py",
+      "path": "scripts/test_orchestrator_raw.py",
+      "tokens": 6154,
+      "description": "Test orchestration utility for validating and formatting raw LLM responses with structured console output and regex-based section extraction."
+    },
+    {
+      "name": "test_run_project_tests.py",
+      "path": "scripts/test_run_project_tests.py",
+      "tokens": 11022,
+      "description": "Unit test suite for validating the test execution framework, including result parsing, VirtualFileSystem integration, and targeted test runs."
+    },
+    {
+      "name": "test_runtime_tester_integration.py",
+      "path": "scripts/test_runtime_tester_integration.py",
+      "tokens": 8636,
+      "description": "Integration test suite for validating runtime components across multiple scenarios, executed asynchronously with comprehensive system integration."
+    },
+    {
+      "name": "test_semantic_index.py",
+      "path": "scripts/test_semantic_index.py",
+      "tokens": 10118,
+      "description": "Unit test suite for semantic indexing components, validating import dependencies, API connectivity, and logging utilities with color-coded terminal output."
+    },
+    {
+      "name": "test_validation_pipeline.py",
+      "path": "scripts/test_validation_pipeline.py",
+      "tokens": 3945,
+      "description": "Unit test suite for a Python validation pipeline, verifying subprocess encoding fixes, import error handling, Cyrillic character support, and mypy integration."
+    },
+    {
+      "name": "temp_test.py",
+      "path": "temp_test.py",
+      "tokens": 12,
+      "description": "Unit test script for verifying basic console output functionality, integrates with pytest for automated testing."
+    },
+    {
+      "name": "test.py",
+      "path": "test.py",
+      "tokens": 2468,
+      "description": "Asynchronous test suite for OpenRouter AI model availability and performance, integrating httpx for HTTP requests and asyncio for concurrency and delay management."
+    },
+    {
+      "name": "test_all_chunkers.py",
+      "path": "test_all_chunkers.py",
+      "tokens": 1372,
+      "description": "Unit test suite for validating language-specific code chunkers (Python, Go, SQL) using SmartChunker classes and Rich library for structured console output."
+    },
+    {
+      "name": "test_cache_logic.py",
+      "path": "test_cache_logic.py",
+      "tokens": 375,
+      "description": "Unit test suite validating response caching behavior for AI tool interactions, specifically verifying cache_control integration for Claude models processing resource-intensive operations."
+    },
+    {
+      "name": "test_caching_real.py",
+      "path": "test_caching_real.py",
+      "tokens": 701,
+      "description": "Unit test for caching behavior in LLM tool calls, integrating with orchestration and tool-calling frameworks to validate cache control interception and cleanup."
+    },
+    {
+      "name": "test_deepseek_direct.py",
+      "path": "test_deepseek_direct.py",
+      "tokens": 165,
+      "description": "Unit test for DeepSeek API integration, validating configuration and response parsing for the 'pre_filter' role."
+    },
+    {
+      "name": "test_index_builder.py",
+      "path": "test_index_builder.py",
+      "tokens": 5828,
+      "description": "Unit test suite for validating the project index builder's core functions, including directory selection, project creation, structure verification, and JSON metadata generation."
+    },
+    {
+      "name": "test_prefilter_minimal.py",
+      "path": "test_prefilter_minimal.py",
+      "tokens": 429,
+      "description": "Unit test for a minimal LLM pre-filter workflow, validating model configuration and JSON response generation via call_llm with performance timing."
+    }
+  ]
+}

@@ -1,0 +1,1109 @@
+{
+  "root": "C:\\Users\\Admin\\AI_Assistant_Pro",
+  "files": [
+    {
+      "path": "change_detection_test.log",
+      "type": "other",
+      "hash": "4d21278c2b27db3488ad608f1fcb4a49",
+      "tokens_total": 949
+    },
+    {
+      "path": "check_models.py",
+      "type": "code/python",
+      "hash": "9d6a21835174f189f30db76526ff4532",
+      "tokens_total": 156
+    },
+    {
+      "path": "debug_cert.py",
+      "type": "code/python",
+      "hash": "2faf1930bc098791e57ea9b884147178",
+      "tokens_total": 451
+    },
+    {
+      "path": "main.py",
+      "type": "code/python",
+      "hash": "ce8da1182d52ef12583614db8c36e862",
+      "tokens_total": 58591
+    },
+    {
+      "path": "mainsertif.py",
+      "type": "code/python",
+      "hash": "02b2ed69b266a1726be9fde6bc1d30ff",
+      "tokens_total": 1476
+    },
+    {
+      "path": "maintestchunk .py",
+      "type": "code/python",
+      "hash": "b667562b8fff61e672a6645761105807",
+      "tokens_total": 4249
+    },
+    {
+      "path": "requirements.txt",
+      "type": "text/txt",
+      "hash": "9414883e5d9228574c0613aa38046361",
+      "tokens_total": 246
+    },
+    {
+      "path": "temp_test.py",
+      "type": "code/python",
+      "hash": "0705c2678af22197493e8930df1a92ba",
+      "tokens_total": 12
+    },
+    {
+      "path": "test.py",
+      "type": "code/python",
+      "hash": "6cc1e843e60469d084d601254d3c0620",
+      "tokens_total": 2468
+    },
+    {
+      "path": "test_all_chunkers.py",
+      "type": "code/python",
+      "hash": "3022e25771b920f673ce3d0e1fbf7bfa",
+      "tokens_total": 1372
+    },
+    {
+      "path": "test_cache_logic.py",
+      "type": "code/python",
+      "hash": "aa8e6f8cb7f37e84dfd32cd3238d7803",
+      "tokens_total": 375
+    },
+    {
+      "path": "test_caching_real.py",
+      "type": "code/python",
+      "hash": "886d81ff0afdeab1b3a02a5cb5f8edff",
+      "tokens_total": 701
+    },
+    {
+      "path": "test_deepseek_direct.py",
+      "type": "code/python",
+      "hash": "aaaab9a3cd1f257c218afed18ff97257",
+      "tokens_total": 165
+    },
+    {
+      "path": "test_index_builder.py",
+      "type": "code/python",
+      "hash": "a7dbdddd394a70445cb37af3ab8cec00",
+      "tokens_total": 5828
+    },
+    {
+      "path": "test_prefilter_minimal.py",
+      "type": "code/python",
+      "hash": "3d2ee5a84c83aa8cd879afc31eb88c6f",
+      "tokens_total": 429
+    },
+    {
+      "path": "validation_test.log",
+      "type": "other",
+      "hash": "26ff302aabc19f17f81b674e657c20da",
+      "tokens_total": 2147
+    },
+    {
+      "path": "__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "обновленный план написания ИИ Агента.md",
+      "type": "text/md",
+      "hash": "88740d01179df5d2bbc585bd81570920",
+      "tokens_total": 9386
+    },
+    {
+      "path": "отдельно про истрию бесед.md",
+      "type": "text/md",
+      "hash": "49d3f012a2f478acba3dab0e8f26a44e",
+      "tokens_total": 3686
+    },
+    {
+      "path": "Отпарвкак текста ИИ(Про чтение XML обертки ИИ).md",
+      "type": "text/md",
+      "hash": "a0efef943a34f79835339360361278a5",
+      "tokens_total": 2989
+    },
+    {
+      "path": "План как написать ИИ Агента.md",
+      "type": "text/md",
+      "hash": "abbf357e8ba19a1ded68bc492e5585c2",
+      "tokens_total": 16246
+    },
+    {
+      "path": "современная структура.md",
+      "type": "text/md",
+      "hash": "0e3b8172f0828665215f737b1934da3c",
+      "tokens_total": 2803
+    },
+    {
+      "path": "app\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "app\\advice\\advice_catalog.json",
+      "type": "data/json",
+      "hash": "fbc2347df0f2d6440b556cc136c6619e",
+      "tokens_total": 1105
+    },
+    {
+      "path": "app\\advice\\advice_content.json",
+      "type": "data/json",
+      "hash": "8f3e679180ed66ff47a6f77446dc5e0a",
+      "tokens_total": 6491
+    },
+    {
+      "path": "app\\advice\\advice_loader.py",
+      "type": "code/python",
+      "hash": "7321e5486626b3217a9d03b00090337b",
+      "tokens_total": 2546
+    },
+    {
+      "path": "app\\advice\\__init__.py",
+      "type": "code/python",
+      "hash": "f1dd36239d2fd4e06abfbfc27b1df910",
+      "tokens_total": 213
+    },
+    {
+      "path": "app\\agents\\agent_pipeline.py",
+      "type": "code/python",
+      "hash": "66a274487a7d292e847957f276628a0b",
+      "tokens_total": 33866
+    },
+    {
+      "path": "app\\agents\\code_generator.py",
+      "type": "code/python",
+      "hash": "9ca618655ec4ded8385b2d4be14e6a59",
+      "tokens_total": 6918
+    },
+    {
+      "path": "app\\agents\\feedback_handler.py",
+      "type": "code/python",
+      "hash": "2677f5f7e598f836da7b270950beaa3e",
+      "tokens_total": 7512
+    },
+    {
+      "path": "app\\agents\\feedback_loop.py",
+      "type": "code/python",
+      "hash": "ed419f5dc40766e09e368a66efa78ebc",
+      "tokens_total": 4905
+    },
+    {
+      "path": "app\\agents\\feedback_prompt_loader.py",
+      "type": "code/python",
+      "hash": "e951787ab4401641fb587ee89f2ec6e2",
+      "tokens_total": 2764
+    },
+    {
+      "path": "app\\agents\\orchestrator.py",
+      "type": "code/python",
+      "hash": "9dc75050f8c1854654fc5935d051fe21",
+      "tokens_total": 16013
+    },
+    {
+      "path": "app\\agents\\pre_filter.py",
+      "type": "code/python",
+      "hash": "dbef13baaad5730b21748c8919c0ff33",
+      "tokens_total": 7312
+    },
+    {
+      "path": "app\\agents\\router.py",
+      "type": "code/python",
+      "hash": "c25c5eec489cf69aba1a6419de33d79f",
+      "tokens_total": 6328
+    },
+    {
+      "path": "app\\agents\\validator.py",
+      "type": "code/python",
+      "hash": "efc7e3fe2207356defa08188c17cd3e0",
+      "tokens_total": 3581
+    },
+    {
+      "path": "app\\agents\\__init__.py",
+      "type": "code/python",
+      "hash": "6fe3f8902269ded3d6173bb6b088bb2a",
+      "tokens_total": 166
+    },
+    {
+      "path": "app\\builders\\semantic_index_builder.py",
+      "type": "code/python",
+      "hash": "933820adb23fcb82cb35df0b6d0b1200",
+      "tokens_total": 19793
+    },
+    {
+      "path": "app\\builders\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "app\\core\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "app\\history\\compressor.py",
+      "type": "code/python",
+      "hash": "961ec61d0c89495c9c5ca2a6687da4e0",
+      "tokens_total": 2318
+    },
+    {
+      "path": "app\\history\\context_manager.py",
+      "type": "code/python",
+      "hash": "e2d16f67247c2e33e27b98c5eaf5c79c",
+      "tokens_total": 5589
+    },
+    {
+      "path": "app\\history\\manager.py",
+      "type": "code/python",
+      "hash": "2dedb875ff5c636a886b0b726f4117c9",
+      "tokens_total": 5534
+    },
+    {
+      "path": "app\\history\\orchestrator_trace.py",
+      "type": "code/python",
+      "hash": "f541ac5e90748468cc18dedd437208fc",
+      "tokens_total": 1525
+    },
+    {
+      "path": "app\\history\\storage.py",
+      "type": "code/python",
+      "hash": "a40611c1351ba16100fc7a7651fca4f5",
+      "tokens_total": 5674
+    },
+    {
+      "path": "app\\history\\__init__.py",
+      "type": "code/python",
+      "hash": "e07f9e2cb6cb83cc612a9419484bad34",
+      "tokens_total": 193
+    },
+    {
+      "path": "app\\llm\\api_client.py",
+      "type": "code/python",
+      "hash": "eeeaab9dff573a1874237c760d835cf5",
+      "tokens_total": 6946
+    },
+    {
+      "path": "app\\llm\\prompt_templates.py",
+      "type": "code/python",
+      "hash": "e7bb73b142af29f6032f58461d5bf658",
+      "tokens_total": 59502
+    },
+    {
+      "path": "app\\llm\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "app\\services\\ai_client.py",
+      "type": "code/python",
+      "hash": "47ce18fe417364ce1276128f81a36c47",
+      "tokens_total": 1355
+    },
+    {
+      "path": "app\\services\\backup_manager.py",
+      "type": "code/python",
+      "hash": "44065b6afbc9ebf4d7492773e0446155",
+      "tokens_total": 4391
+    },
+    {
+      "path": "app\\services\\change_validator.py",
+      "type": "code/python",
+      "hash": "85f7c75c6a17a4081345a579afd9eaea",
+      "tokens_total": 10927
+    },
+    {
+      "path": "app\\services\\file_io_tools.py",
+      "type": "code/python",
+      "hash": "c3610ef42cc0eba05861b06509615f8e",
+      "tokens_total": 2827
+    },
+    {
+      "path": "app\\services\\file_modifier.py",
+      "type": "code/python",
+      "hash": "05ace646abfd71e18f52c812e7d76d07",
+      "tokens_total": 13402
+    },
+    {
+      "path": "app\\services\\go_chunker.py",
+      "type": "code/python",
+      "hash": "0a53889c6bbacc6a6d75e4acca63b776",
+      "tokens_total": 2757
+    },
+    {
+      "path": "app\\services\\index_manager.py",
+      "type": "code/python",
+      "hash": "8f6beafe6b7dc333d5e3884440ac7dee",
+      "tokens_total": 6500
+    },
+    {
+      "path": "app\\services\\index_reader.py",
+      "type": "code/python",
+      "hash": "02f449e26d950ef869cd10e631e21032",
+      "tokens_total": 9575
+    },
+    {
+      "path": "app\\services\\index_updater.py",
+      "type": "code/python",
+      "hash": "7e8f2772cc91e6c699aff8be7a4fad14",
+      "tokens_total": 2492
+    },
+    {
+      "path": "app\\services\\json_chunker.py",
+      "type": "code/python",
+      "hash": "de039aecf2744624db81ffa912e8fe8c",
+      "tokens_total": 2107
+    },
+    {
+      "path": "app\\services\\project_map_builder.py",
+      "type": "code/python",
+      "hash": "becb75e01f43c65587102007334939e8",
+      "tokens_total": 6303
+    },
+    {
+      "path": "app\\services\\project_scanner.py",
+      "type": "code/python",
+      "hash": "bbde50fd62357c7c520f447bb7b33c1a",
+      "tokens_total": 3416
+    },
+    {
+      "path": "app\\services\\python_chunker.py",
+      "type": "code/python",
+      "hash": "ceab251ebedce1322de73476f738b458",
+      "tokens_total": 5328
+    },
+    {
+      "path": "app\\services\\runtime_tester.py",
+      "type": "code/python",
+      "hash": "5dfc1f8207ec7549df405ac0c713885d",
+      "tokens_total": 9045
+    },
+    {
+      "path": "app\\services\\sql_chunker.py",
+      "type": "code/python",
+      "hash": "d61da07edc6102c281e2eb6c42a68c84",
+      "tokens_total": 2257
+    },
+    {
+      "path": "app\\services\\syntax_checker.py",
+      "type": "code/python",
+      "hash": "ef054235bf9aaed28ec60f1457400e93",
+      "tokens_total": 4074
+    },
+    {
+      "path": "app\\services\\virtual_fs.py",
+      "type": "code/python",
+      "hash": "e42269a12336c83b23a05437cde250e7",
+      "tokens_total": 7891
+    },
+    {
+      "path": "app\\services\\__init__.py",
+      "type": "code/python",
+      "hash": "eaff3b6c1f8682659fd84f1d0bdef2ab",
+      "tokens_total": 40
+    },
+    {
+      "path": "app\\tools\\dependency_manager.py",
+      "type": "code/python",
+      "hash": "fbca4c3761e34a0e89e1883227779e2e",
+      "tokens_total": 5455
+    },
+    {
+      "path": "app\\tools\\general_web_search.py",
+      "type": "code/python",
+      "hash": "57f96353c37877e5fd5634a0976dd6a3",
+      "tokens_total": 3414
+    },
+    {
+      "path": "app\\tools\\read_file.py",
+      "type": "code/python",
+      "hash": "0f42a44c76b0966ee927423b25baf004",
+      "tokens_total": 1701
+    },
+    {
+      "path": "app\\tools\\run_project_tests.py",
+      "type": "code/python",
+      "hash": "90ef4c1991221d2e585624941684d6ea",
+      "tokens_total": 9357
+    },
+    {
+      "path": "app\\tools\\search_code.py",
+      "type": "code/python",
+      "hash": "b6dec20ce4b6fdb9648f80adb680e2a9",
+      "tokens_total": 2118
+    },
+    {
+      "path": "app\\tools\\tool_definitions.py",
+      "type": "code/python",
+      "hash": "49c461bc84f66d38b70a4b207016e02c",
+      "tokens_total": 3076
+    },
+    {
+      "path": "app\\tools\\tool_executor.py",
+      "type": "code/python",
+      "hash": "5517f5692b6c6c6f8640a6f6d74dc43f",
+      "tokens_total": 2248
+    },
+    {
+      "path": "app\\tools\\web_search.py",
+      "type": "code/python",
+      "hash": "f7bde78ca61d36f669077ca9d883001f",
+      "tokens_total": 4291
+    },
+    {
+      "path": "app\\tools\\__init__.py",
+      "type": "code/python",
+      "hash": "451977f1849281b8aad29f259e6b73a8",
+      "tokens_total": 209
+    },
+    {
+      "path": "app\\utils\\compact_index.py",
+      "type": "code/python",
+      "hash": "6bfc43c44ed860653d62205fc786b07f",
+      "tokens_total": 1637
+    },
+    {
+      "path": "app\\utils\\file_parser.py",
+      "type": "code/python",
+      "hash": "26f3784ccad776fef44f0e941920c5cc",
+      "tokens_total": 1543
+    },
+    {
+      "path": "app\\utils\\file_types.py",
+      "type": "code/python",
+      "hash": "d2eda19dfdef0a1346d62481532bec9b",
+      "tokens_total": 517
+    },
+    {
+      "path": "app\\utils\\pipeline_trace_logger.py",
+      "type": "code/python",
+      "hash": "6e6f432e394c3d383bf8830a16a1eee8",
+      "tokens_total": 3200
+    },
+    {
+      "path": "app\\utils\\token_counter.py",
+      "type": "code/python",
+      "hash": "79c502fbc97031edd20163079161174a",
+      "tokens_total": 191
+    },
+    {
+      "path": "app\\utils\\translator.py",
+      "type": "code/python",
+      "hash": "2d1570c7406f5f0c6865b80d9bc14296",
+      "tokens_total": 3334
+    },
+    {
+      "path": "app\\utils\\validation_logger.py",
+      "type": "code/python",
+      "hash": "58234c948e066293d54a8006e00d2a9b",
+      "tokens_total": 2255
+    },
+    {
+      "path": "app\\utils\\xml_parser.py",
+      "type": "code/python",
+      "hash": "e10a20ce27e072974d800bf723aeaac8",
+      "tokens_total": 3770
+    },
+    {
+      "path": "app\\utils\\xml_wrapper.py",
+      "type": "code/python",
+      "hash": "5a4794a98ee00253e8b44c358660582e",
+      "tokens_total": 7448
+    },
+    {
+      "path": "app\\utils\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "certs\\russian_trusted_root_ca_pem.crt",
+      "type": "other",
+      "hash": "a867ca37a72362c5318716f682f8c7e4",
+      "tokens_total": 0
+    },
+    {
+      "path": "config\\settings.py",
+      "type": "code/python",
+      "hash": "93d3d55c4246eefc1bc532a64234b7e1",
+      "tokens_total": 5416
+    },
+    {
+      "path": "config\\__init__.py",
+      "type": "code/python",
+      "hash": "d41d8cd98f00b204e9800998ecf8427e",
+      "tokens_total": 0
+    },
+    {
+      "path": "examples\\test_index\\nested_example.py",
+      "type": "code/python",
+      "hash": "dd317a2dec57eeeeaed2e4a435435a45",
+      "tokens_total": 276
+    },
+    {
+      "path": "examples\\test_index\\simple_module.py",
+      "type": "code/python",
+      "hash": "0dd7928dd9c01dc1c3b7bca3190a73b1",
+      "tokens_total": 570
+    },
+    {
+      "path": "examples\\test_index\\utils.py",
+      "type": "code/python",
+      "hash": "10b790311cc50502e3a1e7f221f997fa",
+      "tokens_total": 215
+    },
+    {
+      "path": "logs\\index_test_20251212_114857.log",
+      "type": "other",
+      "hash": "39b3309915fe6048d0db2b2c53e9a788",
+      "tokens_total": 1849
+    },
+    {
+      "path": "logs\\index_test_20251212_124603.log",
+      "type": "other",
+      "hash": "a6d3cb5103fe321f3d92e40a9e3305f1",
+      "tokens_total": 1100
+    },
+    {
+      "path": "logs\\index_test_20251212_140817.log",
+      "type": "other",
+      "hash": "ae11dca02464d06639b2397d32e3f23b",
+      "tokens_total": 1999
+    },
+    {
+      "path": "logs\\index_test_20251212_143026.log",
+      "type": "other",
+      "hash": "83c0d0f9242c6b8a7151cac61021f40d",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251212_153744.log",
+      "type": "other",
+      "hash": "c5f0d8de2155a6481ed8e4aab3b716a2",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251212_153905.log",
+      "type": "other",
+      "hash": "8f38f269f6f661f49bf453dff92a1161",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251212_154743.log",
+      "type": "other",
+      "hash": "6afe19537f76f26e587f477427023ab3",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251212_154851.log",
+      "type": "other",
+      "hash": "d32a2d71a85d6ec85408af28ac823e13",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251213_105050.log",
+      "type": "other",
+      "hash": "1f4e1c4a3a602db3554b5ad0e573e6ab",
+      "tokens_total": 3777
+    },
+    {
+      "path": "logs\\index_test_20251213_111317.log",
+      "type": "other",
+      "hash": "7e1c32416a662b04a0682ccb715ea102",
+      "tokens_total": 1080
+    },
+    {
+      "path": "logs\\index_test_20251213_111747.log",
+      "type": "other",
+      "hash": "c9a256c3dc1b679c321da1118ce22c86",
+      "tokens_total": 1083
+    },
+    {
+      "path": "logs\\index_test_20251214_041600.log",
+      "type": "other",
+      "hash": "92b814cc134c34062af3b27ef8114bba",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251214_044257.log",
+      "type": "other",
+      "hash": "8fdf22d37773e406bc7193bab5e27758",
+      "tokens_total": 1121
+    },
+    {
+      "path": "logs\\index_test_20251214_051127.log",
+      "type": "other",
+      "hash": "89b24e8b6050353d2d053fa4f827b3e8",
+      "tokens_total": 1006
+    },
+    {
+      "path": "logs\\index_test_20251214_051616.log",
+      "type": "other",
+      "hash": "7ef80d7d5202f15ba81a3f7c84448b58",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251214_192419.log",
+      "type": "other",
+      "hash": "4e6b5bfae049da03723de6890825c475",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251214_194439.log",
+      "type": "other",
+      "hash": "edd7d89e964155eb5ded452a18ffc1ff",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251214_195533.log",
+      "type": "other",
+      "hash": "db6882cd2c29822b4c26647010724301",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251214_221352.log",
+      "type": "other",
+      "hash": "4a62a435e7408148843168b6f00e7daf",
+      "tokens_total": 975
+    },
+    {
+      "path": "logs\\index_test_20251214_225829.log",
+      "type": "other",
+      "hash": "018b434375417daa58ec0bddd26237ac",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251214_231011.log",
+      "type": "other",
+      "hash": "981c35d5cc4ebe0f7b7a2a6ef2e73eda",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251214_234411.log",
+      "type": "other",
+      "hash": "d428015d81ef3a632679267450f94496",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251214_235612.log",
+      "type": "other",
+      "hash": "24f6cfd4e2141316f057bde2405b70c6",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_000952.log",
+      "type": "other",
+      "hash": "b0a0dc6d980abe638a025979d0483e50",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_002411.log",
+      "type": "other",
+      "hash": "8801151830ec07d3275d0f4c55f09326",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251215_003335.log",
+      "type": "other",
+      "hash": "834c27737f8531ceba1612dacbd0681c",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_004003.log",
+      "type": "other",
+      "hash": "4a4f99bf43cc5b7522d29162ca597159",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_005536.log",
+      "type": "other",
+      "hash": "3dc3393c315822a26d33d0331f3fbe13",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251215_010232.log",
+      "type": "other",
+      "hash": "f2c21e9336a69a58e9ee733c64f43f9b",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_012318.log",
+      "type": "other",
+      "hash": "67a52ca9cb195dd2ffeb313be7c44704",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_013458.log",
+      "type": "other",
+      "hash": "3169c979fd0a3f072a6d0d9703c75493",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_015054.log",
+      "type": "other",
+      "hash": "9ce7055aea99405548989b390c2f46d1",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_020428.log",
+      "type": "other",
+      "hash": "d1bd80dc9a45e1ed30032a0f13b0b255",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_021231.log",
+      "type": "other",
+      "hash": "995be12333b38096e3b1108e14933e93",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_023506.log",
+      "type": "other",
+      "hash": "b46c398c7e9ff2c78911ee80b5f1dc6f",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_024557.log",
+      "type": "other",
+      "hash": "0267bbcaa7c967bef0b7cbe02313c2ad",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_025623.log",
+      "type": "other",
+      "hash": "5de6b09d8f4f4158d724dda2d68fee61",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_031200.log",
+      "type": "other",
+      "hash": "4ec61c5eab146a1e41b6687215fd8964",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251215_183321.log",
+      "type": "other",
+      "hash": "d2f1a11d7c3939fc75d8e5850035f3c2",
+      "tokens_total": 1083
+    },
+    {
+      "path": "logs\\index_test_20251215_200134.log",
+      "type": "other",
+      "hash": "e6c19c668e10ecaba3657d678e5adb8e",
+      "tokens_total": 926
+    },
+    {
+      "path": "logs\\index_test_20251215_211630.log",
+      "type": "other",
+      "hash": "c13bc2a50508dfdb7ead399241106320",
+      "tokens_total": 965
+    },
+    {
+      "path": "logs\\index_test_20251215_220201.log",
+      "type": "other",
+      "hash": "10c3bc3a29cd45e696aba8c9fd95e8b6",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251217_140011.log",
+      "type": "other",
+      "hash": "c3f8b2ec98f05816dd174498b2af3533",
+      "tokens_total": 995
+    },
+    {
+      "path": "logs\\index_test_20251217_142258.log",
+      "type": "other",
+      "hash": "8e0f820c722e837b9aa70ad346e61e34",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251217_160134.log",
+      "type": "other",
+      "hash": "518eb0b25556126f7dd8183e0a27984b",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251217_174940.log",
+      "type": "other",
+      "hash": "9fad44df8b3f5874c1f61f6eb5fafaa0",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251217_224730.log",
+      "type": "other",
+      "hash": "f025513b892814e9eec22d9cf66a5ff8",
+      "tokens_total": 964
+    },
+    {
+      "path": "logs\\index_test_20251219_000906.log",
+      "type": "other",
+      "hash": "2e40c7731cb1a2179f78872dcbd08771",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251220_060403.log",
+      "type": "other",
+      "hash": "cb8cde43d060bb33c836d62088dbae1a",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251220_070437.log",
+      "type": "other",
+      "hash": "b3976f68144a939cea1eaf343c54f760",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251221_011404.log",
+      "type": "other",
+      "hash": "e60d32deae13b8aac2f3f1765978079f",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251221_024001.log",
+      "type": "other",
+      "hash": "761066b5dee19fd89fc2e94b82537e32",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251221_050938.log",
+      "type": "other",
+      "hash": "f3eb96ba25ac035e3e91ee77d27bc04e",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251222_152745.log",
+      "type": "other",
+      "hash": "164d5af012f945368bfb8fd96600c981",
+      "tokens_total": 1061
+    },
+    {
+      "path": "logs\\index_test_20251228_055331.log",
+      "type": "other",
+      "hash": "a4a83e0dee50783ff3d08cefa858353f",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251228_072618.log",
+      "type": "other",
+      "hash": "d5974be4da6b6eb0aa23361908e0f219",
+      "tokens_total": 1032
+    },
+    {
+      "path": "logs\\index_test_20251228_080028.log",
+      "type": "other",
+      "hash": "4d01fc9d0d249d6edb7c393562595874",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251228_090804.log",
+      "type": "other",
+      "hash": "84f4a12323ab4b7c6768191aad43cf23",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251228_183505.log",
+      "type": "other",
+      "hash": "e81722e457047ae2eb1f83e1c663cc20",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251229_001858.log",
+      "type": "other",
+      "hash": "d874c93a16f45ff6b9b059f8fcbdee13",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251229_022617.log",
+      "type": "other",
+      "hash": "95411c264bfd9eae1a7e659b2a189171",
+      "tokens_total": 995
+    },
+    {
+      "path": "logs\\index_test_20251230_141330.log",
+      "type": "other",
+      "hash": "001f95789f3f94db9393ff242c8391d3",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20251230_142508.log",
+      "type": "other",
+      "hash": "73cf2ed76e24869547506f137d4b76b8",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251230_152739.log",
+      "type": "other",
+      "hash": "0d7a2aee6dc98683e7bdc605c8276fd3",
+      "tokens_total": 955
+    },
+    {
+      "path": "logs\\index_test_20251231_032236.log",
+      "type": "other",
+      "hash": "183d4c64381f7a480103434aa648c074",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20251231_221207.log",
+      "type": "other",
+      "hash": "e362642fbe6f6f5c0163bf2ce3731382",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20260101_024257.log",
+      "type": "other",
+      "hash": "9410dde3e31a3a6ef5cf5b795cbe4ca0",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20260101_043803.log",
+      "type": "other",
+      "hash": "1da8fd03dbe400b86e3b86419978d8e5",
+      "tokens_total": 972
+    },
+    {
+      "path": "logs\\index_test_20260101_060003.log",
+      "type": "other",
+      "hash": "cafcab286007d8d97ddbd78ef346f097",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20260101_073013.log",
+      "type": "other",
+      "hash": "25a47c9b8e9a9b4fd8639367783e342e",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\index_test_20260102_210614.log",
+      "type": "other",
+      "hash": "8e99e884087785c3b8c3f501421b7d62",
+      "tokens_total": 941
+    },
+    {
+      "path": "logs\\test_run_20251210_200903.log",
+      "type": "other",
+      "hash": "f39ef6cdb795fe7bc809bf6c0d926c45",
+      "tokens_total": 98
+    },
+    {
+      "path": "scripts\\test_advice_system — копия.py",
+      "type": "code/python",
+      "hash": "412081432a2e8a3d4b3eb875e1f164be",
+      "tokens_total": 5612
+    },
+    {
+      "path": "scripts\\test_advice_system.py",
+      "type": "code/python",
+      "hash": "75f4bf9e7ac120509acfb42d7508de53",
+      "tokens_total": 6150
+    },
+    {
+      "path": "scripts\\test_agents.py",
+      "type": "code/python",
+      "hash": "3c718d9d56ff6e2a5c3f13cc130fe0a2",
+      "tokens_total": 16428
+    },
+    {
+      "path": "scripts\\test_agent_foundation.py",
+      "type": "code/python",
+      "hash": "c9af79eed774c418f83968bc2926182c",
+      "tokens_total": 17710
+    },
+    {
+      "path": "scripts\\test_agent_stage2.py",
+      "type": "code/python",
+      "hash": "d2b6e844332093d7f897ea688df66142",
+      "tokens_total": 17273
+    },
+    {
+      "path": "scripts\\test_agent_stage3.py",
+      "type": "code/python",
+      "hash": "b5b2538cc2a75ce102fc027dc7a39fc9",
+      "tokens_total": 8181
+    },
+    {
+      "path": "scripts\\test_context_compression.py",
+      "type": "code/python",
+      "hash": "bbe67bb69915f96d41e2251a65fbdc96",
+      "tokens_total": 6064
+    },
+    {
+      "path": "scripts\\test_deepseek_wrapper.py",
+      "type": "code/python",
+      "hash": "b49629eb2e4af20e966b635428631337",
+      "tokens_total": 1417
+    },
+    {
+      "path": "scripts\\test_file_modifier_indentation.py",
+      "type": "code/python",
+      "hash": "5150fec7560da9f153a3df9b8fb9d232",
+      "tokens_total": 22879
+    },
+    {
+      "path": "scripts\\test_general_chat.py",
+      "type": "code/python",
+      "hash": "f323a15cb3de6d0e73a8b6b872141170",
+      "tokens_total": 1872
+    },
+    {
+      "path": "scripts\\test_general_chat_with_history.py",
+      "type": "code/python",
+      "hash": "e5073ccc1fbd34cd5c914996df4aa6fa",
+      "tokens_total": 8280
+    },
+    {
+      "path": "scripts\\test_history_manager.py",
+      "type": "code/python",
+      "hash": "4aa37047644d177b4e6debcaad277a39",
+      "tokens_total": 5294
+    },
+    {
+      "path": "scripts\\test_indent_normalization.py",
+      "type": "code/python",
+      "hash": "c0b6f709359ccca822da9cf8c7d375e4",
+      "tokens_total": 14743
+    },
+    {
+      "path": "scripts\\test_index_manager.py",
+      "type": "code/python",
+      "hash": "366be78f30aae56473dfd180c1a41ee5",
+      "tokens_total": 8339
+    },
+    {
+      "path": "scripts\\test_orchestrator_raw.py",
+      "type": "code/python",
+      "hash": "2a1907d0e7b23ecb5f4134bcd02b241d",
+      "tokens_total": 6154
+    },
+    {
+      "path": "scripts\\test_runtime_tester_integration.py",
+      "type": "code/python",
+      "hash": "c9521d28ab3c98a8174e581d1525c5f5",
+      "tokens_total": 8636
+    },
+    {
+      "path": "scripts\\test_run_project_tests.py",
+      "type": "code/python",
+      "hash": "96049772c993f09c37629e9a5d074d4d",
+      "tokens_total": 11022
+    },
+    {
+      "path": "scripts\\test_semantic_index.py",
+      "type": "code/python",
+      "hash": "c7ae9a67fca127964a6f3b9690394017",
+      "tokens_total": 10118
+    },
+    {
+      "path": "scripts\\test_validation_pipeline.py",
+      "type": "code/python",
+      "hash": "d5fad40892353335022d74093179e7cf",
+      "tokens_total": 3945
+    },
+    {
+      "path": "scripts\\Проанализируй файл answer_generator.py.md",
+      "type": "text/md",
+      "hash": "7a2a993eae497a3767e4b3cb94ba2f47",
+      "tokens_total": 108
+    }
+  ]
+}

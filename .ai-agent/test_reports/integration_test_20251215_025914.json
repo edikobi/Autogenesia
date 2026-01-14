@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "timestamp": "2025-12-15T02:59:14.272318",
+    "project_dir": "C:\\Users\\Admin\\AI_Assistant_Pro",
+    "user_query": "Проверь файл manager.py на синтаскические  ошибки, если найдешь, то перепиши код файла полностью  НЕ МЕНЯЯ СОДЕРЖАНИЯ, только исправь синтаксис",
+    "duration_seconds": 48.03394269943237,
+    "models_used": {
+      "orchestrator": "GPT-5.1 Codex Max (RouterAI)",
+      "code_generator": "deepseek-chat"
+    }
+  },
+  "orchestrator": {
+    "analysis": "Error during analysis: API error 402: {\"error\":\"Недостаточно средств на балансе: -13,16 руб.. Пожалуйста, пополните счет для продолжения использования сервиса.\"}",
+    "instruction": "Unable to generate instruction due to error."
+  },
+  "code_generator": {
+    "code_blocks": [
+      {
+        "filepath": "error_handler.py",
+        "language": "python",
+        "code": "def handle_error(error_message, error_type=\"general\"):\n    \"\"\"\n    Обрабатывает ошибки и возвращает структурированное сообщение.\n    \n    Args:\n        error_message (str): Текст ошибки.\n        error_type (str): Тип ошибки (по умолчанию \"general\").\n    \n    Returns:\n        dict: Словарь с деталями ошибки.\n    \"\"\"\n    error_response = {\n        \"status\": \"error\",\n        \"type\": error_type,\n        \"message\": error_message,\n        \"timestamp\": None  # Можно добавить логику для временной метки\n    }\n    return error_response\n\n\ndef log_error(error_details, log_file=\"errors.log\"):\n    \"\"\"\n    Записывает детали ошибки в лог-файл.\n    \n    Args:\n        error_details (dict): Словарь с деталями ошибки (например, от handle_error).\n        log_file (str): Имя файла для записи логов.\n    \"\"\"\n    import json\n    from datetime import datetime\n    \n    error_details[\"timestamp\"] = datetime.now().isoformat()\n    \n    try:\n        with open(log_file, 'a', encoding='utf-8') as f:\n            f.write(json.dumps(error_details, ensure_ascii=False) + '\\n')\n    except Exception as e:\n        print(f\"Не удалось записать лог ошибки: {e}\")",
+        "context": null
+      }
+    ],
+    "explanation": "Этот код создаёт простой модуль для обработки ошибок на Python. Он состоит из двух основных функций:\n\n1. **`handle_error`**:\n   - Принимает сообщение об ошибке и её тип (по умолчанию \"general\").\n   - Возвращает словарь с структурированной информацией: статус \"error\", тип ошибки, сообщение и поле для временной метки (пока `None`).\n   - Эта функция полезна для стандартизации формата ответов об ошибках в приложениях, например, в API.\n\n2. **`log_error`**:\n   - Принимает словарь с деталями ошибки (например, полученный от `handle_error`) и имя файла для логирования (по умолчанию \"errors.log\").\n   - Добавляет текущую временную метку в детали ошибки.\n   - Записывает ошибку в JSON-формате в указанный лог-файл, добавляя каждую запись с новой строки.\n   - Если запись в файл не удаётся, выводит сообщение об ошибке в консоль.\n\n**Как использовать**:\n- Импортируйте функции в вашем основном коде: `from error_handler import handle_error, log_error`.\n- При возникновении ошибки вызовите `error_details = handle_error(\"Сообщение об ошибке\", \"network\")`.\n- Для логирования: `log_error(error_details)` или `log_error(error_details, \"my_app_errors.log\")`.\n\n**Важные замечания**:\n- Код не требует внешних зависимостей, использует только стандартную библиотеку Python.\n- Лог-файл будет создаваться в той же директории, где выполняется скрипт. Убедитесь, что у вас есть права на запись.\n- Для продакшн-среды рекомендуется добавить ротацию логов, более сложную обработку исключений и, возможно, интеграцию с системами мониторинга.",
+    "frontend_json": {
+      "success": true,
+      "code_blocks": [
+        {
+          "code": "def handle_error(error_message, error_type=\"general\"):\n    \"\"\"\n    Обрабатывает ошибки и возвращает структурированное сообщение.\n    \n    Args:\n        error_message (str): Текст ошибки.\n        error_type (str): Тип ошибки (по умолчанию \"general\").\n    \n    Returns:\n        dict: Словарь с деталями ошибки.\n    \"\"\"\n    error_response = {\n        \"status\": \"error\",\n        \"type\": error_type,\n        \"message\": error_message,\n        \"timestamp\": None  # Можно добавить логику для временной метки\n    }\n    return error_response\n\n\ndef log_error(error_details, log_file=\"errors.log\"):\n    \"\"\"\n    Записывает детали ошибки в лог-файл.\n    \n    Args:\n        error_details (dict): Словарь с деталями ошибки (например, от handle_error).\n        log_file (str): Имя файла для записи логов.\n    \"\"\"\n    import json\n    from datetime import datetime\n    \n    error_details[\"timestamp\"] = datetime.now().isoformat()\n    \n    try:\n        with open(log_file, 'a', encoding='utf-8') as f:\n            f.write(json.dumps(error_details, ensure_ascii=False) + '\\n')\n    except Exception as e:\n        print(f\"Не удалось записать лог ошибки: {e}\")",
+          "filepath": "error_handler.py",
+          "language": "python",
+          "context": null
+        }
+      ],
+      "combined_code": "\n\n# ==================================================# filepath: error_handler.py\n\ndef handle_error(error_message, error_type=\"general\"):\n    \"\"\"\n    Обрабатывает ошибки и возвращает структурированное сообщение.\n    \n    Args:\n        error_message (str): Текст ошибки.\n        error_type (str): Тип ошибки (по умолчанию \"general\").\n    \n    Returns:\n        dict: Словарь с деталями ошибки.\n    \"\"\"\n    error_response = {\n        \"status\": \"error\",\n        \"type\": error_type,\n        \"message\": error_message,\n        \"timestamp\": None  # Можно добавить логику для временной метки\n    }\n    return error_response\n\n\ndef log_error(error_details, log_file=\"errors.log\"):\n    \"\"\"\n    Записывает детали ошибки в лог-файл.\n    \n    Args:\n        error_details (dict): Словарь с деталями ошибки (например, от handle_error).\n        log_file (str): Имя файла для записи логов.\n    \"\"\"\n    import json\n    from datetime import datetime\n    \n    error_details[\"timestamp\"] = datetime.now().isoformat()\n    \n    try:\n        with open(log_file, 'a', encoding='utf-8') as f:\n            f.write(json.dumps(error_details, ensure_ascii=False) + '\\n')\n    except Exception as e:\n        print(f\"Не удалось записать лог ошибки: {e}\")",
+      "explanation": "Этот код создаёт простой модуль для обработки ошибок на Python. Он состоит из двух основных функций:\n\n1. **`handle_error`**:\n   - Принимает сообщение об ошибке и её тип (по умолчанию \"general\").\n   - Возвращает словарь с структурированной информацией: статус \"error\", тип ошибки, сообщение и поле для временной метки (пока `None`).\n   - Эта функция полезна для стандартизации формата ответов об ошибках в приложениях, например, в API.\n\n2. **`log_error`**:\n   - Принимает словарь с деталями ошибки (например, полученный от `handle_error`) и имя файла для логирования (по умолчанию \"errors.log\").\n   - Добавляет текущую временную метку в детали ошибки.\n   - Записывает ошибку в JSON-формате в указанный лог-файл, добавляя каждую запись с новой строки.\n   - Если запись в файл не удаётся, выводит сообщение об ошибке в консоль.\n\n**Как использовать**:\n- Импортируйте функции в вашем основном коде: `from error_handler import handle_error, log_error`.\n- При возникновении ошибки вызовите `error_details = handle_error(\"Сообщение об ошибке\", \"network\")`.\n- Для логирования: `log_error(error_details)` или `log_error(error_details, \"my_app_errors.log\")`.\n\n**Важные замечания**:\n- Код не требует внешних зависимостей, использует только стандартную библиотеку Python.\n- Лог-файл будет создаваться в той же директории, где выполняется скрипт. Убедитесь, что у вас есть права на запись.\n- Для продакшн-среды рекомендуется добавить ротацию логов, более сложную обработку исключений и, возможно, интеграцию с системами мониторинга.",
+      "error": null,
+      "model_used": "deepseek-chat",
+      "tokens_used": 0
+    }
+  }
+}

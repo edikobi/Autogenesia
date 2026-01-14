@@ -1,0 +1,18 @@
+{
+  "total_files": 169,
+  "python_files": 0,
+  "non_python_files": 169,
+  "total_tokens": 1142031,
+  "python_tokens": 0,
+  "non_python_tokens": 1142031,
+  "by_type": {
+    "data/json": {
+      "count": 84,
+      "tokens": 813751
+    },
+    "text/md": {
+      "count": 85,
+      "tokens": 328280
+    }
+  }
+}

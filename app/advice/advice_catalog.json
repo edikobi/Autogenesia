@@ -1,0 +1,192 @@
+{
+  "version": "1.0",
+  "description": "Methodological thinking frameworks for Orchestrator Agent Mode",
+  "categories": {
+    "general": {
+      "name": "General Methodologies",
+      "description": "Universal thinking approaches for any task type",
+      "applies_to": ["ask", "new_project"]
+    },
+    "existing_project": {
+      "name": "Existing Project Patterns", 
+      "description": "Specific approaches for modifying live codebases",
+      "applies_to": ["ask"]
+    },
+    "new_project": {
+      "name": "New Project Architecture",
+      "description": "Architectural thinking for greenfield projects",
+      "applies_to": ["new_project"]
+    }
+  },
+  "advices": [
+    {
+      "id": "ADV-G01",
+      "name": "Bug Hunting Methodology",
+      "category": "general",
+      "description": "Systematic approach to finding ALL related bugs, not just the obvious one. Covers: data flow tracing, pattern detection across codebase, dependency impact analysis, edge case verification.",
+      "when_to_use": "User reports error, crash, unexpected behavior, or failing tests"
+    },
+    {
+      "id": "ADV-G02",
+      "name": "Feature Integration Thinking",
+      "category": "general", 
+      "description": "How to add new functionality without creating isolated 'islands'. Covers: existing pattern analysis, integration point identification, dependency direction preservation.",
+      "when_to_use": "Adding new method, class, or module to existing codebase"
+    },
+    {
+      "id": "ADV-G03",
+      "name": "Safe Refactoring Framework",
+      "category": "general",
+      "description": "How to restructure code without changing behavior. Covers: change scope limitation, contract preservation, incremental transformation, rollback planning.",
+      "when_to_use": "Improving code structure, renaming, extracting methods/classes"
+    },
+    {
+      "id": "ADV-G04",
+      "name": "Security Audit Checklist",
+      "category": "general",
+      "description": "Systematic security vulnerability detection. Covers: input validation gaps, injection vectors, authentication weaknesses, data exposure risks.",
+      "when_to_use": "Security review requested, or handling sensitive data/auth"
+    },
+    {
+      "id": "ADV-G05",
+      "name": "Dependency Graph Analysis",
+      "category": "general",
+      "description": "How to map and reason about component relationships. Covers: import chain tracing, circular dependency detection, impact radius estimation.",
+      "when_to_use": "Complex multi-file changes, understanding system structure"
+    },
+    
+    {
+      "id": "ADV-G06",
+      "name": "Error Recovery Framework",
+      "category": "general",
+      "description": "Systematic approach to handling validation, testing, and runtime errors. Covers: error classification, root cause analysis, fix strategy selection, regression prevention.",
+      "when_to_use": "Validation fails, tests fail, runtime errors occur, or Code Generator produces invalid code"
+    },
+    
+    {
+      "id": "ADV-G07",
+      "name": "Validator Feedback Interpretation Framework",
+      "category": "general",
+      "description": "Systematic approach to interpreting and classifying feedback from the Validator agent. Covers: feedback decomposition, severity assessment, root cause analysis in the generation process, and formulation of corrective instructions.",
+      "when_to_use": "When receiving feedback from the Validator about issues in generated code"
+    },
+
+    
+    {
+      "id": "ADV-G08",
+      "name": "Framework Contract Analysis",
+      "category": "general",
+      "description": "Analysis methodology for errors arising from violation of implicit execution contracts with frameworks, libraries, or managed runtimes. Focuses on control flow and lifecycle management rather than data flow.",
+      "when_to_use": "When errors involve missing arguments with contextual names (ctx, self, request), decorated functions, or framework-managed code. When standard debugging fails to locate the source of missing parameters."
+    },
+    
+    {
+      "id": "ADV-G09",
+      "name": "Code Generation Failure Recovery",
+      "category": "general",
+      "description": "Protocol for handling persistent syntax errors or patching failures in generated code. Covers: switching generation strategies (PATCH vs REPLACE), instruction refinement, and dirty context handling.",
+      "when_to_use": "Validator reports syntax/indentation errors, Code Generator produces invalid patches, or duplicate code appears after fixes"
+    },
+
+
+    {
+      "id": "ADV-G10",
+      "name": "Instruction Compliance Recovery",
+      "category": "general",
+      "description": "Strategy for cases when the Code Generator partially follows instructions or deviates from requested change scope. Focuses on instruction clarity, verifiable acceptance criteria, and iterative tightening without the Orchestrator writing code.",
+      "when_to_use": "When generated code repeatedly violates explicit requirements (scope, preserve-list, output format), produces partial changes, ignores ordering, or introduces unrelated modifications despite clear instructions"
+    },
+
+    
+    {
+      "id": "ADV-E01",
+      "name": "Caching Strategy Design",
+      "category": "existing_project",
+      "description": "How to think about adding caching to existing system. Covers: cache location selection, invalidation strategy, consistency guarantees, failure scenarios.",
+      "when_to_use": "Adding caching, memoization, or performance optimization via storage"
+    },
+    {
+      "id": "ADV-E02",
+      "name": "Security Hardening Process",
+      "category": "existing_project",
+      "description": "Strengthening security of existing codebase. Covers: vulnerability surface mapping, defense layers, backward compatibility of security changes.",
+      "when_to_use": "Improving security of existing features, fixing vulnerabilities"
+    },
+    {
+      "id": "ADV-E03",
+      "name": "Performance Optimization Approach",
+      "category": "existing_project",
+      "description": "How to identify and fix performance bottlenecks. Covers: hotspot identification, algorithmic vs I/O issues, measurement-driven optimization.",
+      "when_to_use": "Slow performance reported, optimization requested"
+    },
+    {
+      "id": "ADV-E04",
+      "name": "Comprehensive Code Review",
+      "category": "existing_project",
+      "description": "Systematic code quality assessment methodology. Covers: correctness verification, edge case analysis, maintainability evaluation, test coverage gaps.",
+      "when_to_use": "Full code review requested, quality audit needed"
+    },
+    
+    {
+      "id": "ADV-E05",
+      "name": "Feature Addition Workflow",
+      "category": "existing_project",
+      "description": "Complete methodology for adding new functionality to existing codebase. Covers: requirement analysis, architecture fit assessment, incremental implementation, testing strategy, documentation.",
+      "when_to_use": "User requests new feature, capability, or enhancement to existing project"
+    },
+    
+    {
+      "id": "ADV-E06",
+      "name": "GUI Feature Integration",
+      "category": "existing_project",
+      "description": "Methodology for extending existing graphical interfaces. Focuses on visual consistency, component reuse, state hierarchy adherence, and responsive layout preservation.",
+      "when_to_use": "Adding a button, form, screen, or visual element to an existing GUI application"
+    },
+    {
+      "id": "ADV-E07",
+      "name": "GUI Debugging & Repair",
+      "category": "existing_project",
+      "description": "Systematic approach to diagnosing and fixing visual or interactive bugs. Covers: layer isolation (state vs. view), event flow tracing, component boundary analysis, and layout debugging.",
+      "when_to_use": "UI element looks wrong, buttons don't react, wrong data displayed, or layout is broken"
+    },
+
+    {
+      "id": "ADV-N01",
+      "name": "Distributed System Design",
+      "category": "new_project",
+      "description": "Thinking framework for systems with multiple components. Covers: consistency vs availability tradeoffs, failure domain isolation, communication patterns.",
+      "when_to_use": "Building microservices, multi-process systems, networked applications"
+    },
+    {
+      "id": "ADV-N02",
+      "name": "Real-time Feature Architecture",
+      "category": "new_project",
+      "description": "Designing live-updating, event-driven features. Covers: state synchronization, conflict resolution, connection lifecycle, offline handling.",
+      "when_to_use": "Building chat, live updates, collaborative features, notifications"
+    },
+    {
+      "id": "ADV-N03",
+      "name": "Data Pipeline Construction",
+      "category": "new_project",
+      "description": "Architecting data processing workflows. Covers: stage isolation, error recovery, backpressure handling, idempotency guarantees.",
+      "when_to_use": "Building ETL, data processing, batch jobs, streaming systems"
+    },
+  
+    {
+      "id": "ADV-N04",
+      "name": "Greenfield Project Design",
+      "category": "new_project",
+      "description": "Comprehensive framework for designing new applications from scratch. Covers: requirement extraction, architecture selection, technology stack decisions, project structure, error handling strategy, testing approach.",
+      "when_to_use": "Starting new project, designing application architecture, or planning multi-module system"
+    },
+
+    {
+      "id": "ADV-N05",
+      "name": "GUI Application Architecture",
+      "category": "new_project",
+      "description": "Thinking framework for designing graphical user interfaces (GUI) with separation of concerns. Covers: component hierarchy design, state management strategy, user interaction flow, visual consistency patterns, accessibility considerations.",
+      "when_to_use": "Building desktop GUI, web frontend, mobile interface, or any user-facing graphical application"
+    }
+  
+  ]
+}

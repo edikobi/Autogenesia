@@ -1,0 +1,23 @@
+openai>=1.55.0           # Официальный SDK, совместим с DeepSeek
+gigachat>=0.1.35         # Официальный SDK от Сбера
+tiktoken>=0.8.0          # Подсчет токенов
+pydantic>=2.10.0         # Валидация данных
+pydantic-settings>=2.6.0 # Загрузка настроек из .env
+python-dotenv>=1.0.1     # Работа с переменными окружения
+rich>=13.9.4             # Красивый вывод в консоль (цветные логи, таблицы)
+httpx>=0.27.0            # Для кастомных HTTP запросов (если нужно обойти SSL)
+aiohttp
+aiofiles
+pyparseit
+markdown
+watchdog>=3.0.0
+pypdf
+python-docx
+pandas
+openpyxl
+nest_asyncio
+mypy
+autopep8
+black
+tree-sitter>=0.21.0
+tree-sitter-python>=0.21.0
