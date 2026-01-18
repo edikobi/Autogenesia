@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
+import textwrap
 
 # После строки: from enum import Enum
 # Добавить:
@@ -1241,6 +1242,7 @@ class FileModifier:
         insert_line_offset = None
         context_line_for_indent = None
         
+        # 1. Determine insertion point and context line
         if insert_after:
             for i, line in enumerate(method_lines):
                 if insert_after in line:
@@ -1285,12 +1287,13 @@ class FileModifier:
                 context_line_for_indent = last_return_line
             else:
                 insert_line_offset = len(method_lines)
+                # Find last non-empty line for context
                 for line in reversed(method_lines):
                     if line.strip():
                         context_line_for_indent = line
                         break
         
-        # Определяем отступ из контекста с учётом блочных конструкций
+        # 2. Определяем отступ из контекста с учётом блочных конструкций
         if context_line_for_indent:
             is_block_start = context_line_for_indent.strip().endswith(':')
             base_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
@@ -1301,13 +1304,14 @@ class FileModifier:
                 body_indent = base_indent
         else:
             # Fallback на отступ определения метода + 1 уровень
-            method_indent = method_info.indent
-            body_indent = method_indent + self.default_indent
+            body_indent = method_info.indent + self.default_indent
         
-        # Нормализуем код
-        formatted_code = self._normalize_and_indent_code(code, body_indent)
+        # 3. CRITICAL: Нормализуем код с правильным отступом
+        # Fix: Сначала очищаем отступы через dedent, чтобы убрать артефакты генерации
+        dedented_code = textwrap.dedent(code)
+        formatted_code = self._normalize_and_indent_code(dedented_code, body_indent)
         
-        # Вычисляем абсолютную позицию
+        # 4. Вычисляем абсолютную позицию
         absolute_insert_line = method_start + insert_line_offset
         
         # Добавляем пустую строку если нужно
@@ -1334,8 +1338,6 @@ class FileModifier:
             changes_made=[f"Inserted {added_lines} lines into {target_name}"],
             lines_added=added_lines,
         )
-    
-    
     
     
     # ========================================================================

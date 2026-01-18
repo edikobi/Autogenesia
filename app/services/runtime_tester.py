@@ -351,11 +351,15 @@ class FrameworkDetector:
     Supports both old (string→string) and new (object with patterns) JSON registry formats.
     """
     
-    def __init__(self):
-        """Initialize framework detector."""
+    def __init__(self, vfs: Optional['VirtualFileSystem'] = None, project_root: Optional[Path] = None, source_roots: Optional[List[str]] = None):
+        """Initialize framework detector with optional VirtualFileSystem support."""
         self.logger = logging.getLogger(__name__)
         self.framework_patterns: Dict[str, Tuple[AppType, str, List[Pattern], float]] = {}
         self.import_to_framework: Dict[str, str] = {}
+        self.vfs = vfs
+        self.project_root = project_root
+        self.source_roots = source_roots if source_roots is not None else ['']
+        self._stdlib_modules: Optional[Set[str]] = None
     
     
     
@@ -436,7 +440,7 @@ class FrameworkDetector:
     
     def detect(self, content: str, file_path: str) -> Tuple[Dict[str, str], AppType]:
         """
-        Detect frameworks used in file.
+        Detect frameworks used in file with recursive import analysis.
         
         Args:
             content: File content as string
@@ -445,6 +449,12 @@ class FrameworkDetector:
         Returns:
             Tuple of (detected_frameworks_dict, primary_app_type)
         """
+        return self._detect_recursive(content, file_path, max_depth=2, visited=None)
+    
+    
+    
+    def _detect_single_file(self, content: str, file_path: str) -> Tuple[Dict[str, str], AppType]:
+        """Analyze a single file for framework detection without recursion. This is the original detect logic extracted into a separate method."""
         detected: Dict[str, str] = {}
         weights: Dict[str, float] = defaultdict(float)
         
@@ -501,8 +511,8 @@ class FrameworkDetector:
             selected_app_type = AppType.STANDARD
         else:
             priority = [AppType.WEB_APP, AppType.DAEMON, AppType.GUI, AppType.SQL_POSTGRES, 
-                       AppType.SQL_SQLITE, AppType.API_DEPENDENT, AppType.CLI, AppType.TESTING, 
-                       AppType.STANDARD]
+                    AppType.SQL_SQLITE, AppType.API_DEPENDENT, AppType.CLI, AppType.TESTING, 
+                    AppType.STANDARD]
             for app_type in priority:
                 if app_type in type_weights and type_weights[app_type] > 0:
                     selected_app_type = app_type
@@ -511,6 +521,215 @@ class FrameworkDetector:
         return detected, selected_app_type
     
     
+    def _detect_recursive(self, content: str, file_path: str, max_depth: int = 2, visited: Optional[Set[str]] = None) -> Tuple[Dict[str, str], AppType]:
+        """Recursively detect frameworks by analyzing local imports. Propagates strong types (CLI, GUI, DAEMON, etc.) from imported modules to the entry point."""
+        if visited is None:
+            visited = set()
+        
+        # Normalize path
+        file_path = file_path.replace('\\', '/')
+        
+        # Add to visited
+        visited.add(file_path)
+        
+        # Detect in current file
+        detected, app_type = self._detect_single_file(content, file_path)
+        
+        # Define strong types that should stop recursion
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI}
+        
+        # If we found a strong type, return immediately
+        if app_type in STRONG_TYPES:
+            return detected, app_type
+        
+        # If max depth reached or no VFS, return current result
+        if max_depth <= 0 or self.vfs is None:
+            return detected, app_type
+        
+        # Extract local imports
+        local_imports = self._extract_local_imports(content)
+        
+        # Recursively check each local import
+        for module_name in local_imports:
+            resolved_path = self._resolve_import_to_file(module_name, file_path)
+            
+            if resolved_path is None or resolved_path in visited:
+                continue
+            
+            try:
+                # Try VFS first
+                child_content = self.vfs.read_file(resolved_path)
+                
+                # Fallback: Read from physical disk if not in VFS
+                if child_content is None and self.project_root:
+                    try:
+                        full_path = self.project_root / resolved_path
+                        if full_path.exists():
+                            child_content = full_path.read_text(encoding='utf-8', errors='replace')
+                    except Exception:
+                        pass
+                
+                if child_content is None:
+                    continue
+                
+                child_detected, child_app_type = self._detect_recursive(
+                    child_content, resolved_path, max_depth - 1, visited
+                )
+                
+                # If child has strong type, inherit it
+                if child_app_type in STRONG_TYPES:
+                    app_type = child_app_type
+                    detected.update(child_detected)
+                    self.logger.debug(
+                        f"Inherited {child_app_type.value} from {resolved_path} for {file_path}"
+                    )
+                    break
+            
+            except Exception as e:
+                self.logger.debug(f"Error analyzing import {module_name}: {e}")
+                continue
+        
+        return detected, app_type
+    
+    
+    def _extract_local_imports(self, content: str) -> Set[str]:
+        """Extract local project imports from Python source, excluding stdlib and pip packages."""
+        local_imports: Set[str] = set()
+        
+        # Get stdlib modules
+        stdlib = self._get_stdlib_modules()
+        
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return local_imports
+        
+        try:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    # Case: import module, import module.submodule
+                    for alias in node.names:
+                        base_module = alias.name.split('.')[0].lower()
+                        if base_module not in stdlib and base_module not in self.import_to_framework:
+                            local_imports.add(alias.name)
+                
+                elif isinstance(node, ast.ImportFrom):
+                    # Case: from module import name
+                    if node.level > 0:
+                        # Relative import (from . import x, from .sub import x)
+                        if node.module:
+                            # Add the module itself (e.g., 'sub' from 'from .sub import x')
+                            local_imports.add(node.module)
+                        
+                        # Add all imported names as potential local dependencies
+                        for alias in node.names:
+                            if alias.name and alias.name != '*':
+                                local_imports.add(alias.name)
+                    
+                    else:
+                        # Absolute import (from app import gui, from app.services import auth)
+                        if node.module:
+                            base_module = node.module.split('.')[0].lower()
+                            if base_module not in stdlib and base_module not in self.import_to_framework:
+                                # Add the module itself
+                                local_imports.add(node.module)
+                                
+                                # CRITICAL: Add module.alias combinations
+                                # This forces scanner to check for submodules
+                                # e.g., 'from app import gui' -> add 'app.gui' to check for app/gui.py
+                                for alias in node.names:
+                                    if alias.name and alias.name != '*':
+                                        local_imports.add(f"{node.module}.{alias.name}")
+        
+        except Exception:
+            pass
+        
+        return local_imports
+    
+    
+    def _resolve_import_to_file(self, module_name: str, context_file_path: Optional[str] = None) -> Optional[str]:
+        """
+        Resolve a module name to a file path using discovered source roots and context.
+        """
+        if self.vfs is None:
+            return None
+        
+        rel_path = module_name.replace('.', '/')
+        search_roots = []
+        
+        if context_file_path:
+            parent_dir = str(Path(context_file_path).parent).replace('\\', '/')
+            if parent_dir == '.':
+                parent_dir = ''
+            search_roots.append(parent_dir)
+        
+        search_roots.extend(self.source_roots)
+        
+        unique_roots = []
+        seen = set()
+        for r in search_roots:
+            if r not in seen:
+                unique_roots.append(r)
+                seen.add(r)
+        
+        for root in unique_roots:
+            if root:
+                base_path = f"{root}/{rel_path}"
+            else:
+                base_path = rel_path
+            
+            candidates = [f"{base_path}.py", f"{base_path}/__init__.py"]
+            for candidate in candidates:
+                if self.vfs.file_exists(candidate):
+                    return candidate
+                
+                if self.project_root:
+                    try:
+                        full_path = self.project_root / candidate
+                        if full_path.exists():
+                            return candidate
+                    except Exception:
+                        pass
+        
+        return None
+    
+    
+    def _get_stdlib_modules(self) -> Set[str]:
+        """Get a set of Python standard library module names (cached)."""
+        if self._stdlib_modules is not None:
+            return self._stdlib_modules
+        
+        stdlib = {
+            'abc', 'aifc', 'argparse', 'array', 'ast', 'asynchat', 'asyncio', 'asyncore',
+            'atexit', 'audioop', 'base64', 'bdb', 'binascii', 'binhex', 'bisect', 'builtins',
+            'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd', 'code', 'codecs',
+            'codeop', 'collections', 'colorsys', 'compileall', 'concurrent', 'configparser',
+            'contextlib', 'contextvars', 'copy', 'copyreg', 'cProfile', 'crypt', 'csv', 'ctypes',
+            'curses', 'dataclasses', 'datetime', 'dbm', 'decimal', 'difflib', 'dis', 'distutils',
+            'doctest', 'dummy_thread', 'dummy_threading', 'email', 'encodings', 'ensurepip',
+            'enum', 'errno', 'faulthandler', 'fcntl', 'filecmp', 'fileinput', 'fnmatch',
+            'fractions', 'ftplib', 'functools', 'gc', 'getopt', 'getpass', 'gettext', 'glob',
+            'grp', 'gzip', 'hashlib', 'heapq', 'hmac', 'html', 'http', 'imaplib', 'imghdr',
+            'imp', 'importlib', 'inspect', 'io', 'ipaddress', 'itertools', 'json', 'keyword',
+            'lib2to3', 'linecache', 'locale', 'logging', 'lzma', 'mailbox', 'mailcap', 'marshal',
+            'math', 'mimetypes', 'mmap', 'modulefinder', 'msilib', 'msvcrt', 'multiprocessing',
+            'netrc', 'nis', 'nntplib', 'numbers', 'operator', 'optparse', 'os', 'ossaudiodev',
+            'parser', 'pathlib', 'pdb', 'pickle', 'pickletools', 'pipes', 'pkgutil', 'platform',
+            'plistlib', 'poplib', 'posix', 'posixpath', 'pprint', 'profile', 'pstats', 'pty',
+            'pwd', 'py_compile', 'pyclbr', 'pydoc', 'queue', 'quopri', 'random', 're', 'readline',
+            'reprlib', 'resource', 'rlcompleter', 'runpy', 'sched', 'secrets', 'select', 'selectors',
+            'shelve', 'shlex', 'shutil', 'signal', 'site', 'smtpd', 'smtplib', 'sndhdr', 'socket',
+            'socketserver', 'spwd', 'sqlite3', 'ssl', 'stat', 'statistics', 'string', 'stringprep',
+            'struct', 'subprocess', 'sunau', 'symbol', 'symtable', 'sys', 'sysconfig', 'syslog',
+            'tabnanny', 'tarfile', 'telnetlib', 'tempfile', 'termios', 'test', 'textwrap', 'threading',
+            'time', 'timeit', 'tkinter', 'token', 'tokenize', 'trace', 'traceback', 'tracemalloc',
+            'tty', 'turtle', 'types', 'typing', 'unicodedata', 'unittest', 'urllib', 'uu', 'uuid',
+            'venv', 'warnings', 'wave', 'weakref', 'webbrowser', 'winreg', 'winsound', 'wsgiref',
+            'xdrlib', 'xml', 'xmlrpc', 'zipapp', 'zipfile', 'zipimport', 'zlib',
+        }
+        
+        self._stdlib_modules = stdlib
+        return stdlib
     
     def _extract_imports_ast(self, content: str) -> Set[str]:
         """
@@ -727,7 +946,63 @@ class RuntimeTester:
         self._load_framework_registry()
     
     
-    
+    def _discover_source_roots(self) -> List[str]:
+        """
+        Dynamically discover project source roots.
+        
+        Strategies:
+        1. Explicit Packages: The parent of any top-level package (dir with __init__.py) is a root.
+        2. Implicit Namespace Roots (PEP 420): Any top-level directory containing Python code 
+        but NO __init__.py is considered a potential source root (e.g., 'src', 'lib', 'scripts').
+        """
+        roots = set([''])  # Project root is always a candidate
+        
+        try:
+            # Use all files (real + staged)
+            all_files = self.vfs.get_all_python_files()
+            
+            # Helper to check if a dir is an explicit package
+            # We cache this to avoid repeated VFS checks
+            package_dirs = set()
+            for f in all_files:
+                if f.endswith('__init__.py'):
+                    package_dirs.add(str(Path(f).parent).replace('\\', '/'))
+
+            # Strategy 1: Backtrack from explicit packages
+            for pkg_path in package_dirs:
+                current = pkg_path
+                parent = str(Path(current).parent).replace('\\', '/')
+                if parent == '.': parent = ''
+                
+                # Walk up as long as parent is also a package
+                while parent in package_dirs:
+                    current = parent
+                    parent = str(Path(current).parent).replace('\\', '/')
+                    if parent == '.': parent = ''
+                
+                roots.add(parent)
+            
+            # Strategy 2: Detect top-level implicit roots (PEP 420)
+            for f in all_files:
+                # Normalize path
+                path = f.replace('\\', '/')
+                parts = path.split('/')
+                
+                # If file is in a subdirectory (not in root)
+                if len(parts) > 1:
+                    top_level_dir = parts[0]
+                    
+                    # If this top-level dir is NOT an explicit package (no __init__.py)
+                    # It acts as a namespace root (e.g., 'src', 'lib')
+                    if top_level_dir not in package_dirs:
+                        roots.add(top_level_dir)
+
+        except Exception as e:
+            logger.warning(f"Error discovering source roots: {e}")
+            
+        # Sort by length (shortest first) to prioritize root over nested folders, 
+        # but standard alphabetical is fine too.
+        return sorted(list(roots))
     
     
     def _load_framework_registry(self) -> None:
@@ -790,8 +1065,15 @@ class RuntimeTester:
             f"({json_count} from JSON, {builtin_count} built-in)"
         )
         
-        # Initialize enhanced framework detector
-        self.framework_detector = FrameworkDetector()
+        # Initialize enhanced framework detector with discovered source roots
+        source_roots = self._discover_source_roots()
+        logger.debug(f"Discovered source roots: {source_roots}")
+        
+        self.framework_detector = FrameworkDetector(
+            vfs=self.vfs, 
+            project_root=self.vfs.project_root,
+            source_roots=source_roots
+        )
         self.framework_detector.load_from_registry(self._framework_registry)
         
         logger.debug(f"Enhanced framework detector initialized with {len(self.framework_detector.framework_patterns)} patterns")
@@ -810,6 +1092,8 @@ class RuntimeTester:
                 "JSON framework registry is empty or failed to load. "
                 "Using built-in patterns only."
             )
+    
+    
     
     def _get_framework_mapping_info(self) -> Dict[str, Any]:
         """
@@ -940,33 +1224,15 @@ class RuntimeTester:
         # Start with temp_dir as primary root
         pythonpath_parts = [temp_dir]
         
-        # Explicitly add common source roots if they exist
-        # This supports namespace packages (no __init__.py) by adding roots to sys.path
-        src_dir = Path(temp_dir) / 'src'
-        if src_dir.exists():
-            pythonpath_parts.append(str(src_dir))
-            
-        app_dir = Path(temp_dir) / 'app'
-        if app_dir.exists():
-            pythonpath_parts.append(str(app_dir))
+        # Add discovered source roots
+        # This supports src/, app/, backend/, or any other structure dynamically
+        source_roots = self._discover_source_roots()
+        for root in source_roots:
+            if root:  # Skip empty root (already added as temp_dir)
+                root_path = Path(temp_dir) / root
+                if root_path.exists():
+                    pythonpath_parts.append(str(root_path))
         
-        # Calculate project root within temp directory for nested files
-        # (This helps if we are running a script deep in the tree)
-        file_rel_dir = str(Path(file_path).parent)
-        if file_rel_dir != '.':
-            current = Path(temp_dir) / file_rel_dir
-            # Add parent directories that might be implicit namespace roots
-            # Stop at temp_dir
-            try:
-                while current != Path(temp_dir):
-                    if current.exists() and str(current) not in pythonpath_parts:
-                        # Only add if it looks like a root (heuristic)
-                        # But for now, we rely mostly on temp_dir, src, and app
-                        pass 
-                    current = current.parent
-            except Exception:
-                pass
-
         # Add original project root if different from temp_dir
         # (This is a fallback for things not copied to VFS, though VFS should be complete)
         project_root = str(self.vfs.project_root)
@@ -1370,70 +1636,126 @@ except Exception as e:
         """
         Check if file imports project modules that use specific frameworks.
         
-        Propagates AppTypes from imported modules to the importer.
+        Uses FrameworkDetector's recursive analysis to propagate AppTypes 
+        from imported modules to the importer (entry points like main.py).
+        
         Priority: GUI > WEB > TUI > DAEMON > CLI
         """
-        # Get file's own classification first
         own_type = self._get_file_app_type(file_path, analysis)
         
-        # If already classified as something specific (not STANDARD), use that
-        if own_type != AppType.STANDARD:
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI}
+        
+        if own_type in STRONG_TYPES:
             return own_type
         
-        # Read file content
         content = self.vfs.read_file(file_path)
         if content is None:
             return own_type
+        
+        try:
+            is_entry = self._is_entry_point(file_path, content)
             
-        # Extract project imports from this file
-        import_patterns = [
-            r'from\s+([\w.]+)\s+import',
-            r'import\s+([\w.]+)',
-        ]
+            if is_entry:
+                deep_scan_result = self._deep_scan_entry_point_frameworks(file_path)
+                if deep_scan_result in STRONG_TYPES:
+                    logger.debug(f"Entry point {file_path} detected as {deep_scan_result.value} via deep scan")
+                    return deep_scan_result
+            else:
+                detected_frameworks, detected_app_type = self.framework_detector.detect(content, file_path)
+                
+                if detected_app_type in STRONG_TYPES:
+                    logger.debug(
+                        f"Transitive framework detection: {file_path} -> {detected_app_type.value} "
+                        f"(frameworks: {list(detected_frameworks.keys())})"
+                    )
+                    return detected_app_type
         
-        imported_modules = set()
-        for pattern in import_patterns:
-            for match in re.finditer(pattern, content):
-                module = match.group(1)
-                imported_modules.add(module)
-                # Also add parent modules (e.g., 'app.cli.commands' -> 'app.cli')
-                parts = module.split('.')
-                for i in range(1, len(parts)):
-                    imported_modules.add('.'.join(parts[:i]))
-
-        # Types to check in priority order
-        # If I import a GUI module, I am likely a GUI entry point.
-        check_types = [
-            AppType.GUI, 
-            AppType.WEB_APP, 
-            AppType.TUI, 
-            AppType.DAEMON, 
-            AppType.CLI
-        ]
+        except Exception as e:
+            logger.debug(f"Error in transitive framework detection for {file_path}: {e}")
         
-        for app_type in check_types:
-            # Get list of files of this type from the analysis
-            target_files = set(analysis.file_types.get(app_type.value, []))
-            if not target_files:
-                continue
-                
-            # Check if any imported module corresponds to a file of this type
-            for target_file in target_files:
-                if not target_file.endswith('.py'):
-                    continue
-                    
-                # Convert file path to module name
-                # e.g., "app/cli/commands.py" -> "app.cli.commands"
-                module_name = target_file[:-3].replace('/', '.').replace('\\', '.')
-                if module_name.endswith('.__init__'):
-                    module_name = module_name[:-9]
-                
-                # Check if this module is imported
-                if module_name in imported_modules:
-                    logger.debug(f"Transitive {app_type.value} detection: {file_path} imports {module_name}")
-                    return app_type
-                
         return own_type
+
+
+
+    def _is_entry_point(self, file_path: str, content: Optional[str] = None) -> bool:
+        """Determines if a file is an entry point (main script that launches the application)."""
+        ENTRY_POINT_NAMES = {'main.py', 'run.py', 'app.py', 'start.py', 'launcher.py', 'cli.py', '__main__.py', 'manage.py', 'server.py', 'bot.py', 'game.py'}
+        
+        file_name = Path(file_path).name.lower()
+        if file_name in ENTRY_POINT_NAMES:
+            return True
+        
+        if content is None:
+            try:
+                content = self.vfs.read_file(file_path)
+            except Exception:
+                return False
+        
+        if content is None:
+            return False
+        
+        try:
+            pattern = r'if\s+__name__\s*==\s*["\']__main__["\']'
+            return bool(re.search(pattern, content))
+        except Exception:
+            return False
+
+
+    def _deep_scan_entry_point_frameworks(self, file_path: str) -> AppType:
+        """Performs deep recursive scan of all imports from an entry point file to detect long-running frameworks. Unlike _detect_recursive which has depth limit, this scans ALL reachable files."""
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON}
+        
+        visited: Set[str] = set()
+        to_visit: List[str] = [file_path]
+        found_strong_type: Optional[AppType] = None
+        
+        try:
+            while to_visit and found_strong_type is None:
+                current_path = to_visit.pop(0)
+                
+                if current_path in visited:
+                    continue
+                
+                visited.add(current_path)
+                
+                try:
+                    content = self.vfs.read_file(current_path)
+                    
+                    if content is None and self.vfs.project_root:
+                        try:
+                            full_path = self.vfs.project_root / current_path
+                            if full_path.exists():
+                                content = full_path.read_text(encoding='utf-8', errors='replace')
+                        except Exception:
+                            pass
+                    
+                    if content is None:
+                        continue
+                    
+                    detected, app_type = self.framework_detector._detect_single_file(content, current_path)
+                    
+                    if app_type in STRONG_TYPES:
+                        found_strong_type = app_type
+                        logger.info(f"Entry point {file_path} inherits {app_type.value} from {current_path}")
+                        break
+                    
+                    local_imports = self.framework_detector._extract_local_imports(content)
+                    
+                    for module_name in local_imports:
+                        resolved_path = self.framework_detector._resolve_import_to_file(module_name, current_path)
+                        if resolved_path and resolved_path not in visited:
+                            to_visit.append(resolved_path)
+                
+                except Exception:
+                    continue
+        
+        except Exception as e:
+            logger.error(f"Error in deep scan for entry point {file_path}: {e}")
+        
+        if found_strong_type:
+            return found_strong_type
+        
+        return AppType.STANDARD
 
 
     def _get_file_app_type(self, file_path: str, analysis: ProjectAnalysis) -> AppType:

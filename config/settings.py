@@ -167,14 +167,14 @@ class Config:
         
         # === ГРУППА DEEPSEEK ===
         "deepseek-chat": {
-            "api_key": os.getenv("DEEPSEEK_API_KEY"),
-            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "api_key": DEEPSEEK_API_KEY,  # ← переменная класса!,
+            "base_url": DEEPSEEK_BASE_URL,
             "provider_name": "DeepSeek"
         },
         # DeepSeek V3.2 Reasoning (R1)
         "deepseek-reasoner": {
-            "api_key": os.getenv("DEEPSEEK_API_KEY"),
-            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "api_key": DEEPSEEK_API_KEY,
+            "base_url":DEEPSEEK_BASE_URL,
             "provider_name": "DeepSeek",
             "extra_params": {
             }
@@ -324,6 +324,9 @@ class Config:
     }
     
     
+    
+    
+    
     # ============ МЕТОДЫ ДЛЯ УДОБНОГО ВЫБОРА МОДЕЛИ (ОБНОВЛЕНО) ============
     @classmethod
     def get_orchestrator_model_config(cls):
@@ -469,6 +472,9 @@ class Config:
         return cls.AGENT_MODE_CONFIG["ai_validator_model_large"]
 
 
+         
+         
+         
             # Доступные модели генератора для выбора
 # Формат: (key, model_id, short_name, description)
 AVAILABLE_GENERATOR_MODELS = [

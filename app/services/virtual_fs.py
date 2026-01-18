@@ -293,6 +293,8 @@ class VirtualFileSystem:
         
         self._pending_changes[rel_path] = change
         
+        self.invalidate_cache()        
+        
         # Invalidate caches
         self._affected_cache = None
         
@@ -332,6 +334,8 @@ class VirtualFileSystem:
         """
         rel_path = self._normalize_path(file_path)
         
+        self.invalidate_cache()
+        
         if rel_path in self._pending_changes:
             del self._pending_changes[rel_path]
             self._affected_cache = None
@@ -348,9 +352,11 @@ class VirtualFileSystem:
         Returns:
             Количество отменённых изменений
         """
+        self.invalidate_cache()
         count = len(self._pending_changes)
         self._pending_changes.clear()
         self._affected_cache = None
+        
         
         logger.info(f"Discarded all changes ({count} files)")
         return count
@@ -387,6 +393,8 @@ class VirtualFileSystem:
         
         for path in to_remove:
             del self._pending_changes[path]
+        
+        self.invalidate_cache()
         
         # Invalidate cache
         self._affected_cache = None
@@ -747,6 +755,7 @@ class VirtualFileSystem:
         Updates content of an already staged file without losing its original_content.
         Returns True if file was already staged, False if it was newly staged.
         """
+        self.invalidate_cache()
         rel_path = self._normalize_path(file_path)
         if rel_path in self._pending_changes:
             existing = self._pending_changes[rel_path]
@@ -763,6 +772,8 @@ class VirtualFileSystem:
             self.stage_change(file_path, new_content)
             return False
 
+    
+    
     def get_change(self, file_path: str) -> Optional[PendingChange]:
         """Возвращает pending change для файла"""
         rel_path = self._normalize_path(file_path)
@@ -839,19 +850,29 @@ class VirtualFileSystem:
         
         return found
     
+    
     def get_all_python_files(self) -> List[str]:
         """
         Возвращает список всех Python файлов в проекте.
         
+        Включает:
+        - Файлы на диске
+        - Staged файлы (новые)
+        
         Исключает:
         - .venv, venv, __pycache__
         - Директории, начинающиеся с точки
+        - Staged файлы, помеченные на удаление
         
         Returns:
             Список относительных путей
         """
-        files = []
+        if self._python_files_cache is not None:
+            return self._python_files_cache
         
+        files_set = set()
+        
+        # 1. Сканируем диск
         for py_file in self.project_root.rglob('*.py'):
             try:
                 rel_path = py_file.relative_to(self.project_root)
@@ -862,12 +883,26 @@ class VirtualFileSystem:
                        for p in parts):
                     continue
                 
-                files.append(self._normalize_path(str(rel_path)))
+                files_set.add(self._normalize_path(str(rel_path)))
                 
             except ValueError:
                 continue
         
-        return files    
+        # 2. Применяем staged изменения
+        for path, change in self._pending_changes.items():
+            if not path.endswith('.py'):
+                continue
+                
+            if change.is_deletion:
+                files_set.discard(path)
+            else:
+                # Add new or modified files (modified are likely already in set, but safe to add)
+                files_set.add(path)
+        
+        self._python_files_cache = sorted(list(files_set))
+        return self._python_files_cache
+
+
 
     def get_project_python(self) -> str:
         """
@@ -1498,6 +1533,7 @@ else:
         if history_manager and result.change_record_ids:
             await history_manager.mark_changes_applied(result.change_record_ids)
         
+        self.invalidate_cache()
         self._pending_changes.clear()
         self._affected_cache = None
         
@@ -1572,6 +1608,8 @@ else:
         if backup_manager:
             backup_manager.end_session()
         
+        self.invalidate_cache()
+
         self._pending_changes.clear()
         self._affected_cache = None
         
@@ -1664,31 +1702,14 @@ else:
         """
         Итерирует по всем Python файлам проекта.
         
+        Alias for get_all_python_files() to ensure consistency with staged changes.
+        
         Returns:
             Список относительных путей к .py файлам
         """
-        if self._python_files_cache is not None:
-            return self._python_files_cache
-        
-        python_files = []
-        
-        for py_file in self.project_root.rglob("*.py"):
-            rel_path = py_file.relative_to(self.project_root)
-            
-            # Пропускаем игнорируемые
-            skip = False
-            for part in rel_path.parts:
-                if part in self.IGNORE_PATTERNS or part.startswith('.'):
-                    skip = True
-                    break
-            
-            if skip:
-                continue
-            
-            python_files.append(str(rel_path).replace('\\', '/'))
-        
-        self._python_files_cache = python_files
-        return python_files
+        return self.get_all_python_files()
+    
+    
     
     def invalidate_cache(self):
         """Принудительно инвалидирует все кэши"""
