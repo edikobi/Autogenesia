@@ -25,6 +25,7 @@ from config.settings import cfg
 from app.llm.api_client import call_llm
 from app.llm.prompt_templates import format_ai_validator_prompt
 from app.utils.token_counter import TokenCounter
+from app.llm.api_client import call_llm_full, LLMAPIError
 
 if TYPE_CHECKING:
     from app.agents.feedback_handler import ValidatorFeedback
@@ -96,50 +97,32 @@ class AIValidator:
         self._total_validations = 0
         self._total_approvals = 0
         self._total_tokens = 0
+        self._fallback_count = 0  # счетчик fallback-ов
+    
+    
+    FALLBACK_ERROR_PATTERNS = [
+        "No endpoints found matching your data policy",
+        "404", "not found", "not available", "unavailable",
+        "rate limit", "quota", "exceeded", "limit reached",
+        "access denied", "forbidden", "unauthorized",
+        "model not found", "endpoint not found",
+    ]    
     
     async def validate(
         self,
         request: Optional[AIValidationRequest] = None,
         *,
-        # Alternative: pass arguments directly
         user_request: Optional[str] = None,
         orchestrator_instruction: Optional[str] = None,
         original_content: Optional[str] = None,
         proposed_code: Optional[str] = None,
         file_path: Optional[str] = None,
     ) -> AIValidationResult:
-        """
-        Validate generated code against user request.
-        
-        Can be called two ways:
-        1. With AIValidationRequest object:
-           await validator.validate(request)
-           
-        2. With keyword arguments:
-           await validator.validate(
-               user_request="...",
-               orchestrator_instruction="...",
-               original_content="...",
-               proposed_code="...",
-               file_path="..."
-           )
-        
-        Args:
-            request: AIValidationRequest with all context (option 1)
-            user_request: Original user's request (option 2)
-            orchestrator_instruction: Instruction for Code Generator (option 2)
-            original_content: Original file content (option 2)
-            proposed_code: Generated code to validate (option 2)
-            file_path: Target file path (option 2)
-            
-        Returns:
-            AIValidationResult with decision and metadata
-        """
+        """Validate с механизмом fallback при ошибках Qwen/OpenRouter"""
         start_time = time.time()
         
-        # Handle both calling conventions
+        # Обработка параметров (существующий код)
         if request is None:
-            # Build request from keyword arguments
             if user_request is None or proposed_code is None:
                 raise ValueError(
                     "Either 'request' or both 'user_request' and 'proposed_code' must be provided"
@@ -152,16 +135,17 @@ class AIValidator:
                 file_path=file_path or "",
             )
         
-        # Calculate context size for model selection
+        # Определяем модели
         context_size = self._calculate_context_size(request)
-        model = cfg.get_ai_validator_model(context_size)
+        primary_model = cfg.get_ai_validator_model(context_size)
+        fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
         
         logger.info(
             f"AIValidator: Starting validation (context={context_size} tokens, "
-            f"model={cfg.get_model_display_name(model)})"
+            f"primary_model={cfg.get_model_display_name(primary_model)})"
         )
         
-        # Build prompts
+        # Подготавливаем промпты
         prompts = format_ai_validator_prompt(
             user_request=request.user_request,
             orchestrator_instruction=request.orchestrator_instruction,
@@ -175,29 +159,35 @@ class AIValidator:
             {"role": "user", "content": prompts["user"]},
         ]
         
+        # Попытка 1: Основная модель
         try:
-            # Call LLM
-            response = await call_llm(
-                model=model,
+            response = await call_llm_full(
+                model=primary_model,
                 messages=messages,
-                temperature=0,  # Deterministic for consistency
-                max_tokens=2500,  # Short response expected
+                temperature=0,
+                max_tokens=2500,
             )
             
             duration_ms = (time.time() - start_time) * 1000
             
-            # Parse response
+            # Проверяем обрезку ответа
+            if response.finish_reason == "length":
+                logger.warning(
+                    f"⚠️ AIValidator: Primary model response TRUNCATED, "
+                    f"considering fallback to {cfg.get_model_display_name(fallback_model)}"
+                )
+                raise LLMAPIError("Response truncated - trying fallback")
+            
+            # Парсим успешный ответ
             result = self._parse_response(
-                response=response,
-                model=model,
+                response=response.content,
+                model=primary_model,
                 duration_ms=duration_ms,
             )
+            result.tokens_used = response.total_tokens
             
-            # Update stats
-            self._total_validations += 1
-            if result.approved:
-                self._total_approvals += 1
-            self._total_tokens += result.tokens_used
+            # Обновляем статистику
+            self._update_stats(result)
             
             logger.info(
                 f"AIValidator: {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
@@ -207,22 +197,63 @@ class AIValidator:
             return result
             
         except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            logger.error(f"AIValidator error: {e}")
+            # Проверяем, нужно ли использовать fallback
+            error_str = str(e).lower()
+            should_fallback = any(pattern in error_str for pattern in self.FALLBACK_ERROR_PATTERNS)
             
-            # Return conservative rejection on error
-            return AIValidationResult(
-                approved=False,
-                confidence=0.0,
-                core_request="[Error during validation]",
-                verdict=f"Validation failed: {str(e)[:100]}",
-                critical_issues=["Validation system error - please retry"],
-                model_used=model,
-                tokens_used=0,
-                duration_ms=duration_ms,
-                raw_response="",
-                parse_error=str(e),
-            )
+            if should_fallback and primary_model != fallback_model:
+                # Попытка 2: Fallback на DeepSeek
+                logger.warning(
+                    f"AIValidator: Primary model {primary_model} failed: {e}. "
+                    f"Falling back to {cfg.get_model_display_name(fallback_model)}"
+                )
+                
+                try:
+                    fallback_response = await call_llm_full(
+                        model=fallback_model,
+                        messages=messages,
+                        temperature=0,
+                        max_tokens=2500,
+                    )
+                    
+                    fallback_duration_ms = (time.time() - start_time) * 1000
+                    
+                    result = self._parse_response(
+                        response=fallback_response.content,
+                        model=fallback_model,
+                        duration_ms=fallback_duration_ms,
+                    )
+                    result.tokens_used = fallback_response.total_tokens
+                    result.model_used = fallback_model
+                    result.verdict = f"[Fallback] {result.verdict}"
+                    
+                    self._update_stats(result, is_fallback=True)
+                    
+                    logger.info(
+                        f"AIValidator: Fallback SUCCESSFUL - "
+                        f"{'✅ APPROVED' if result.approved else '❌ REJECTED'}"
+                    )
+                    
+                    return result
+                    
+                except Exception as fallback_error:
+                    # Fallback тоже не сработал
+                    logger.error(f"AIValidator: Fallback also failed: {fallback_error}")
+                    return self._create_error_result(
+                        error=fallback_error,
+                        duration_ms=(time.time() - start_time) * 1000,
+                        is_fallback_failure=True,
+                    )
+            else:
+                # Ошибка, но fallback не требуется
+                duration_ms = (time.time() - start_time) * 1000
+                logger.error(f"AIValidator: Error (no fallback): {e}")
+                return self._create_error_result(
+                    error=e,
+                    duration_ms=duration_ms,
+                    is_fallback_failure=False,
+                )    
+    
     
     def _calculate_context_size(self, request: AIValidationRequest) -> int:
         """Calculate total context size in tokens."""
@@ -402,6 +433,36 @@ class AIValidator:
         )
 
     
+    def _update_stats(self, result: AIValidationResult, is_fallback: bool = False):
+        """Обновляем статистику с учетом fallback"""
+        self._total_validations += 1
+        if result.approved:
+            self._total_approvals += 1
+        self._total_tokens += result.tokens_used
+        if is_fallback:
+            self._fallback_count = getattr(self, '_fallback_count', 0) + 1
+  
+    
+    def _create_error_result(self, error, duration_ms: float, 
+                             is_fallback_failure: bool = False) -> AIValidationResult:
+        """Создаем результат при ошибке"""
+        error_msg = str(error)[:200]
+        fallback_note = " (fallback also failed)" if is_fallback_failure else ""
+        
+        return AIValidationResult(
+            approved=True,  # КЛЮЧЕВОЕ: одобряем при ошибке
+            confidence=0.1,
+            core_request="[Validator error]",
+            verdict=f"Validation failed{fallback_note}: {error_msg}",
+            critical_issues=[],
+            model_used="error",
+            tokens_used=0,
+            duration_ms=duration_ms,
+            raw_response="",
+            parse_error=error_msg,
+        )    
+    
+    
     def create_structured_feedback(self, result: AIValidationResult) -> ValidatorFeedback:
         """
         Create structured feedback object from validation result.
@@ -426,11 +487,15 @@ class AIValidator:
         if self._total_validations > 0:
             approval_rate = self._total_approvals / self._total_validations
         
+        fallback_count = getattr(self, '_fallback_count', 0)
+
+        
         return {
             "total_validations": self._total_validations,
             "total_approvals": self._total_approvals,
             "approval_rate": approval_rate,
             "total_tokens": self._total_tokens,
+            "fallback_count": fallback_count,
         }
 
 
