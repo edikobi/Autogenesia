@@ -702,13 +702,13 @@ class AgentPipeline:
         1. Orchestrator analyzes → generates instruction
         2. Code Generator writes code
         3. Technical Validation (syntax, imports, integration)
-           - On error → feedback to Orchestrator → loop from step 1
+        - On error → feedback to Orchestrator → loop from step 1
         4. AI Validator checks semantic correctness
-           - On rejection → Orchestrator decides (accept/override)
-           - If Orchestrator accepts → loop from step 1
-           - If Orchestrator overrides → user decides
+        - On rejection → Orchestrator decides (accept/override)
+        - If Orchestrator accepts → loop from step 1
+        - If Orchestrator overrides → user decides
         5. Tests + Runtime run in VFS
-           - On error → feedback to Orchestrator → loop from step 1
+        - On error → feedback to Orchestrator → loop from step 1
         6. User confirmation → apply to real files
         
         History is preserved across all iterations!
@@ -865,8 +865,8 @@ class AgentPipeline:
                             )
                             
                             working_history.append({
-                                 "role": "user",
-                                  "content": error_feedback,
+                                "role": "user",
+                                "content": error_feedback,
                             })
                             
                             # Записываем в trace
@@ -878,7 +878,7 @@ class AgentPipeline:
                         # Первая итерация — действительно direct_answer
                         logger.info("Orchestrator provided DIRECT_ANSWER — skipping code generation")
                         self._notify_stage("DIRECT_ANSWER", "Оркестратор отвечает напрямую (без генерации кода)", {
-                             "answer_preview": direct_answer[:200] if direct_answer else "",
+                            "answer_preview": direct_answer[:200] if direct_answer else "",
                         })
                         
                         # Return successful result with direct answer
@@ -891,21 +891,21 @@ class AgentPipeline:
                         trace.complete(success=True, status="direct_answer", duration_ms=result.duration_ms)
                         vlog.log_complete(True, result.duration_ms)
                         return result
-    
-                # === EXTRACT DELETIONS FROM INSTRUCTION ===
-                if orchestrator_result.instruction:
-                    clean_instruction, new_deletions = extract_deletions_from_instruction(
-                        orchestrator_result.instruction
-                    )
-                    if new_deletions:
-                        self._pending_deletions.extend(new_deletions)
-                        logger.info(f"Extracted {len(new_deletions)} pending deletions")
-                        self._notify_stage("DELETIONS", f"Обнаружено {len(new_deletions)} удалений (будут применены после тестов)", {
-                            "deletions": [{"target": d.target_name, "file": d.file_path} for d in new_deletions],
-                        })
-                    # Use clean instruction (without DELETE blocks) for code generator
-                    result.instruction = clean_instruction
-                    self._pending_orchestrator_instruction = clean_instruction                
+            
+                    # === EXTRACT DELETIONS FROM INSTRUCTION ===
+                    if orchestrator_result.instruction:
+                        clean_instruction, new_deletions = extract_deletions_from_instruction(
+                            orchestrator_result.instruction
+                        )
+                        if new_deletions:
+                            self._pending_deletions.extend(new_deletions)
+                            logger.info(f"Extracted {len(new_deletions)} pending deletions")
+                            self._notify_stage("DELETIONS", f"Обнаружено {len(new_deletions)} удалений (будут применены после тестов)", {
+                                "deletions": [{"target": d.target_name, "file": d.file_path} for d in new_deletions],
+                            })
+                        # Use clean instruction (without DELETE blocks) for code generator
+                        result.instruction = clean_instruction
+                        self._pending_orchestrator_instruction = clean_instruction                
                 
                 # === Trace: log instruction ===
                 trace.set_instruction(orchestrator_result.instruction or "[No instruction]")
@@ -1019,10 +1019,26 @@ class AgentPipeline:
                     
                     staging_attempt += 1
                     
+                    # Log staging errors to trace immediately (for every attempt)
+                    for err_item in apply_errors_data:
+                        trace.add_staging_error(
+                            file_path=err_item.get("file_path", ""),
+                            mode=err_item.get("mode", ""),
+                            error=err_item.get("error", ""),
+                            error_type=str(err_item.get("error_type")) if err_item.get("error_type") else None,
+                            target_class=err_item.get("target_class"),
+                            target_method=err_item.get("target_method"),
+                            target_function=err_item.get("target_function"),
+                            code_preview=err_item.get("code_preview"),
+                        )
+                        
+                        # Dump full report to separate file
+                        trace.dump_staging_error_report(err_item)
+                    
                     # 1. Log and notify
-                    error_msgs = [f"{e['file_path']}: {e['error']}" for e in apply_errors_data]
                     self._notify_stage("STAGING", f"❌ Ошибки стейджинга (попытка {staging_attempt}/{MAX_STAGING_ATTEMPTS})", {
-                        "errors": error_msgs,
+                        "errors": apply_errors_data,  # Pass full error objects with targets/code
+                        "error_count": len(apply_errors_data),
                     })
                     
                     # If we reached max attempts, stop trying and let main loop handle it
@@ -1092,7 +1108,7 @@ class AgentPipeline:
                     result.errors.extend(error_msgs)
                     
                     self._notify_stage("STAGING", f"❌ Не удалось исправить ошибки стейджинга: {len(apply_errors_data)}", {
-                        "errors": error_msgs,
+                        "errors": apply_errors_data,  # Pass full error objects with targets/code
                     })
                     
                     # 2. Добавляем в FeedbackHandler (для следующей большой итерации)
@@ -1103,8 +1119,24 @@ class AgentPipeline:
                             error=err_item["error"],
                             error_type=err_item.get("error_type")
                         )
+                        
+                        # Dump full report to separate file
+                        trace.dump_staging_error_report(err_item)
                     
-                    # 3. Формируем сообщение для истории
+                    # 3. Логируем в трейс
+                    for err_item in apply_errors_data:
+                        trace.add_staging_error(
+                            file_path=err_item.get("file_path", ""),
+                            mode=err_item.get("mode", ""),
+                            error=err_item.get("error", ""),
+                            error_type=str(err_item.get("error_type")) if err_item.get("error_type") else None,
+                            target_class=err_item.get("target_class"),
+                            target_method=err_item.get("target_method"),
+                            target_function=err_item.get("target_function"),
+                            code_preview=err_item.get("code_preview"),
+                        )
+                    
+                    # 4. Формируем сообщение для истории
                     feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
                     staging_text = feedback_dump.get("staging_errors", "")
                     
@@ -1113,7 +1145,7 @@ class AgentPipeline:
                         "content": f"[CRITICAL ERRORS - STAGING FAILED]\n\n{staging_text}\n\nPlease revise your instruction.",
                     })
                     
-                    # 4. Записываем ревизию и идем на следующий круг (основной цикл)
+                    # 5. Записываем ревизию и идем на следующий круг (основной цикл)
                     self.feedback_loop.record_orchestrator_revision(
                         reason=f"Staging failed after {staging_attempt} attempts: {len(apply_errors_data)} errors",
                         previous_instruction=self._pending_orchestrator_instruction or "",
@@ -1581,7 +1613,7 @@ class AgentPipeline:
                         f"✅ Удалено (закомментировано): {sum(1 for d in deletion_results if d['success'])} элементов",
                         {"results": deletion_results}
                     )
-                                    
+                                        
                 result.success = True
                 result.feedback_iterations = iteration
                 
@@ -1637,7 +1669,7 @@ class AgentPipeline:
             trace.set_error(f"Pipeline error: {e}")
             trace.complete(success=False, status="error", duration_ms=result.duration_ms)
             
-            return result
+        return result
     
         
     async def _validation_loop(
@@ -2692,21 +2724,36 @@ Remember: You can override the validator if you believe the critique is incorrec
                     self.vfs.stage_change(block.file_path, result.new_content)
                     logger.info(f"Staged: {block.file_path} ({block.mode})")
                 else:
-                    errors.append({
-                        "file_path": block.file_path,
-                        "mode": str(block.mode),
+                    # Create error dict with ALL available info from block using to_dict()
+                    # This ensures target_attribute, replace_pattern, and full code are included
+                    error_dict = block.to_dict()
+                    error_dict.update({
                         "error": result.message,
-                        "error_type": getattr(result, "error_type", None)
+                        "error_type": getattr(result, "error_type", None),
+                        "code_preview": block.code[:100] if block.code else None,
+                        "full_code": block.code,  # Alias for clarity
                     })
-                    logger.warning(f"Failed to apply block to {block.file_path}: {result.message}")
+                    
+                    errors.append(error_dict)
+                    
+                    # Log with logger.warning including ALL details
+                    logger.warning(
+                        f"Failed to apply block to {block.file_path}: {result.message} | "
+                        f"mode={block.mode}, target_class={block.target_class}, "
+                        f"target_method={block.target_method}, target_function={block.target_function}"
+                    )
                     
             except Exception as e:
-                errors.append({
-                    "file_path": block.file_path,
-                    "mode": str(block.mode),
+                # In the except block, also include block details using to_dict()
+                error_dict = block.to_dict()
+                error_dict.update({
                     "error": str(e),
-                    "error_type": None
+                    "error_type": None,
+                    "code_preview": block.code[:100] if block.code else None,
+                    "full_code": block.code,  # Alias for clarity
                 })
+                
+                errors.append(error_dict)
                 logger.error(f"Error staging {block.file_path}: {e}")
         
         # 4. Rollback if any errors occurred

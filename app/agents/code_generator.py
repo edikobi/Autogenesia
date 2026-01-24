@@ -1474,7 +1474,10 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         TARGET_CLASS: ClassName (optional)
         TARGET_METHOD: method_name (optional)
         TARGET_FUNCTION: function_name (optional)
+        TARGET_ATTRIBUTE: attribute_name (optional)
         INSERT_AFTER: element_name (optional)
+        INSERT_BEFORE: element_name (optional)
+        REPLACE_PATTERN: pattern_to_find (optional)
         
         ```python
         <code here>
@@ -1525,8 +1528,10 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         target_class = _extract_field(block_content, "TARGET_CLASS")
         target_method = _extract_field(block_content, "TARGET_METHOD")
         target_function = _extract_field(block_content, "TARGET_FUNCTION")
+        target_attribute = _extract_field(block_content, "TARGET_ATTRIBUTE")
         insert_after = _extract_field(block_content, "INSERT_AFTER")
         insert_before = _extract_field(block_content, "INSERT_BEFORE")
+        replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
         
         # Извлекаем код из code fence
         code = _extract_code_from_block(block_content)
@@ -1551,8 +1556,10 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             target_class=target_class,
             target_method=target_method,
             target_function=target_function,
+            target_attribute=target_attribute,
             insert_after=insert_after,
             insert_before=insert_before,
+            replace_pattern=replace_pattern,
         ))
         
         logger.debug(f"Parsed CODE_BLOCK: {file_path} [{mode}]")

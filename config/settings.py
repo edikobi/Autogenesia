@@ -140,8 +140,8 @@ class Config:
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Zhipu)",
             "extra_params": {
-                "thinking": {
-                    "type": "disabled"
+                "reasoning": {
+                    "effort": "none"
                 }
             }
         },

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Iterator
+from typing import Optional, List, Tuple, Iterator, Any
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,7 @@ class ParseResult:
     parsed_imports: List[ParsedImport] = field(default_factory=list)
     imports: List[str] = field(default_factory=list)  # Найденные импорты
     errors: List[Tuple[int, int, str]] = field(default_factory=list)  # (line, col, message)
+    root_node: Any = None
     success: bool = True
     
     @property
@@ -197,35 +198,37 @@ class FaultTolerantParser:
     
     def parse(self, source_code: str) -> ParseResult:
         """
-        Парсит Python-код.
+        Парсит Python код и возвращает структурированную информацию.
         
         Args:
-            source_code: Исходный код Python
+            source_code: Исходный код для парсинга
             
         Returns:
-            ParseResult с классами, функциями и ошибками
+            ParseResult с информацией о классах, функциях, импортах и ошибках
         """
         self._ensure_parser()
         
         result = ParseResult()
         
         try:
-            # Tree-sitter работает с байтами
             source_bytes = source_code.encode('utf-8')
             tree = self._parser.parse(source_bytes)
+            result.root_node = tree.root_node
             
-            # Собираем ошибки
-            self._collect_errors(tree.root_node, source_bytes, result)
-            
-            # Парсим структуру
+            # Парсим дерево — используем существующий метод _parse_node
             self._parse_node(tree.root_node, source_bytes, result, parent_class=None)
             
+            # Собираем синтаксические ошибки — используем существующий метод _collect_errors
+            self._collect_errors(tree.root_node, source_bytes, result)
+            
+            result.success = len(result.errors) == 0
+            
         except Exception as e:
-            logger.error(f"Tree-sitter parsing failed: {e}")
+            result.errors.append(f"Parse error: {str(e)}")
             result.success = False
-            result.errors.append((1, 0, str(e)))
         
         return result
+    
     
     def _collect_errors(self, node, source_bytes: bytes, result: ParseResult):
         """Рекурсивно собирает все ERROR узлы."""

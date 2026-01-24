@@ -360,19 +360,19 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
         "2",
         cfg.MODEL_SONNET_4_5,
         "Claude Sonnet 4.5",
-        "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует (в теории, но на практике не очень)"
+        "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует."
     ),
     (
         "3",
         cfg.MODEL_OPUS_4_5,
         "Claude Opus 4.5",
-        "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Любит думать и в простой задаче всё усложнит. ОЧЕНЬ дорогой!"
+        "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Также контекстное окно всего 200к токенов"
     ),
     (
         "4",
         cfg.MODEL_GEMINI_3_PRO,
         "✨ Gemini 3.0 Pro",
-        "Сложная модель, но исполнительная. Огромное окно 1 млн токенов (не сжимается умно). Не особо любит пользоваться инструментами Относительно дешёвая."
+        "Сложная модель, но исполнительная. Огромное окно 1 млн токенов. Не особо любит пользоваться инструментами. Относительно дешёвая."
     ),
     (
         "5",
@@ -402,13 +402,13 @@ AVAILABLE_GENERATOR_MODELS = [
         "2",
         cfg.MODEL_GLM_4_7,
         "GLM 4.7",
-        "Китайская модель от Zhipu AI. Хороша для структурированного кода, поддерживает thinking mode(новая модель, поэтому надо быть осторожным)."
+        "Китайская модель от Zhipu AI. Хороша для структурированного кода, поддерживает thinking mode(новая модель,есть баг, пока рассуждение не отключается)."
     ),
     (
         "3",
         cfg.MODEL_HAIKU_4_5,
         "Claude Haiku 4.5",
-        "Лёгкая модель от Anthropic. Быстрая, качественная, отлично следует инструкциям(считается лучшей, но для в этой роли ее ответы дорогие, как крыло самолета)."
+        "Лёгкая модель от Anthropic. Самая лучшая и испольнительная, но и дороже всех."
     ),
 
     (
@@ -422,7 +422,7 @@ AVAILABLE_GENERATOR_MODELS = [
         "5",
         cfg.MODEL_GPT_5_1_Codex_MINI,
         "GPT-5.1-Codex-Mini",
-        "Младшая модель CODEX от OpenAI, мнимально думающая и быстрая, есть риск самостоятельности"
+        "Младшая модель CODEX от OpenAI, минимально думает"
     ),
 
 ]
@@ -4907,196 +4907,184 @@ async def handle_agent_mode(query: str):
     has_changes = bool(result.pending_changes) or bool(result.code_blocks)
     
     if has_changes and result.success:
-        console.print("\n" + "=" * 60)
-        console.print("[bold yellow]📝 ИЗМЕНЕНИЯ ГОТОВЫ К ПРИМЕНЕНИЮ[/]")
-        console.print("=" * 60 + "\n")
-        
-        # Показываем diff если есть
-        if result.diffs:
-            # Отдельно обрабатываем __deletions__ если есть
-            deletions_info = result.diffs.pop("__deletions__", None)
+        # === LOOP FOR CONFIRMATION / CRITIQUE ===
+        while True:
+            console.print("\n" + "=" * 60)
+            console.print("[bold yellow]📝 ИЗМЕНЕНИЯ ГОТОВЫ К ПРИМЕНЕНИЮ[/]")
+            console.print("=" * 60 + "\n")
             
-            # Показываем diffs файлов
+            # Показываем diff если есть (с учетом обновлений после критики)
             if result.diffs:
-                print_diff_preview(result.diffs)
+                # Копируем diffs, чтобы не ломать оригинал при pop
+                current_diffs = result.diffs.copy()
+                deletions_info = current_diffs.pop("__deletions__", None)
+                
+                # Показываем diffs файлов
+                if current_diffs:
+                    print_diff_preview(current_diffs)
+                
+                # Показываем информацию об удалениях
+                if deletions_info and isinstance(deletions_info, list):
+                    console.print("\n[bold yellow]🗑️ Закомментированный код (soft delete):[/]\n")
+                    for d in deletions_info:
+                        if d.get("success"):
+                            console.print(f"   [green]✓[/] `{d['target']}` ({d['type']}) в `{d['file']}`")
+                            if d.get("reason"):
+                                reason = d['reason']
+                                if len(reason) > 60:
+                                    reason = reason[:60] + "..."
+                                console.print(f"      [dim]Причина: {reason}[/]")
+                        else:
+                            console.print(f"   [red]✗[/] `{d['target']}` в `{d['file']}`: {d.get('error', 'ошибка')}")        
             
-            # Показываем информацию об удалениях
-            if deletions_info and isinstance(deletions_info, list):
-                console.print("\n[bold yellow]🗑️ Закомментированный код (soft delete):[/]\n")
-                for d in deletions_info:
-                    if d.get("success"):
-                        console.print(f"   [green]✓[/] `{d['target']}` ({d['type']}) в `{d['file']}`")
-                        if d.get("reason"):
-                            console.print(f"      [dim]Причина: {d['reason'][:60]}...[/]" if len(d.get('reason', '')) > 60 else f"      [dim]Причина: {d['reason']}[/]")
-                    else:
-                        console.print(f"   [red]✗[/] `{d['target']}` в `{d['file']}`: {d.get('error', 'ошибка')}")        
-        
-        elif result.code_blocks:
-            # Если нет diffs, показываем код блоки
-            console.print("[bold]Изменения в файлах:[/]\n")
-            for block in result.code_blocks:
-                console.print(f"   📄 {block.file_path} ({block.mode})")
-        
-        # Статистика
-        files_count = len(result.pending_changes) if result.pending_changes else len(result.code_blocks)
-        console.print(f"\n[bold]📊 Итого:[/]")
-        console.print(f"   Файлов к изменению: {files_count}")
-        console.print(f"   Итераций цикла: {result.feedback_iterations}")
-        console.print(f"   Время выполнения: {result.duration_ms:.0f}ms")
-        
-        # === ПОДТВЕРЖДЕНИЕ ===
-        console.print()
-        console.print("[bold green]✅ Все проверки пройдены! Код готов к применению.[/]")
-        console.print()
-        
-        try:
-            confirm = confirm_with_navigation(
-                "Применить изменения в реальные файлы?",
-                default=True  # По умолчанию ДА, т.к. всё прошло успешно
-            )
-        except (BackException, BackToMenuException, QuitException) as nav_exc:
-            await state.pipeline.discard_pending_changes()
+            elif result.code_blocks:
+                # Если нет diffs, показываем список файлов
+                console.print("[bold]Изменения в файлах:[/]\n")
+                for block in result.code_blocks:
+                    console.print(f"   📄 {block.file_path} ({block.mode})")
             
-            # === СОХРАНЯЕМ ИСТОРИЮ ПРИ ВЫХОДЕ ===
-            exit_response = "## ⚠️ Сессия прервана\n\n"
-            if result.analysis:
-                exit_response += f"**Анализ:**\n{result.analysis}\n\n"
-            if result.code_blocks:
-                exit_response += f"**Подготовленные изменения ({len(result.code_blocks)} файлов):**\n"
-                for block in result.code_blocks[:5]:
-                    exit_response += f"- `{block.file_path}`\n"
-                if len(result.code_blocks) > 5:
-                    exit_response += f"- ... и ещё {len(result.code_blocks) - 5} файлов\n"
-            exit_response += "\n*Пользователь вышел до подтверждения. Изменения не применены.*"
+            # Статистика (динамическая)
+            files_count = len(result.pending_changes) if result.pending_changes else len(result.code_blocks)
+            feedback_iterations = result.feedback_iterations
             
-            await save_message("assistant", exit_response)
+            console.print(f"\n[bold]📊 Итого:[/]")
+            console.print(f"   Файлов к изменению: {files_count}")
+            console.print(f"   Итераций цикла: {feedback_iterations}")
+            if result.duration_ms:
+                console.print(f"   Время выполнения: {result.duration_ms:.0f}ms")
             
-            print_info("Изменения отменены, история сохранена")
-            raise nav_exc
-        
-        logger.info(f"User confirmation: {confirm}")
-        
-        if confirm:
-            # === ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ===
-            console.print("\n[dim]⏳ Применение изменений...[/]")
+            # === ПОДТВЕРЖДЕНИЕ ===
+            console.print()
+            console.print("[bold green]✅ Все проверки пройдены! Код готов к применению.[/]")
+            console.print("Для принятия изменений введите Y или нажмите Enter, для отказа n")
+            console.print()
             
             try:
-                apply_result = await state.pipeline.apply_pending_changes()
-                
-                logger.info(f"Apply result: success={apply_result.success}, applied={apply_result.applied_files}, errors={apply_result.errors}")
-                
-                if apply_result.success:
-                    print_success(f"✅ Изменения применены в {len(apply_result.applied_files)} файл(ах)!")
-                    
-                    if apply_result.applied_files:
-                        console.print("\n[dim]Изменённые файлы:[/]")
-                        for f in apply_result.applied_files:
-                            console.print(f"   [green]✓[/] {f}")
-                    
-                    if apply_result.created_files:
-                        console.print("\n[dim]Созданные файлы:[/]")
-                        for f in apply_result.created_files:
-                            console.print(f"   [green]+[/] {f}")
-                    
-                    if apply_result.backup_session_id:
-                        console.print(f"\n[dim]💾 Бэкап создан: [cyan]{apply_result.backup_session_id}[/][/]")
-                        console.print(f"[dim]   Для восстановления: [cyan]/restore {apply_result.backup_session_id[:20]}[/][/]")
-                    
-                    # Обновление индекса
-                    if state.is_new_project and state.project_dir:
-                        console.print("\n[dim]Индексация нового проекта...[/]")
-                        if await build_project_indexes(state.project_dir):
-                            state.project_index = await load_project_index(state.project_dir)
-                            state.is_new_project = False
-                            print_success("Проект проиндексирован")
-                    elif state.project_dir:
-                        console.print("[dim]Обновление индекса...[/]")
-                        await run_incremental_update(state.project_dir)
-                        state.project_index = await load_project_index(state.project_dir)
-                        if state.pipeline:
-                            state.pipeline.project_index = state.project_index
-                        console.print("[green]✓[/] Индекс обновлён")
-                
-                else:
-                    print_error("Не удалось применить изменения")
-                    if apply_result.errors:
-                        for err in apply_result.errors:
-                            console.print(f"   [red]• {err}[/]")
-                            
-            except Exception as e:
-                logger.error(f"Error applying changes: {e}", exc_info=True)
-                print_error(f"Ошибка при применении: {e}")
-        
-        else:
-            # === ПОЛЬЗОВАТЕЛЬ ОТКАЗАЛСЯ ===
-            logger.info("User declined changes")
-            
-            console.print("\n[dim]Хотите написать замечания для доработки?[/]")
-            try:
-                provide_feedback = confirm_with_navigation("Написать замечания?", default=False)
+                confirm = confirm_with_navigation(
+                    "Применить изменения в реальные файлы?",
+                    default=True
+                )
             except (BackException, BackToMenuException, QuitException) as nav_exc:
                 await state.pipeline.discard_pending_changes()
                 
-                # Сохраняем историю
+                # Сохраняем историю при выходе
                 exit_response = "## ⚠️ Сессия прервана\n\n"
-                exit_response += "*Пользователь вышел из диалога. Предложенные изменения не применены.*"
-                await save_message("assistant", exit_response)
+                if result.analysis:
+                    exit_response += f"**Анализ:**\n{result.analysis}\n\n"
+                exit_response += "\n*Пользователь вышел до подтверждения. Изменения не применены.*"
                 
+                await save_message("assistant", exit_response)
+                print_info("Изменения отменены, история сохранена")
                 raise nav_exc
             
-            if provide_feedback:
-                console.print("\n[bold]Введите ваши замечания:[/]")
-                console.print("[dim]Что нужно исправить или изменить?[/]\n")
+            logger.info(f"User confirmation: {confirm}")
+            
+            if confirm:
+                # === ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ===
+                console.print("\n[dim]⏳ Применение изменений...[/]")
                 
                 try:
-                    user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
-                except KeyboardInterrupt:
-                    await state.pipeline.discard_pending_changes()
-                    print_info("Изменения отменены")
-                    return
+                    apply_result = await state.pipeline.apply_pending_changes()
+                    
+                    logger.info(f"Apply result: success={apply_result.success}, applied={apply_result.applied_files}, errors={apply_result.errors}")
+                    
+                    if apply_result.success:
+                        print_success(f"✅ Изменения применены в {len(apply_result.applied_files)} файл(ах)!")
+                        
+                        if apply_result.applied_files:
+                            console.print("\n[dim]Изменённые файлы:[/]")
+                            for f in apply_result.applied_files:
+                                console.print(f"   [green]✓[/] {f}")
+                        
+                        if apply_result.created_files:
+                            console.print("\n[dim]Созданные файлы:[/]")
+                            for f in apply_result.created_files:
+                                console.print(f"   [green]+[/] {f}")
+                        
+                        if apply_result.backup_session_id:
+                            console.print(f"\n[dim]💾 Бэкап создан: [cyan]{apply_result.backup_session_id}[/][/]")
+                            console.print(f"[dim]   Для восстановления: [cyan]/restore {apply_result.backup_session_id[:20]}[/][/]")
+                        
+                        # Обновление индекса
+                        if state.is_new_project and state.project_dir:
+                            console.print("\n[dim]Индексация нового проекта...[/]")
+                            if await build_project_indexes(state.project_dir):
+                                state.project_index = await load_project_index(state.project_dir)
+                                state.is_new_project = False
+                                print_success("Проект проиндексирован")
+                        elif state.project_dir:
+                            console.print("[dim]Обновление индекса...[/]")
+                            await run_incremental_update(state.project_dir)
+                            state.project_index = await load_project_index(state.project_dir)
+                            if state.pipeline:
+                                state.pipeline.project_index = state.project_index
+                            console.print("[green]✓[/] Индекс обновлён")
+                    
+                    else:
+                        print_error("Не удалось применить изменения")
+                        if apply_result.errors:
+                            for err in apply_result.errors:
+                                console.print(f"   [red]• {err}[/]")
+                                
+                except Exception as e:
+                    logger.error(f"Error applying changes: {e}", exc_info=True)
+                    print_error(f"Ошибка при применении: {e}")
                 
-                if user_feedback.strip():
-                    console.print("\n[dim]⏳ Обрабатываем ваши замечания (полный цикл)...[/]")
-                    
-                    # Сбрасываем текущие изменения
-                    await state.pipeline.discard_pending_changes()
-                    
-                    # Перезапускаем с замечаниями
-                    new_query = f"{query}\n\n[Дополнительные замечания от пользователя]: {user_feedback}"
-                    await handle_agent_mode(new_query)
-                    return
-                else:
-                    await state.pipeline.discard_pending_changes()
-                    print_info("Изменения отменены")
-                    
-                    # === СОХРАНЯЕМ ЧТО БЫЛО ПРЕДЛОЖЕНО ===
-                    declined_response = "## ⚠️ Изменения отклонены пользователем\n\n"
-                    if result.analysis:
-                        declined_response += f"**Анализ:**\n{result.analysis}\n\n"
-                    if result.code_blocks:
-                        declined_response += f"**Предложенные изменения ({len(result.code_blocks)} файлов):**\n"
-                        for block in result.code_blocks:
-                            declined_response += f"- `{block.file_path}` ({block.mode})\n"
-                        declined_response += "\n"
-                    declined_response += "*Пользователь отклонил предложенные изменения без замечаний.*"
-                    
-                    await save_message("assistant", declined_response)
+                # Выход из цикла после применения
+                break
+            
             else:
+                # === ПОЛЬЗОВАТЕЛЬ ОТКАЗАЛСЯ ===
+                logger.info("User declined changes")
+                console.print("\n[bold]Вы отказались от изменений.[/]")
+                console.print("[1] ✏️  Написать критику и доработать код")
+                console.print("[2] ❌ Отменить изменения и выйти")
+                console.print()
+                
+                choice = prompt_with_navigation("Выбор", choices=["1", "2"], default="1")
+                
+                if choice == "1":
+                    # === КРИТИКА И ДОРАБОТКА ===
+                    console.print("\n[bold]Введите ваши замечания:[/]")
+                    console.print("[dim]Что нужно исправить?[/]\n")
+                    
+                    try:
+                        user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
+                    except KeyboardInterrupt:
+                        choice = "2" # Fallback to cancel
+                    
+                    if choice == "1" and user_feedback.strip():
+                        console.print("\n[dim]⏳ Запускаем цикл доработки...[/]")
+                        
+                        # Запускаем цикл обратной связи
+                        new_result = await state.pipeline.run_feedback_cycle(
+                            user_feedback=user_feedback,
+                            history=history
+                        )
+                        
+                        if new_result and new_result.success:
+                            # Обновляем результат и идем на новую итерацию цикла
+                            result = new_result
+                            console.print("\n[bold green]✅ Код исправлен! Проверьте новые изменения.[/]")
+                            continue
+                        else:
+                            print_error("Не удалось исправить код по вашей критике")
+                            # Можно спросить еще раз или выйти, здесь остаемся в меню
+                            continue
+                    else:
+                        if choice == "1": print_warning("Пустая критика")
+                        # Возвращаемся к началу цикла подтверждения (показать старые изменения)
+                        continue
+                
+                # Отмена (choice == "2")
                 await state.pipeline.discard_pending_changes()
+                
+                # Сохраняем историю
+                decline_response = "## 🚫 Отклонено пользователем\n\n*Пользователь отклонил предложенные изменения.*"
+                await save_message("assistant", decline_response)
+                
                 print_info("Изменения отменены")
-                
-                # === СОХРАНЯЕМ ЧТО БЫЛО ПРЕДЛОЖЕНО ===
-                declined_response = "## ⚠️ Изменения отклонены пользователем\n\n"
-                if result.analysis:
-                    declined_response += f"**Анализ:**\n{result.analysis}\n\n"
-                if result.code_blocks:
-                    declined_response += f"**Предложенные изменения ({len(result.code_blocks)} файлов):**\n"
-                    for block in result.code_blocks:
-                        declined_response += f"- `{block.file_path}` ({block.mode})\n"
-                    declined_response += "\n"
-                declined_response += "*Пользователь отклонил предложенные изменения без замечаний.*"
-                
-                await save_message("assistant", declined_response)
+                break
     
     elif result.success:
         # Успех, но нет изменений файлов (например, только анализ)
@@ -5152,6 +5140,8 @@ async def handle_agent_mode(query: str):
         "iterations": result.feedback_iterations,
         "is_direct_answer": is_direct_answer_final,
     })
+
+
 
 async def handle_general_chat(query: str):
     """Обработка запроса в режиме General Chat (Общий Чат)"""

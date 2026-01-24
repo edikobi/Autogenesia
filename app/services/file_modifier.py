@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
 import textwrap
+  
 
 # После строки: from enum import Enum
 # Добавить:
@@ -39,16 +40,21 @@ def _get_tree_sitter_parser():
             _tree_sitter_parser = False  # Маркер что недоступен
     return _tree_sitter_parser if _tree_sitter_parser else None
 
+
 if TYPE_CHECKING:
     from app.services.virtual_fs import VirtualFileSystem
-    from app.agents.feedback_handler import StagingErrorType
+    from app.agents.feedback_handler import StagingErrorType  
+
 
 
 logger = logging.getLogger(__name__)
 
 
-def classify_staging_error(error_message: str, mode: Optional[str] = None) -> StagingErrorType:
+def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "StagingErrorType":
     """Classifies a staging error message into a StagingErrorType for structured feedback."""
+    # Lazy import to avoid circular dependency
+    from app.agents.feedback_handler import StagingErrorType
+    
     error_lower = error_message.lower()
     
     # Check patterns in order
@@ -70,8 +76,23 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> St
         return StagingErrorType.INVALID_MODE
     elif "parser" in error_lower and "not available" in error_lower:
         return StagingErrorType.PARSER_UNAVAILABLE
-    else:
-        return StagingErrorType.UNKNOWN
+    # Check for new REPLACE_IN_* modes
+    elif mode and mode.startswith("REPLACE_IN_"):
+        if "class" in error_lower and "not found" in error_lower:
+            return StagingErrorType.CLASS_NOT_FOUND
+        elif "method" in error_lower and "not found" in error_lower:
+            return StagingErrorType.METHOD_NOT_FOUND
+        elif "function" in error_lower and "not found" in error_lower:
+            return StagingErrorType.FUNCTION_NOT_FOUND
+        elif "pattern" in error_lower and "not found" in error_lower:
+            return StagingErrorType.INSERT_PATTERN_NOT_FOUND
+        elif "attribute" in error_lower and "not found" in error_lower:
+            return StagingErrorType.INSERT_PATTERN_NOT_FOUND
+    elif mode == "ADD_NEW_FUNCTION" or mode == "CREATE_FUNCTION":
+        if "must be a function definition" in error_lower:
+            return StagingErrorType.INVALID_CODE_FORMAT
+    
+    return StagingErrorType.UNKNOWN
 
 
 # ============================================================================
@@ -90,6 +111,13 @@ class ModifyMode(Enum):
     INSERT_IMPORT = "insert_import"     # Добавить импорт
     REPLACE_IMPORT = "replace_import"   # Заменить существующий импорт
     PATCH_METHOD = "patch_method"       # Вставить код внутрь существующего метода
+    INSERT_IN_CLASS = "insert_in_class"        # Вставить атрибут в тело класса
+    REPLACE_IN_CLASS = "replace_in_class"      # Заменить атрибут в теле класса
+    REPLACE_IN_METHOD = "replace_in_method"    # Заменить строку внутри метода
+    INSERT_IN_FUNCTION = "insert_in_function"  # Вставить код внутрь функции
+    REPLACE_IN_FUNCTION = "replace_in_function" # Заменить код внутри функции
+    ADD_NEW_FUNCTION = "add_new_function"      # Добавить новую функцию
+    REPLACE_GLOBAL = "replace_global"          # Заменить глобальную переменную/константу
 
 
 @dataclass
@@ -100,6 +128,7 @@ class ModifyInstruction:
     target_class: Optional[str] = None      # Для INSERT_INTO_CLASS, REPLACE_METHOD
     target_method: Optional[str] = None     # Для REPLACE_METHOD
     target_function: Optional[str] = None   # Для REPLACE_FUNCTION
+    target_attribute: Optional[str] = None  # ⭐ НОВОЕ: Для замены атрибута в классе
     insert_after: Optional[str] = None      # Вставить после указанного элемента
     insert_before: Optional[str] = None     # Вставить перед указанным элементом
     replace_pattern: Optional[str] = None   # Паттерн для поиска и замены
@@ -182,6 +211,7 @@ class ParsedCodeBlock:
     target_class: Optional[str] = None
     target_method: Optional[str] = None
     target_function: Optional[str] = None
+    target_attribute: Optional[str] = None  # ⭐ НОВОЕ: Для замены атрибута
     insert_after: Optional[str] = None
     insert_before: Optional[str] = None
     replace_pattern: Optional[str] = None
@@ -194,6 +224,7 @@ class ParsedCodeBlock:
             "target_class": self.target_class,
             "target_method": self.target_method,
             "target_function": self.target_function,
+            "target_attribute": self.target_attribute,
             "insert_after": self.insert_after,
             "insert_before": self.insert_before,
             "replace_pattern": self.replace_pattern,
@@ -275,6 +306,30 @@ class FileModifier:
         "PATCH_METHOD": ModifyMode.PATCH_METHOD,
         "INSERT_INTO_METHOD": ModifyMode.PATCH_METHOD,  # Алиас
         "ADD_LINES": ModifyMode.PATCH_METHOD,           # Алиас
+        
+        # Работа с телом класса (атрибуты)
+        "INSERT_IN_CLASS": ModifyMode.INSERT_IN_CLASS,
+        "ADD_ATTRIBUTE": ModifyMode.INSERT_IN_CLASS,  # Алиас
+        "REPLACE_IN_CLASS": ModifyMode.REPLACE_IN_CLASS,
+        "MODIFY_ATTRIBUTE": ModifyMode.REPLACE_IN_CLASS,  # Алиас
+        
+        # Работа внутри методов
+        "REPLACE_IN_METHOD": ModifyMode.REPLACE_IN_METHOD,
+        "MODIFY_METHOD_LINE": ModifyMode.REPLACE_IN_METHOD,  # Алиас
+        
+        # Работа внутри функций
+        "INSERT_IN_FUNCTION": ModifyMode.INSERT_IN_FUNCTION,
+        "PATCH_FUNCTION": ModifyMode.INSERT_IN_FUNCTION,  # Алиас
+        "REPLACE_IN_FUNCTION": ModifyMode.REPLACE_IN_FUNCTION,
+        
+        # Новые функции
+        "ADD_NEW_FUNCTION": ModifyMode.ADD_NEW_FUNCTION,
+        "CREATE_FUNCTION": ModifyMode.ADD_NEW_FUNCTION,  # Алиас
+        
+        # Глобальные переменные
+        "REPLACE_GLOBAL": ModifyMode.REPLACE_GLOBAL,
+        "MODIFY_GLOBAL": ModifyMode.REPLACE_GLOBAL,  # Алиас
+        "REPLACE_CONSTANT": ModifyMode.REPLACE_GLOBAL,  # Алиас
     }
     
 
@@ -333,6 +388,31 @@ class FileModifier:
             
             elif mode == ModifyMode.PATCH_METHOD:
                 result = self._patch_method(existing_content, instruction)
+            
+            elif mode == ModifyMode.PATCH_METHOD:
+                result = self._patch_method(existing_content, instruction)
+            
+            # ====== НОВЫЕ ОБРАБОТЧИКИ ======
+            elif mode == ModifyMode.INSERT_IN_CLASS:
+                result = self._insert_in_class(existing_content, instruction)
+            
+            elif mode == ModifyMode.REPLACE_IN_CLASS:
+                result = self._replace_in_class(existing_content, instruction)
+            
+            elif mode == ModifyMode.REPLACE_IN_METHOD:
+                result = self._replace_in_method(existing_content, instruction)
+            
+            elif mode == ModifyMode.INSERT_IN_FUNCTION:
+                result = self._insert_in_function(existing_content, instruction)
+            
+            elif mode == ModifyMode.REPLACE_IN_FUNCTION:
+                result = self._replace_in_function(existing_content, instruction)
+            
+            elif mode == ModifyMode.ADD_NEW_FUNCTION:
+                result = self._add_new_function(existing_content, instruction)
+            
+            elif mode == ModifyMode.REPLACE_GLOBAL:
+                result = self._replace_global(existing_content, instruction)
             
             else:
                 result = ModifyResult(
@@ -448,6 +528,33 @@ class FileModifier:
             
             elif len(candidates) > 1:
                 logger.warning(f"Auto-correction ambiguous: '{target_function}' found in multiple classes: {candidates}")
+        
+        # SCENARIO 3: Requested REPLACE_IN_CLASS, but might be a METHOD in the same class
+        elif instruction.mode == ModifyMode.REPLACE_IN_CLASS:
+            target_class = instruction.target_class
+            target_attribute = instruction.target_attribute
+            
+            if not target_class or not target_attribute:
+                return None
+            
+            # Check if this exists as a method in the class
+            method_info = parse_result.get_method(target_class, target_attribute)
+            if method_info:
+                logger.info(f"Auto-correction: '{target_attribute}' is a method, not an attribute. Switching to REPLACE_METHOD.")
+                
+                new_instruction = ModifyInstruction(
+                    mode=ModifyMode.REPLACE_METHOD,
+                    code=instruction.code,
+                    target_class=target_class,
+                    target_method=target_attribute,
+                     # Copy other fields
+                    insert_after=instruction.insert_after,
+                    insert_before=instruction.insert_before,
+                    replace_pattern=instruction.replace_pattern,
+                    preserve_imports=instruction.preserve_imports,
+                    auto_format=instruction.auto_format
+                )
+                return self._replace_method(existing_content, new_instruction)
 
         return None
     
@@ -527,6 +634,7 @@ class FileModifier:
                 target_class=block.target_class,
                 target_method=block.target_method,
                 target_function=block.target_function,
+                target_attribute=block.target_attribute, 
                 insert_after=block.insert_after,
                 insert_before=block.insert_before,
                 replace_pattern=block.replace_pattern,
@@ -687,8 +795,8 @@ class FileModifier:
         if insert_line is None:
             insert_line = class_info.span.end_line
         
-        # === Нормализуем код с правильным отступом ===
-        formatted_code = self._normalize_and_indent_code(code, method_indent)
+        # === Анализируем и нормализуем код с правильным отступом ===
+        formatted_code = self._analyze_and_normalize_indent(code, method_indent)
         
         # Добавляем пустую строку перед методом
         prefix = '\n'
@@ -729,7 +837,7 @@ class FileModifier:
         
         if not existing_content.strip():
             # Новый файл — вставляем как есть с нормализацией
-            formatted_code = self._normalize_and_indent_code(code, 0)
+            formatted_code = self._analyze_and_normalize_indent(code, 0)
             return ModifyResult(
                 success=True,
                 new_content=formatted_code + '\n',
@@ -742,7 +850,7 @@ class FileModifier:
         insert_line = self._find_imports_end(lines)
         
         # Для module-level кода отступ = 0
-        formatted_code = self._normalize_and_indent_code(code, 0)
+        formatted_code = self._analyze_and_normalize_indent(code, 0)
         
         # Добавляем пустые строки вокруг для PEP8
         insert_content = '\n\n' + formatted_code.strip() + '\n'
@@ -758,7 +866,7 @@ class FileModifier:
             message=f"Inserted code at line {insert_line + 1}",
             changes_made=[f"Added code after imports at line {insert_line + 1}"],
             lines_added=len(code.splitlines()),
-        )    
+        )
     
     
     def _append_to_file(
@@ -839,8 +947,8 @@ class FileModifier:
         # Определяем отступ
         method_indent = method_info.indent
         
-        # === Нормализуем код с правильным отступом ===
-        formatted_code = self._normalize_and_indent_code(code, method_indent)
+        # === Анализируем и нормализуем код с правильным отступом ===
+        formatted_code = self._analyze_and_normalize_indent(code, method_indent)
         
         old_lines_count = method_end - method_start
         
@@ -906,8 +1014,8 @@ class FileModifier:
         func_end = func_info.span.end_line
         func_indent = func_info.indent
         
-        # === Нормализуем код с правильным отступом ===
-        formatted_code = self._normalize_and_indent_code(code, func_indent)
+        # === Анализируем и нормализуем код с правильным отступом ===
+        formatted_code = self._analyze_and_normalize_indent(code, func_indent)
         
         old_lines_count = func_end - func_start
         
@@ -978,8 +1086,8 @@ class FileModifier:
         # Определяем отступ из распарсенного дерева
         class_indent = class_info.indent
         
-        # === Нормализуем код с правильным отступом ===
-        formatted_code = self._normalize_and_indent_code(code, class_indent)
+        # === Анализируем и нормализуем код с правильным отступом ===
+        formatted_code = self._analyze_and_normalize_indent(code, class_indent)
         
         old_lines_count = class_end - class_start
         
@@ -1134,7 +1242,7 @@ class FileModifier:
         """
         Вставляет код внутрь существующего метода.
         
-        УЛУЧШЕНО: Использует Tree-sitter для fault-tolerant парсинга.
+        УЛУЧШЕНО: Робастный поиск якорей (игнорирует пробелы, предпочитает точное совпадение).
         """
         target_class = instruction.target_class
         target_method = instruction.target_method
@@ -1190,14 +1298,12 @@ class FileModifier:
         # Получаем строки метода
         method_lines = lines[method_start:method_end]
 
-        # === NEW: Try to find and replace matching lines ===
+        # === IDEMPOTENCY CHECK: Try to find and replace matching lines ===
         code_lines = [l.strip() for l in code.strip().splitlines() if l.strip()]
         method_lines_stripped = [l.strip() for l in method_lines]
         
         if code_lines:
             first_code_line = code_lines[0]
-            
-            # Search for the first line of new code in method body
             match_start_offset = None
             for i, method_line in enumerate(method_lines_stripped):
                 if first_code_line == method_line:
@@ -1219,7 +1325,7 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                formatted_code = self._normalize_and_indent_code(code, body_indent)
+                formatted_code = self._analyze_and_normalize_indent(code, body_indent)
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -1236,43 +1342,94 @@ class FileModifier:
                     message=f"Replaced {len(code_lines)} lines in method '{target_name}'",
                     changes_made=[f"Replaced lines {replace_start + 1}-{replace_end} in {target_name}"],
                 )
+        # === END IDEMPOTENCY CHECK ===
         
-        # === END NEW CODE ===
+        # Get method body indent using Tree-sitter when possible
+        body_base_indent = self._get_method_body_indent(method_info, lines, method_start)
         
         insert_line_offset = None
         context_line_for_indent = None
+        is_block_node = False
+        node_info = None
         
-        # 1. Determine insertion point and context line
-        if insert_after:
-            for i, line in enumerate(method_lines):
-                if insert_after in line:
-                    insert_line_offset = i + 1
-                    context_line_for_indent = line
-                    break
+        # Helper to find robust match
+        def find_best_match(pattern: str, lines: List[str]) -> Tuple[Optional[int], Optional[str]]:
+            if not pattern:
+                return None, None
             
-            if insert_line_offset is None:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Pattern '{insert_after}' not found in method '{target_method}'",
-                )
+            pattern_stripped = pattern.strip()
+            
+            # Pass 1: Exact match of stripped content
+            for i, line in enumerate(lines):
+                if line.strip() == pattern_stripped:
+                    return i, line
+            
+            # Pass 2: Substring match (robust to spacing)
+            for i, line in enumerate(lines):
+                # Normalize spaces to single space for comparison
+                line_norm = ' '.join(line.split())
+                pattern_norm = ' '.join(pattern.split())
+                if pattern_norm in line_norm:
+                    return i, line
+            
+            # Pass 3: Fallback loose substring
+            for i, line in enumerate(lines):
+                if pattern_stripped in line:
+                    return i, line
+                    
+            return None, None
+
+        # 1. Determine insertion point
+        method_text = ''.join(method_lines)
+        
+        if insert_after:
+            # Try Tree-sitter first
+            node_info, line_offset, matched_line = self._find_statement_node(
+                method_text, insert_after, lines, method_lines, method_start
+            )
+            
+            if node_info:
+                insert_line_offset = line_offset + 1
+                context_line_for_indent = matched_line
+                is_block_node = self._is_block_statement(node_info['node_type'])
+            else:
+                # Fallback to text search
+                idx, match_line = find_best_match(insert_after, method_lines)
+                if idx is not None:
+                    insert_line_offset = idx + 1
+                    context_line_for_indent = match_line
+                else:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Pattern '{insert_after}' not found in method '{target_method}'",
+                    )
         
         elif insert_before:
-            for i, line in enumerate(method_lines):
-                if insert_before in line:
-                    insert_line_offset = i
-                    context_line_for_indent = line
-                    break
+            # Try Tree-sitter first
+            node_info, line_offset, matched_line = self._find_statement_node(
+                method_text, insert_before, lines, method_lines, method_start
+            )
             
-            if insert_line_offset is None:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Pattern '{insert_before}' not found in method '{target_method}'",
-                )
+            if node_info:
+                insert_line_offset = line_offset
+                context_line_for_indent = matched_line
+                is_block_node = self._is_block_statement(node_info['node_type'])
+            else:
+                # Fallback to text search
+                idx, match_line = find_best_match(insert_before, method_lines)
+                if idx is not None:
+                    insert_line_offset = idx
+                    context_line_for_indent = match_line
+                else:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Pattern '{insert_before}' not found in method '{target_method}'",
+                    )
         
         else:
-            # По умолчанию: перед первым return или в конец метода
+            # Default: before first return or at end
             last_return_offset = None
             last_return_line = None
             
@@ -1287,41 +1444,50 @@ class FileModifier:
                 context_line_for_indent = last_return_line
             else:
                 insert_line_offset = len(method_lines)
-                # Find last non-empty line for context
                 for line in reversed(method_lines):
                     if line.strip():
                         context_line_for_indent = line
                         break
         
-        # 2. Определяем отступ из контекста с учётом блочных конструкций
+        # 2. Determine indentation (REFACTORED: prioritize AST over text heuristics)
         if context_line_for_indent:
-            is_block_start = context_line_for_indent.strip().endswith(':')
-            base_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
+            if node_info:
+                # AST-PRIORITY: Use exact indent from Tree-sitter
+                base_indent = node_info['indent']
+                # Determine block start based on node type and operation
+                is_block_node = self._is_block_statement(node_info['node_type'])
+                # Only add indent when inserting AFTER a block statement
+                is_block_start = is_block_node and insert_after
+            else:
+                # FALLBACK: Text-based heuristics (only when AST not available)
+                line_stripped = context_line_for_indent.strip()
+                is_block_start = line_stripped.endswith(':')
+                base_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
             
             if is_block_start:
+                # Inside a block: indent one level deeper than the block statement
                 body_indent = base_indent + self.default_indent
             else:
+                # Same level as context line
                 body_indent = base_indent
         else:
-            # Fallback на отступ определения метода + 1 уровень
-            body_indent = method_info.indent + self.default_indent
+            # No context line, use method body base indent
+            body_indent = body_base_indent
         
-        # 3. CRITICAL: Нормализуем код с правильным отступом
-        # Fix: Сначала очищаем отступы через dedent, чтобы убрать артефакты генерации
-        dedented_code = textwrap.dedent(code)
-        formatted_code = self._normalize_and_indent_code(dedented_code, body_indent)
+        # 3. Analyze and normalize indent
+        formatted_code = self._analyze_and_normalize_indent(code, body_indent)
         
-        # 4. Вычисляем абсолютную позицию
+        # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
         
-        # Добавляем пустую строку если нужно
+        # Add spacing
         prefix = ''
         if absolute_insert_line > 0 and absolute_insert_line <= len(lines):
             prev_line = lines[absolute_insert_line - 1]
             if prev_line.strip():
                 prefix = '\n'
         
-        # Вставляем код
+        # Insert
         insert_content = prefix + formatted_code + '\n'
         lines.insert(absolute_insert_line, insert_content)
         new_content = ''.join(lines)
@@ -1340,8 +1506,699 @@ class FileModifier:
         )
     
     
+    def _get_method_body_indent(self, method_info: Any, lines: List[str], method_start: int) -> int:
+        """Determines the actual indent of method body using Tree-sitter or fallback to heuristic."""
+        try:
+            parser = _get_tree_sitter_parser()
+            if parser and hasattr(method_info, 'body_start_line'):
+                body_line_idx = method_info.body_start_line - 1
+                if body_line_idx < len(lines):
+                    line = lines[body_line_idx]
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith(('"""', "'''")):
+                        return len(line) - len(line.lstrip())
+        except Exception as e:
+            logger.debug(f"Tree-sitter body indent detection failed: {e}")
+        
+        # Fallback 1: Use method indent + default
+        fallback_indent = method_info.indent + self.default_indent
+        
+        # Fallback 2: Find first non-empty line after method definition
+        for i in range(method_start + 1, min(method_start + 10, len(lines))):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped and not stripped.startswith(('"""', "'''")):
+                return len(line) - len(line.lstrip())
+        
+        # Default: Return fallback indent
+        return fallback_indent
+    
+    
+    def _is_block_statement(self, node_type: str) -> bool:
+        """Checks if a Tree-sitter node type represents a block statement (if/for/while/with/try)."""
+        block_types = {
+            'if_statement',
+            'for_statement',
+            'while_statement',
+            'with_statement',
+            'try_statement',
+            'match_statement'
+        }
+        
+        if node_type in block_types:
+            return True
+        
+        if node_type.endswith('_clause'):
+            return True
+        
+        return False
+    
+    def _find_statement_node(
+        self,
+        method_text: str,
+        pattern: str,
+        lines: List[str],
+        method_lines: List[str],
+        method_start: int
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[str]]:
+        """Finds a statement node matching pattern using Tree-sitter, returns node info, line offset, and matched line."""
+        parser = _get_tree_sitter_parser()
+        if not parser:
+            return None, None, None
+        
+        try:
+            parse_result = parser.parse(method_text)
+            if not parse_result.root_node:
+                return None, None, None
+            
+            # Normalize pattern for comparison
+            pattern_normalized = ' '.join(pattern.split()).strip()
+            
+            def traverse_ast(node):
+                """Recursively traverse AST to find statement nodes."""
+                if 'statement' in node.type or 'expression' in node.type:
+                    node_text = method_text[node.start_byte:node.end_byte]
+                    node_text_normalized = ' '.join(node_text.split()).strip()
+                    
+                    if node_text_normalized == pattern_normalized:
+                        return {
+                            'node_type': node.type,
+                            'start_line': node.start_point[0],
+                            'indent': node.start_point[1],
+                            'text': node_text
+                        }
+                
+                for child in node.children:
+                    result = traverse_ast(child)
+                    if result:
+                        return result
+                
+                return None
+            
+            node_info = traverse_ast(parse_result.root_node)
+            
+            if node_info:
+                line_offset = node_info['start_line']
+                if line_offset < len(method_lines):
+                    matched_line = method_lines[line_offset]
+                    return node_info, line_offset, matched_line
+            
+            return None, None, None
+            
+        except Exception as e:
+            logger.debug(f"Tree-sitter statement search failed: {e}")
+            return None, None, None
+    
+    
     # ========================================================================
-    # HELPER METHODS
+    # НОВЫЕ РЕЖИМЫ РЕАЛИЗАЦИЯ
+    # ========================================================================
+    
+    def _insert_in_class(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Вставляет атрибут (поле) в тело класса.
+        
+        Args:
+            instruction:
+                - target_class: Имя класса
+                - insert_after: Якорь - поле, после которого вставить
+                - code: Строка атрибута (например: "name = Column(String)")
+        """
+        target_class = instruction.target_class
+        insert_after = instruction.insert_after
+        code = instruction.code.strip()
+        
+        if not target_class:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="target_class is required for INSERT_IN_CLASS",
+            )
+        
+        lines = existing_content.splitlines(keepends=True)
+        
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        class_info = parse_result.get_class(target_class)
+        
+        if class_info is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Class '{target_class}' not found",
+            )
+        
+        # Получаем отступ класса
+        class_indent = class_info.indent
+        body_indent = class_indent + self.default_indent
+        
+        # ⭐ ДОБАВЛЯЕМ: Проверка идемпотентности - не добавлять если уже существует
+        code_stripped = code.strip()
+        if code_stripped:
+            # Проверяем, есть ли уже такая строка в теле класса
+            class_start = class_info.span.start_line
+            class_end = class_info.span.end_line
+            # Формируем то, как будет выглядеть добавленный код (с отступом)
+            expected_line = ' ' * body_indent + code_stripped
+            
+            for i in range(class_start - 1, class_end - 1):  # -1 т.к. 1-indexed -> 0-indexed
+                line = lines[i].rstrip('\n')
+                # Сравниваем с отступом и без
+                if line == expected_line or line.lstrip() == code_stripped:
+                    return ModifyResult(
+                        success=True,
+                        new_content=existing_content,
+                        message=f"Attribute already exists in class '{target_class}'",
+                        changes_made=["Attribute already present, skipped"],
+                    )
+            
+        # Находим позицию для вставки
+        insert_line = class_info.span.end_line - 1  # Перед закрывающей строкой класса
+        found_anchor = False
+        
+        if insert_after:
+            # Ищем якорь в теле класса
+            class_start = class_info.span.start_line - 1
+            class_end = class_info.span.end_line - 1
+            
+            for i in range(class_start, class_end):
+                line = lines[i].rstrip('\n')
+                if insert_after in line and len(line) - len(line.lstrip()) == body_indent:
+                    insert_line = i + 1
+                    found_anchor = True
+                    break
+        
+        # Если якорь не найден, вставляем перед последней строкой класса
+        if not found_anchor:
+            # Ищем первую строку метода (чтобы вставить перед методами)
+            for method in class_info.methods:
+                method_start = method.span.start_line - 1
+                if method_start > class_info.span.start_line:
+                    insert_line = method_start
+                    break
+        
+        # Форматируем код с правильным отступом
+        formatted_code = self._analyze_and_normalize_indent(code, body_indent)
+        if not formatted_code.endswith('\n'):
+            formatted_code += '\n'
+        
+        # Вставляем
+        if '\n' in formatted_code.rstrip('\n'):
+            # Многострочная вставка
+            for i, line in enumerate(reversed(formatted_code.splitlines(keepends=True))):
+                lines.insert(insert_line, line)
+            lines_added = len(formatted_code.splitlines())
+        else:
+            lines.insert(insert_line, formatted_code)
+            lines_added = 1
+        
+        new_content = ''.join(lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Inserted attribute into class '{target_class}'",
+            changes_made=[f"Added attribute to {target_class} at line {insert_line + 1}"],
+            lines_added=1,
+        )
+    
+    def _replace_in_class(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Заменяет атрибут в теле класса.
+        
+        Args:
+            instruction:
+                - target_class: Имя класса
+                - replace_pattern: Старая строка атрибута (полностью или частично)
+                - code: Новая строка атрибута
+        """
+        target_class = instruction.target_class
+        replace_pattern = instruction.replace_pattern
+        target_attribute = instruction.target_attribute
+        code = instruction.code.strip()
+        
+        if not target_class or (not replace_pattern and not target_attribute):
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="target_class and (replace_pattern or target_attribute) required for REPLACE_IN_CLASS",
+            )
+        
+        lines = existing_content.splitlines(keepends=True)
+        
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        class_info = parse_result.get_class(target_class)
+        
+        if class_info is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Class '{target_class}' not found",
+            )
+        
+        # Получаем отступ класса
+        class_indent = class_info.indent
+        body_indent = class_indent + self.default_indent
+        
+        # Ищем заменяемую строку в теле класса
+        class_start = class_info.span.start_line - 1
+        class_end = class_info.span.end_line - 1
+        
+        target_line_idx = -1
+        for i in range(class_start, class_end):
+            line = lines[i]
+            line_stripped = line.strip()
+            line_indent = len(line) - len(line.lstrip())
+
+            # Проверяем что строка на правильном уровне отступа и содержит паттерн
+            if line_indent == body_indent:
+                # Если указано имя атрибута, ищем строку с определением этого атрибута
+                if target_attribute and (line_stripped.startswith(f"{target_attribute} = ") or
+                                         line_stripped.startswith(f"{target_attribute}:")):
+                    target_line_idx = i
+                    break
+                # Если указан паттерн, ищем по содержанию
+                elif replace_pattern and replace_pattern in line_stripped:
+                    target_line_idx = i
+                    break
+        
+        if target_line_idx == -1:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Pattern '{replace_pattern}' not found in class '{target_class}'",
+            )
+        
+        # Заменяем строку
+        old_line = lines[target_line_idx]
+        formatted_code = self._analyze_and_normalize_indent(code, body_indent)
+        if not formatted_code.endswith('\n'):
+            formatted_code += '\n'
+        
+        old_lines_count = 1
+        if '\n' in formatted_code.rstrip('\n'):
+            # Многострочная замена
+            lines.pop(target_line_idx)
+            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
+                lines.insert(target_line_idx + i, line)
+            new_lines_count = len(formatted_code.splitlines())
+            lines_added = max(0, new_lines_count - old_lines_count)
+            lines_removed = max(0, old_lines_count - new_lines_count)
+        else:
+            # Однострочная замена
+            lines[target_line_idx] = formatted_code
+            lines_added = 1
+            lines_removed = 1
+        
+        new_content = ''.join(lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Replaced attribute in class '{target_class}'",
+            changes_made=[f"Replaced line {target_line_idx + 1} in {target_class}"],
+            lines_added=1,
+            lines_removed=1,
+        )
+    
+    def _replace_in_method(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Заменяет конкретную строку или блок внутри метода.
+        
+        Args:
+            instruction:
+                - target_class: Имя класса (опционально)
+                - target_method: Имя метода
+                - replace_pattern: Что заменять
+                - code: На что заменять
+        """
+        target_class = instruction.target_class
+        target_method = instruction.target_method
+        replace_pattern = instruction.replace_pattern
+        code = instruction.code
+        
+        if not target_method or not replace_pattern:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="target_method and replace_pattern required for REPLACE_IN_METHOD",
+            )
+        
+        if not target_class:
+            # Делегируем _replace_in_function
+            return self._replace_in_function(existing_content, instruction)
+        
+        lines = existing_content.splitlines(keepends=True)
+        
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        
+        # Получаем информацию о методе
+        method_info = None
+        if target_class:
+            method_info = parse_result.get_method(target_class, target_method)
+        else:
+            # Ищем как функцию
+            method_info = parse_result.get_function(target_method)
+        
+        if method_info is None:
+            target_name = f"{target_class}.{target_method}" if target_class else target_method
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Method/function '{target_name}' not found",
+            )
+        
+        # Находим строку для замены внутри метода
+        method_start = method_info.span.start_line - 1
+        method_end = method_info.span.end_line
+        
+        target_line_idx = -1
+        for i in range(method_start, method_end):
+            if replace_pattern in lines[i]:
+                target_line_idx = i
+                break
+        
+        if target_line_idx == -1:
+            target_name = f"{target_class}.{target_method}" if target_class else target_method
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
+            )
+        
+        # Определяем отступ строки
+        old_line = lines[target_line_idx]
+        line_indent = len(old_line) - len(old_line.lstrip())
+        
+        # 🔧 ИЗМЕНЕНИЕ 1: Заменяем сложную логику нормализации на вызов _analyze_and_normalize_indent
+        formatted_code = self._analyze_and_normalize_indent(code, line_indent)
+        if not formatted_code.endswith('\n'):
+            formatted_code += '\n'
+        
+        # 🔧 ИЗМЕНЕНИЕ 2: Улучшаем проверку на многострочность
+        if '\n' in formatted_code.rstrip('\n'):
+            # Замена блока - удаляем старую строку, вставляем новые
+            lines.pop(target_line_idx)
+            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
+                lines.insert(target_line_idx + i, line)
+        else:
+            # Замена одной строки
+            lines[target_line_idx] = formatted_code
+        
+        new_content = ''.join(lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Replaced code in {target_method}",
+            changes_made=[f"Replaced line in {target_method}"],
+            lines_added=len(formatted_code.splitlines()),
+            lines_removed=1,
+        )
+    
+            
+    def _insert_in_function(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Вставляет код внутрь функции.
+        Делегирует в _patch_method, адаптируя target_function -> target_method.
+        """
+        if not instruction.target_function:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="target_function is required for INSERT_IN_FUNCTION",
+            )
+
+        # Создаем копию инструкции, маппим target_function -> target_method
+        patch_instruction = ModifyInstruction(
+            mode=ModifyMode.PATCH_METHOD,
+            code=instruction.code,
+            target_method=instruction.target_function, # ВАЖНО: маппим сюда!
+            target_class=None,                         # Класса нет
+            insert_after=instruction.insert_after,
+            insert_before=instruction.insert_before,
+            replace_pattern=instruction.replace_pattern,
+            preserve_imports=instruction.preserve_imports,
+            auto_format=instruction.auto_format
+        )
+        
+        return self._patch_method(existing_content, patch_instruction)
+
+    def _replace_in_function(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Заменяет строку внутри функции.
+        Делегирует в _replace_in_method, адаптируя target_function -> target_method.
+        """
+        if not instruction.target_function or not instruction.replace_pattern:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="target_function and replace_pattern required for REPLACE_IN_FUNCTION",
+            )
+
+        # Создаем копию инструкции, маппим target_function -> target_method
+        replace_instruction = ModifyInstruction(
+            mode=ModifyMode.REPLACE_IN_METHOD,
+            code=instruction.code,
+            target_method=instruction.target_function, # ВАЖНО: маппим сюда!
+            target_class=None,                         # Класса нет
+            replace_pattern=instruction.replace_pattern,
+            preserve_imports=instruction.preserve_imports,
+            auto_format=instruction.auto_format
+        )
+
+        return self._replace_in_method(existing_content, replace_instruction)
+
+    
+    def _add_new_function(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Добавляет новую функцию в файл.
+        
+        Args:
+            instruction:
+                - insert_after: После какой функции/класса вставить
+                - code: Код новой функции (полностью, начиная с def)
+        """
+        code = instruction.code.strip()
+        insert_after = instruction.insert_after
+        
+        if not code.startswith(('def ', 'async def ')):
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Code must be a function definition starting with 'def' or 'async def'",
+            )
+        
+        lines = existing_content.splitlines(keepends=True)
+        
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        
+        insert_line = len(lines)  # По умолчанию в конец файла
+        
+        if insert_after:
+            # Ищем функцию или класс для вставки после
+            found = False
+            
+            # Проверяем функции
+            for func in parse_result.functions:
+                if func.name == insert_after:
+                    insert_line = func.span.end_line
+                    found = True
+                    break
+            
+            # Проверяем классы
+            if not found:
+                for cls in parse_result.classes:
+                    if cls.name == insert_after:
+                        insert_line = cls.span.end_line
+                        found = True
+                        break
+        
+        # Нормализуем отступ функции (должен быть 0 для module-level)
+        formatted_code = self._analyze_and_normalize_indent(code, 0)
+        
+        # Добавляем пустые строки для PEP8
+        prefix = '\n\n'
+        if insert_line == 0 or (insert_line > 0 and not lines[insert_line - 1].strip()):
+            prefix = '\n'
+        
+        formatted_code = prefix + formatted_code + '\n'
+        
+        # Вставляем
+        lines.insert(insert_line, formatted_code)
+        new_content = ''.join(lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Added new function",
+            changes_made=[f"Added function at line {insert_line + 1}"],
+            lines_added=len(formatted_code.splitlines()),
+        )
+    
+    def _replace_global(
+        self,
+        existing_content: str,
+        instruction: ModifyInstruction
+    ) -> ModifyResult:
+        """
+        Заменяет строку в глобальной области (вне классов и функций).
+        
+        Args:
+            instruction:
+                - replace_pattern: Что заменять
+                - code: На что заменять
+        """
+        replace_pattern = instruction.replace_pattern
+        code = instruction.code.strip()
+        
+        if not replace_pattern:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="replace_pattern required for REPLACE_GLOBAL",
+            )
+        
+        lines = existing_content.splitlines(keepends=True)
+        
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        
+        # Находим глобальную строку (не внутри классов и не внутри функций)
+        target_line_idx = -1
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            if not line_stripped or line_stripped.startswith('#'):
+                continue
+            
+            # Проверяем что строка не находится внутри класса или функции
+            is_inside = False
+            for cls in parse_result.classes:
+                if cls.span.start_line - 1 <= i < cls.span.end_line:
+                    is_inside = True
+                    break
+            
+            if not is_inside:
+                for func in parse_result.functions:
+                    if func.span.start_line - 1 <= i < func.span.end_line:
+                        is_inside = True
+                        break
+            
+            if not is_inside and replace_pattern in line_stripped:
+                target_line_idx = i
+                break
+        
+        if target_line_idx == -1:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Pattern '{replace_pattern}' not found in global scope",
+            )
+        
+        # Определяем отступ строки
+        old_line = lines[target_line_idx]
+        line_indent = len(old_line) - len(old_line.lstrip())
+        
+        # Форматируем новый код с сохранением отступа
+        formatted_code = self._analyze_and_normalize_indent(code, line_indent)
+        if not formatted_code.endswith('\n'):
+            formatted_code += '\n'
+        
+        # Заменяем
+        old_lines_count = 1
+        if '\n' in formatted_code.rstrip('\n'):
+            # Многострочная замена
+            lines.pop(target_line_idx)
+            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
+                lines.insert(target_line_idx + i, line)
+            new_lines_count = len(formatted_code.splitlines())
+            lines_added = max(0, new_lines_count - old_lines_count)
+            lines_removed = max(0, old_lines_count - new_lines_count)
+        else:
+            # Однострочная замена
+            lines[target_line_idx] = formatted_code
+            lines_added = 1
+            lines_removed = 1
+        
+        
+        new_content = ''.join(lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Replaced global line",
+            changes_made=[f"Replaced global line {target_line_idx + 1}"],
+            lines_added=1,
+            lines_removed=1,
+        )    
+    
+    
+    # ========================================================================
+    # HELPER METHODS (большинство удалено)
     # ========================================================================
     
 # This method and the following two helper methods will be deleted:
@@ -1478,6 +2335,44 @@ class FileModifier:
                 result_lines.append(' ' * new_indent + stripped)
         
         return '\n'.join(result_lines)
+
+
+    def _analyze_and_normalize_indent(self, code: str, target_indent: int) -> str:
+        """Analyzes code indentation using Tree-sitter. If correct, returns as is; otherwise normalizes."""
+        # 1. If code is empty/whitespace, return it
+        if not code or not code.strip():
+            return code
+        
+        # 2. Get parser via _get_tree_sitter_parser()
+        parser = _get_tree_sitter_parser()
+        
+        # 3. If parser exists
+        if parser:
+            try:
+                # a. Parse code
+                result = parser.parse(code)
+                
+                # b. Check result.root_node
+                if result.root_node:
+                    # c. Iterate children of root (skipping purely empty ones)
+                    children = result.root_node.children
+                    
+                    if children:
+                        # Find first significant node
+                        for child in children:
+                            if child.type not in ('ERROR', ''):
+                                # Get the start column (indentation) of first significant node
+                                current_indent = child.start_point[1]
+                                
+                                # d. If current_indent == target_indent, return code as is
+                                if current_indent == target_indent:
+                                    return code
+                                break
+            except Exception as e:
+                logger.debug(f"Tree-sitter analysis failed: {e}")
+        
+        # 4. Fallback: Return normalized code
+        return self._normalize_and_indent_code(code, target_indent)
 
 
     def _detect_insertion_context_indent(

@@ -53,6 +53,8 @@ class StagingErrorType(Enum):
     # Mode/parser errors
     INVALID_MODE = "invalid_mode"
     PARSER_UNAVAILABLE = "parser_unavailable"
+    
+    INVALID_CODE_FORMAT = "invalid_code_format"
 
     # Generic fallback
     UNKNOWN = "unknown"
@@ -115,6 +117,13 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "solution": "1. Use REPLACE_FILE mode to replace entire file content. 2. This is a system issue, not instruction issue.",
             "mode_hint": "Use REPLACE_FILE as fallback",
         },
+        StagingErrorType.INVALID_CODE_FORMAT: {
+            "description": "Code block for ADD_NEW_FUNCTION must start with 'def' or 'async def'.",
+            "cause": "Code doesn't start with function definition or has syntax error.",
+            "solution": "1. Ensure code starts with 'def function_name():' or 'async def function_name():'. 2. Check for syntax errors. 3. Provide complete function definition.",
+            "mode_hint": "ADD_NEW_FUNCTION requires a complete function definition",
+        },
+                
         StagingErrorType.UNKNOWN: {
             "description": "An unexpected staging error occurred.",
             "cause": "Unknown cause.",

@@ -75,6 +75,9 @@ class IterationTrace:
     tests_output: str = ""
     failed_tests: List[str] = field(default_factory=list)
     
+    # Staging errors
+    staging_errors: List[Dict[str, Any]] = field(default_factory=list)
+    
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
@@ -217,6 +220,83 @@ class PipelineTraceLogger:
             "code": code,
         })
         self._save()
+    
+    
+    def add_staging_error(self, file_path: str, mode: str, error: str, error_type: Optional[str] = None, target_class: Optional[str] = None, target_method: Optional[str] = None, target_function: Optional[str] = None, code_preview: Optional[str] = None) -> None:
+        """
+        Log a staging error (file modification failure).
+        
+        Args:
+            file_path: Path to the file that failed to stage
+            mode: Operation mode (REPLACE_METHOD, ADD_FUNCTION, etc.)
+            error: Error message
+            error_type: Type of error (optional)
+            target_class: Target class name (optional)
+            target_method: Target method name (optional)
+            target_function: Target function name (optional)
+            code_preview: Preview of the code that failed (optional)
+        """
+        if not self._current_iteration:
+            self.start_iteration(1)
+        
+        error_dict = {
+            "file_path": file_path,
+            "mode": mode,
+            "error": error,
+        }
+        
+        if error_type is not None:
+            error_dict["error_type"] = error_type
+        if target_class is not None:
+            error_dict["target_class"] = target_class
+        if target_method is not None:
+            error_dict["target_method"] = target_method
+        if target_function is not None:
+            error_dict["target_function"] = target_function
+        if code_preview is not None:
+            error_dict["code_preview"] = code_preview
+        
+        self._current_iteration.staging_errors.append(error_dict)
+    
+    
+    def dump_staging_error_report(self, error_data: Dict[str, Any]) -> None:
+        """Saves a detailed staging error report (with full code) to a separate JSON file."""
+        if not self._file_path:
+            return
+        
+        try:
+            import json
+            from datetime import datetime
+            from pathlib import Path
+            
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            
+            # Generate filename
+            filename = f"staging_error_{timestamp}.json"
+            
+            # Construct path
+            TRACE_LOG_DIR = Path(self._file_path).parent
+            file_path = TRACE_LOG_DIR / filename
+            
+            # Create report dict
+            report = {
+                "timestamp": datetime.now().isoformat(),
+                "request_id": self.trace.request_id,
+                "project_dir": self.trace.project_dir,
+                "error_data": error_data,
+            }
+            
+            # Write to file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+            
+            # Log info
+            logger.info(f"Staging error report dumped: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to dump staging error report: {e}")
+    
     
     # === Техническая валидация (кратко) ===
     
