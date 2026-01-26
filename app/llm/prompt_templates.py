@@ -898,6 +898,15 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('')
     prompt_parts.append('Your goal is to provide a rigorous **Specification**, from which code is the inevitable and unambiguous result, without writing the code itself.')
     prompt_parts.append('')
+        
+    prompt_parts.append('')
+    prompt_parts.append('**Infrastructure Actualization (Critical Protocol):**')
+    prompt_parts.append('Distinguish between *declaring* dependencies (passive lists) and *provisioning* them (active state).')
+    prompt_parts.append('As the Architect, you hold exclusive authority over the Runtime Configuration.')
+    prompt_parts.append('You must strictly leverage the `install_dependency` tool to **materialize** every required library.')
+    prompt_parts.append('The system considers the environment "invalid" until you have physically executed the installation for each package.')
+    
+    
     
     return "\n".join(prompt_parts)
 
@@ -4450,6 +4459,13 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('• Pipeline will create folders you specify before generating code')
     prompt_parts.append('')
     
+    # === ENVIRONMENT & DEPENDENCIES ===
+    prompt_parts.append('')
+    prompt_parts.append('ENVIRONMENT AUTHORITY:')
+    prompt_parts.append('You possess exclusive control over the runtime environment setup.')
+    prompt_parts.append('Since the system creates a clean state, you must proactively deploy all external libraries.')
+    prompt_parts.append('It is your MANDATORY duty to execute the `install_dependency` tool for every required package.')
+    
     # === FILE SIZE MANAGEMENT ===
     prompt_parts.append('')
     prompt_parts.append('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
@@ -4874,18 +4890,18 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("| MODE | When to use | Required fields |")
     prompt_parts.append("|------|-------------|-----------------|")
     prompt_parts.append("| REPLACE_FILE | Create new file OR replace entire file | (none) |")
-    prompt_parts.append("| REPLACE_METHOD | Replace existing method in class | TARGET_CLASS, TARGET_METHOD |")
+    prompt_parts.append("| REPLACE_METHOD | Replace an existing METHOD definition (function) | TARGET_CLASS, TARGET_METHOD |")
     prompt_parts.append("| REPLACE_FUNCTION | Replace existing module-level function | TARGET_FUNCTION |")
     prompt_parts.append("| REPLACE_CLASS | Replace entire class | TARGET_CLASS |")
     prompt_parts.append("| REPLACE_GLOBAL | Replace global variable/constant line | REPLACE_PATTERN |")
-    prompt_parts.append("| INSERT_CLASS | Add new method to class | TARGET_CLASS, optionally INSERT_AFTER |")
+    prompt_parts.append("| INSERT_CLASS | Add a NEW METHOD to an existing class | TARGET_CLASS, optionally INSERT_AFTER |")
     prompt_parts.append("| INSERT_FILE | Add code after imports | (none) |")
     prompt_parts.append("| APPEND_FILE | Add code at end of file | (none) |")
     prompt_parts.append("| INSERT_IMPORT | Add import statement | (none) |")
     prompt_parts.append("| REPLACE_IMPORT | Replace existing import statement | REPLACE_PATTERN |")
     prompt_parts.append("| PATCH_METHOD | Insert lines INSIDE existing method | TARGET_CLASS (if in class), TARGET_METHOD, INSERT_AFTER or INSERT_BEFORE |")
-    prompt_parts.append("| INSERT_IN_CLASS | Add field/attribute to class body | TARGET_CLASS, INSERT_AFTER (optional) |")
-    prompt_parts.append("| REPLACE_IN_CLASS | Replace attribute/field in class body | TARGET_CLASS, TARGET_ATTRIBUTE |")
+    prompt_parts.append("| INSERT_IN_CLASS | Add a NEW ATTRIBUTE/FIELD to class body  | TARGET_CLASS, INSERT_AFTER |")
+    prompt_parts.append("| REPLACE_IN_CLASS | Replace a class ATTRIBUTE/FIELD in class body | TARGET_CLASS, TARGET_ATTRIBUTE |")
     prompt_parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional) |")
     prompt_parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN |")
     prompt_parts.append("| INSERT_IN_FUNCTION | Insert lines INSIDE existing function | TARGET_FUNCTION, INSERT_AFTER or INSERT_BEFORE |")
@@ -4915,8 +4931,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("REPLACE_IN_METHOD: Replaces specific lines within a method. Use for surgical fixes inside a method body.")
     
     # Class Body Level (Attributes/Fields)
-    prompt_parts.append("INSERT_IN_CLASS: Adds new attributes or fields to a class body. Use for defining new class properties or schema fields.")
-    prompt_parts.append("REPLACE_IN_CLASS: Replaces an existing class attribute or field. Use for updating property definitions or default values.")
+    prompt_parts.append("INSERT_IN_CLASS: Declares NEW fields or attributes in the class body. Use to add properties or schema definitions.")
+    prompt_parts.append("REPLACE_IN_CLASS: Overwrites EXISTING field or attribute definitions in the class body. Use to change default values or type hints of class properties.")
     
     # Imports & Globals
     prompt_parts.append("INSERT_IMPORT: Adds a new import statement. Use for ensuring necessary dependencies are present.")

@@ -1131,17 +1131,36 @@ class FileModifier:
         
         lines = existing_content.splitlines(keepends=True)
         
-        # Находим конец импортов (ПОСЛЕ всех импортов, включая многострочные)
-        insert_line = self._find_imports_end(lines)
+        # Находим конец импортов
+        insert_idx = self._find_imports_end(lines)
         
-        # Вставляем новый импорт ПОСЛЕ блока импортов
-        # НЕ ищем строки с 'import '/'from ' — это ломает многострочные импорты!
-        if insert_line == 0:
+        # КРИТИЧЕСКАЯ ПРОВЕРКА: Проверяем отступ строки перед insert_idx
+        if insert_idx > 0 and insert_idx - 1 < len(lines):
+            prev_line = lines[insert_idx - 1]
+            prev_stripped = prev_line.lstrip()
+            prev_indent = len(prev_line) - len(prev_stripped)
+            
+            # Если предыдущая строка имеет отступ, мы внутри блока (например, if TYPE_CHECKING:)
+            if prev_indent > 0:
+                # Итерируем НАЗАД от insert_idx - 1 до 0
+                for i in range(insert_idx - 1, -1, -1):
+                    line = lines[i]
+                    line_stripped = line.lstrip()
+                    line_indent = len(line) - len(line_stripped)
+                    
+                    # Ищем первую строку с импортом и 0 отступом
+                    if line_indent == 0 and (line_stripped.startswith('import ') or line_stripped.startswith('from ')):
+                        # Устанавливаем insert_idx на строку сразу после найденной
+                        insert_idx = i + 1
+                        break
+        
+        # Вставляем импорт на скорректированную позицию
+        if insert_idx == 0:
             # Нет импортов — вставляем в начало
             lines.insert(0, import_statement + '\n')
         else:
             # Вставляем после последнего импорта
-            lines.insert(insert_line, import_statement + '\n')
+            lines.insert(insert_idx, import_statement + '\n')
         
         new_content = ''.join(lines)
         
@@ -1325,7 +1344,8 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                formatted_code = self._analyze_and_normalize_indent(code, body_indent)
+                # FIX 1: Strict normalization
+                formatted_code = self._normalize_and_indent_code(code, body_indent)
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -1449,33 +1469,25 @@ class FileModifier:
                         context_line_for_indent = line
                         break
         
-        # 2. Determine indentation (REFACTORED: prioritize AST over text heuristics)
+        # FIX 2: Precise indentation calculation
         if context_line_for_indent:
-            if node_info:
-                # AST-PRIORITY: Use exact indent from Tree-sitter
-                base_indent = node_info['indent']
-                # Determine block start based on node type and operation
-                is_block_node = self._is_block_statement(node_info['node_type'])
-                # Only add indent when inserting AFTER a block statement
-                is_block_start = is_block_node and insert_after
+            if insert_after:
+                # Calculate indent based on the line we are inserting AFTER
+                # We need the index in the original file content
+                context_line_idx = method_start + insert_line_offset - 1
+                if context_line_idx >= 0:
+                    body_indent = self._get_precise_indent(existing_content, context_line_idx)
+                else:
+                    body_indent = body_base_indent
             else:
-                # FALLBACK: Text-based heuristics (only when AST not available)
-                line_stripped = context_line_for_indent.strip()
-                is_block_start = line_stripped.endswith(':')
-                base_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
-            
-            if is_block_start:
-                # Inside a block: indent one level deeper than the block statement
-                body_indent = base_indent + self.default_indent
-            else:
-                # Same level as context line
-                body_indent = base_indent
+                # For insert_before, we simply align with the target line
+                body_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
         else:
-            # No context line, use method body base indent
+            # No context line (e.g. empty method or default pos), use method body base indent
             body_indent = body_base_indent
         
-        # 3. Analyze and normalize indent
-        formatted_code = self._analyze_and_normalize_indent(code, body_indent)
+        # FIX 3: Strict normalization (bypass "smart" check to kill phantom spaces)
+        formatted_code = self._normalize_and_indent_code(code, body_indent)
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -1504,6 +1516,118 @@ class FileModifier:
             changes_made=[f"Inserted {added_lines} lines into {target_name}"],
             lines_added=added_lines,
         )
+    
+    
+    def _get_precise_indent(self, content: str, line_index: int) -> int:
+        """Calculates precise indent for insertion after a specific line using AST analysis."""
+        # 1. Get Tree-sitter parser. If unavailable, fallback to text heuristic
+        parser = _get_tree_sitter_parser()
+        
+        if parser is None:
+            # Fallback: text-based heuristic
+            if line_index < 0 or line_index >= len(content.splitlines()):
+                return 0
+            
+            lines = content.splitlines()
+            line = lines[line_index]
+            line_indent = len(line) - len(line.lstrip())
+            
+            # If line ends with ':', add default indent
+            if line.rstrip().endswith(':'):
+                return line_indent + self.default_indent
+            
+            return line_indent
+        
+        try:
+            # 2. Parse content
+            parse_result = parser.parse(content)
+            
+            if not parse_result.root_node:
+                # Fallback logic...
+                if line_index < 0 or line_index >= len(content.splitlines()):
+                    return 0
+                lines = content.splitlines()
+                line = lines[line_index]
+                line_indent = len(line) - len(line.lstrip())
+                if line.rstrip().endswith(':'):
+                    return line_indent + self.default_indent
+                return line_indent
+            
+            # 3. Find the AST node at line_index using descendant_for_point_range
+            # FIX: Use the actual indentation column to find the statement, not column 0
+            if line_index < 0 or line_index >= len(content.splitlines()):
+                return 0
+                
+            line_for_node = content.splitlines()[line_index]
+            col_offset = len(line_for_node) - len(line_for_node.lstrip())
+            target_point = (line_index, col_offset)
+            
+            # Find node at this position
+            node = parse_result.root_node.descendant_for_point_range(target_point, target_point)
+            
+            if node is None:
+                # Fallback logic...
+                if line_index < 0 or line_index >= len(content.splitlines()):
+                    return 0
+                lines = content.splitlines()
+                line = lines[line_index]
+                if line.rstrip().endswith(':'):
+                    return col_offset + self.default_indent
+                return col_offset
+            
+            # 4. Traverse up from leaf node to find significant statement node
+            BLOCK_OPENERS = {
+                'class_definition',
+                'function_definition',
+                'if_statement',
+                'for_statement',
+                'while_statement',
+                'with_statement',
+                'try_statement',
+                'match_statement',
+                'elif_clause',
+                'else_clause',
+                'except_clause',
+                'finally_clause',
+                'case_clause',
+            }
+            
+            DATA_STRUCTURES = {
+                'dictionary',
+                'list',
+                'set',
+                'tuple',
+            }
+            
+            current = node
+            while current is not None:
+                # 5. Check if node type is in BLOCK_OPENERS and starts on line_index
+                if current.type in BLOCK_OPENERS:
+                    if current.start_point[0] == line_index:
+                        node_indent = current.start_point[1]
+                        return node_indent + self.default_indent
+                
+                # 6. Check if node type is in DATA_STRUCTURES and starts on line_index
+                if current.type in DATA_STRUCTURES:
+                    if current.start_point[0] == line_index:
+                        node_indent = current.start_point[1]
+                        return node_indent + self.default_indent
+                
+                current = current.parent
+            
+            # 7. Otherwise, return the line's current indentation
+            return col_offset
+            
+        except Exception as e:
+            # Error handling: catch generic Exception, log debug, fallback to simple text-based indent
+            logger.debug(f"_get_precise_indent failed: {e}")
+            
+            if line_index < 0 or line_index >= len(content.splitlines()):
+                return 0
+            
+            lines = content.splitlines()
+            line = lines[line_index]
+            return len(line) - len(line.lstrip())
     
     
     def _get_method_body_indent(self, method_info: Any, lines: List[str], method_start: int) -> int:
@@ -1925,12 +2049,13 @@ class FileModifier:
         old_line = lines[target_line_idx]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # 🔧 ИЗМЕНЕНИЕ 1: Заменяем сложную логику нормализации на вызов _analyze_and_normalize_indent
-        formatted_code = self._analyze_and_normalize_indent(code, line_indent)
+        # FIX: Force strict normalization
+        formatted_code = self._normalize_and_indent_code(code, line_indent)
+        
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
         
-        # 🔧 ИЗМЕНЕНИЕ 2: Улучшаем проверку на многострочность
+        # Улучшаем проверку на многострочность
         if '\n' in formatted_code.rstrip('\n'):
             # Замена блока - удаляем старую строку, вставляем новые
             lines.pop(target_line_idx)
@@ -2097,7 +2222,9 @@ class FileModifier:
         instruction: ModifyInstruction
     ) -> ModifyResult:
         """
-        Заменяет строку в глобальной области (вне классов и функций).
+        Заменяет глобальную переменную/константу вне классов и функций.
+        
+        Использует Tree-sitter для корректной обработки многострочных выражений.
         
         Args:
             instruction:
@@ -2124,77 +2251,72 @@ class FileModifier:
                 message="Tree-sitter parser not available",
             )
         
-        parse_result = ts_parser.parse(existing_content)
-        
-        # Находим глобальную строку (не внутри классов и не внутри функций)
-        target_line_idx = -1
-        
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
+        try:
+            parse_result = ts_parser.parse(existing_content)
             
-            if not line_stripped or line_stripped.startswith('#'):
-                continue
-            
-            # Проверяем что строка не находится внутри класса или функции
-            is_inside = False
-            for cls in parse_result.classes:
-                if cls.span.start_line - 1 <= i < cls.span.end_line:
-                    is_inside = True
+            # Итерируем по дочерним узлам корня (глобальный уровень)
+            target_node = None
+            for child in parse_result.root_node.children:
+                # Пропускаем определения классов и функций
+                if child.type in ('class_definition', 'function_definition'):
+                    continue
+                
+                # Вычисляем диапазон строк узла
+                start_line = child.start_point[0]
+                end_line = child.end_point[0]
+                
+                # Извлекаем текст узла из lines
+                node_text = ''.join(lines[start_line:end_line + 1])
+                
+                # Проверяем, содержит ли узел replace_pattern
+                if replace_pattern in node_text:
+                    target_node = child
                     break
             
-            if not is_inside:
-                for func in parse_result.functions:
-                    if func.span.start_line - 1 <= i < func.span.end_line:
-                        is_inside = True
-                        break
+            if target_node is None:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Pattern '{replace_pattern}' not found in global scope",
+                )
             
-            if not is_inside and replace_pattern in line_stripped:
-                target_line_idx = i
-                break
-        
-        if target_line_idx == -1:
+            # Определяем точный диапазон замены
+            start_line = target_node.start_point[0]
+            end_line = target_node.end_point[0]
+            
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если узел заканчивается в начале строки (end_point[1] == 0),
+            # декрементируем end_line на 1
+            if target_node.end_point[1] == 0:
+                end_line -= 1
+            
+            # Нормализуем отступ кода (должен быть 0 для глобального уровня)
+            formatted_code = self._analyze_and_normalize_indent(code, 0)
+            if not formatted_code.endswith('\n'):
+                formatted_code += '\n'
+            
+            # Заменяем весь диапазон строк новым кодом
+            old_lines_count = end_line - start_line + 1
+            new_lines = lines[:start_line] + [formatted_code] + lines[end_line + 1:]
+            new_content = ''.join(new_lines)
+            
+            new_lines_count = len(formatted_code.splitlines())
+            
+            return ModifyResult(
+                success=True,
+                new_content=new_content,
+                message=f"Replaced global statement",
+                changes_made=[f"Replaced global statement at lines {start_line + 1}-{end_line + 1}"],
+                lines_added=max(0, new_lines_count - old_lines_count),
+                lines_removed=max(0, old_lines_count - new_lines_count),
+            )
+            
+        except Exception as e:
+            logger.error(f"Global replacement failed: {e}", exc_info=True)
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
-                message=f"Pattern '{replace_pattern}' not found in global scope",
+                message=f"Error replacing global: {e}",
             )
-        
-        # Определяем отступ строки
-        old_line = lines[target_line_idx]
-        line_indent = len(old_line) - len(old_line.lstrip())
-        
-        # Форматируем новый код с сохранением отступа
-        formatted_code = self._analyze_and_normalize_indent(code, line_indent)
-        if not formatted_code.endswith('\n'):
-            formatted_code += '\n'
-        
-        # Заменяем
-        old_lines_count = 1
-        if '\n' in formatted_code.rstrip('\n'):
-            # Многострочная замена
-            lines.pop(target_line_idx)
-            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
-                lines.insert(target_line_idx + i, line)
-            new_lines_count = len(formatted_code.splitlines())
-            lines_added = max(0, new_lines_count - old_lines_count)
-            lines_removed = max(0, old_lines_count - new_lines_count)
-        else:
-            # Однострочная замена
-            lines[target_line_idx] = formatted_code
-            lines_added = 1
-            lines_removed = 1
-        
-        
-        new_content = ''.join(lines)
-        
-        return ModifyResult(
-            success=True,
-            new_content=new_content,
-            message=f"Replaced global line",
-            changes_made=[f"Replaced global line {target_line_idx + 1}"],
-            lines_added=1,
-            lines_removed=1,
-        )    
     
     
     # ========================================================================
@@ -2276,65 +2398,25 @@ class FileModifier:
     
     def _normalize_and_indent_code(self, code: str, target_indent: int) -> str:
         """
-        Нормализует отступы в коде для безопасной вставки.
+        Нормализует отступы в коде используя textwrap для надежности.
         
-        КЛЮЧЕВОЙ ПРИНЦИП: Сохраняем относительную структуру отступов,
-        но сдвигаем весь код так, чтобы минимальный отступ стал равен target_indent.
-        
-        Алгоритм:
-        1. Находим минимальный отступ среди непустых строк (base_indent)
-        2. Для каждой строки вычисляем relative_indent = current - base_indent
-        3. Новый отступ = target_indent + relative_indent
-        
-        Это работает для ВСЕХ сценариев:
-        - Целый метод/класс (def/class на target_indent, тело на target_indent + 4)
-        - Несколько строк кода (все сдвигаются относительно первой)
-        - Одна строка (просто получает target_indent)
-        
-        Args:
-            code: Исходный код (возможно с неправильными отступами от Генератора)
-            target_indent: Целевой отступ для минимально-отступленной строки
-            
-        Returns:
-            Код с нормализованными отступами
+        1. Удаляет общий отступ (dedent)
+        2. Добавляет целевой отступ (indent)
         """
         if not code or not code.strip():
             return code
-        
-        lines = code.splitlines()
-        
-        # Шаг 1: Найти минимальный отступ среди непустых строк
-        min_indent = float('inf')
-        for line in lines:
-            stripped = line.lstrip()
-            if stripped:  # Непустая строка
-                current_indent = len(line) - len(stripped)
-                min_indent = min(min_indent, current_indent)
-        
-        # Если все строки пустые
-        if min_indent == float('inf'):
-            return code
-        
-        # Шаг 2: Нормализовать каждую строку
-        result_lines = []
-        for line in lines:
-            stripped = line.lstrip()
             
-            if not stripped:
-                # Пустая строка — оставляем пустой (без trailing spaces)
-                result_lines.append('')
-            else:
-                # Вычисляем текущий и относительный отступ
-                current_indent = len(line) - len(stripped)
-                relative_indent = current_indent - min_indent
-                
-                # Новый отступ = целевой + относительный
-                new_indent = target_indent + relative_indent
-                
-                # Применяем новый отступ
-                result_lines.append(' ' * new_indent + stripped)
+        # 1. Remove common whitespace (dedent)
+        # textwrap.dedent handles mixed indentation and empty first lines correctly
+        dedented_code = textwrap.dedent(code)
         
-        return '\n'.join(result_lines)
+        # 2. Add target indent
+        # textwrap.indent adds prefix to every line that is not whitespace-only
+        prefix = ' ' * target_indent
+        indented_code = textwrap.indent(dedented_code, prefix)
+        
+        # 3. Trim surrounding newlines to prevent drift
+        return indented_code.strip('\n')
 
 
     def _analyze_and_normalize_indent(self, code: str, target_indent: int) -> str:

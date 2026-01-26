@@ -607,40 +607,48 @@ class FrameworkDetector:
         try:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    # Case: import module, import module.submodule
                     for alias in node.names:
                         base_module = alias.name.split('.')[0].lower()
                         if base_module not in stdlib and base_module not in self.import_to_framework:
                             local_imports.add(alias.name)
                 
                 elif isinstance(node, ast.ImportFrom):
-                    # Case: from module import name
                     if node.level > 0:
-                        # Relative import (from . import x, from .sub import x)
+                        # Relative import
                         if node.module:
-                            # Add the module itself (e.g., 'sub' from 'from .sub import x')
                             local_imports.add(node.module)
-                        
-                        # Add all imported names as potential local dependencies
                         for alias in node.names:
                             if alias.name and alias.name != '*':
                                 local_imports.add(alias.name)
-                    
                     else:
-                        # Absolute import (from app import gui, from app.services import auth)
+                        # Absolute import
                         if node.module:
                             base_module = node.module.split('.')[0].lower()
                             if base_module not in stdlib and base_module not in self.import_to_framework:
-                                # Add the module itself
                                 local_imports.add(node.module)
-                                
-                                # CRITICAL: Add module.alias combinations
-                                # This forces scanner to check for submodules
-                                # e.g., 'from app import gui' -> add 'app.gui' to check for app/gui.py
+                                # Add module.alias combinations to find submodules
                                 for alias in node.names:
                                     if alias.name and alias.name != '*':
                                         local_imports.add(f"{node.module}.{alias.name}")
-        
+                                        
+                elif isinstance(node, ast.Call):
+                    # Handle dynamic local imports
+                    module_name = None
+                    if isinstance(node.func, ast.Name) and node.func.id == '__import__':
+                        if node.args and isinstance(node.args[0], (ast.Constant, ast.Str)):
+                            val = node.args[0].value if isinstance(node.args[0], ast.Constant) else node.args[0].s
+                            if isinstance(val, str):
+                                module_name = val
+                    elif isinstance(node.func, ast.Attribute) and node.func.attr == 'import_module':
+                        if node.args and isinstance(node.args[0], (ast.Constant, ast.Str)):
+                            val = node.args[0].value if isinstance(node.args[0], ast.Constant) else node.args[0].s
+                            if isinstance(val, str):
+                                module_name = val
+                    
+                    if module_name:
+                        base_module = module_name.split('.')[0].lower()
+                        if base_module not in stdlib and base_module not in self.import_to_framework:
+                            local_imports.add(module_name)
         except Exception:
             pass
         
@@ -766,10 +774,36 @@ class FrameworkDetector:
                         base_module = node.module.split('.')[0].lower()
                         if base_module:
                             imports.add(base_module)
+                            
+                elif isinstance(node, ast.Call):
+                    # Handle dynamic imports: __import__('name') or importlib.import_module('name')
+                    module_name = None
+                    
+                    # Case 1: __import__('pkg')
+                    if isinstance(node.func, ast.Name) and node.func.id == '__import__':
+                        if node.args and isinstance(node.args[0], (ast.Constant, ast.Str)):
+                            val = node.args[0].value if isinstance(node.args[0], ast.Constant) else node.args[0].s
+                            if isinstance(val, str):
+                                module_name = val
+                    
+                    # Case 2: importlib.import_module('pkg')
+                    elif isinstance(node.func, ast.Attribute) and node.func.attr == 'import_module':
+                        # Check if called on 'importlib' (simplified check)
+                        if node.args and isinstance(node.args[0], (ast.Constant, ast.Str)):
+                            val = node.args[0].value if isinstance(node.args[0], ast.Constant) else node.args[0].s
+                            if isinstance(val, str):
+                                module_name = val
+                    
+                    if module_name:
+                        base_module = module_name.split('.')[0].lower()
+                        if base_module:
+                            imports.add(base_module)
         except Exception as e:
             self.logger.debug(f"Error walking AST: {e}")
         
         return imports
+    
+    
     
     def _match_usage_patterns(self, content: str) -> Dict[str, float]:
         """
@@ -1695,8 +1729,27 @@ except Exception as e:
             return False
         
         try:
-            pattern = r'if\s+__name__\s*==\s*["\']__main__["\']'
-            return bool(re.search(pattern, content))
+            # 1. Check for standard main guard
+            if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', content):
+                return True
+            
+            # 2. Check for top-level execution of blocking frameworks
+            # This handles scripts that just run code directly (e.g. "app.mainloop()")
+            blocking_patterns = [
+                r'\.mainloop\(\)',
+                r'\.exec_\(\)',
+                r'\.run_forever\(\)',
+                r'\.start_polling\(\)',
+                r'uvicorn\.run\(',
+                r'sys\.exit\(.*exec',
+                r'app\.run\('
+            ]
+            
+            for pattern in blocking_patterns:
+                if re.search(pattern, content):
+                    return True
+                    
+            return False
         except Exception:
             return False
 

@@ -106,6 +106,17 @@ def _build_feedback_handling_block() -> str:
     parts.append("  • Code Generator starts FRESH — no memory of previous attempt")
     parts.append("")
     
+# === RESOLUTION CONTINUITY ===
+    parts.append("━" * 60)
+    parts.append("⏩ RESOLUTION CONTINUITY")
+    parts.append("━" * 60)
+    parts.append("")
+    parts.append("If errors persist or change, the resolution process must continue.")
+    parts.append("You are expected to generate a new instruction to bridge the remaining gap.")
+    parts.append("Treat the current state as a new problem to be solved.")
+    parts.append("Actively modify the code until it reaches a fully functional state.")
+    parts.append("")
+    
     # === FEEDBACK TYPES ===
     parts.append("━" * 60)
     parts.append("📋 FEEDBACK TYPES AND AUTHORITY")

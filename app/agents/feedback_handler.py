@@ -361,6 +361,12 @@ class StagingErrorFeedback:
             parts.append(f"💡 HINT: {guidance['mode_hint']}")
             parts.append("")
         
+        # MODE CHECK: New section for mode verification
+        parts.append("MODE CHECK:")
+        parts.append("Verify that the correct code insertion mode was applied.")
+        parts.append("Ensure the revised instruction uses the correct mode.")
+        parts.append("")
+        
         # Required action
         parts.append("REQUIRED ACTION:")
         parts.append("Write a corrected instruction with fixed MODE, TARGET, or file path.")
