@@ -352,9 +352,9 @@ COLORS = {
 AVAILABLE_ORCHESTRATOR_MODELS = [
     (
         "1",
-        cfg.MODEL_GPT_5_1_Codex_MAX,
-        "GPT-5.1 Codex Max",
-        "Для простых задач. Очень исполнительная, но не хватает стратегического мышления. Быстрая и надёжная."
+        cfg.MODEL_GPT_5_2_Codex,
+        "GPT-5.2 Codex",
+        "Новая модель от OpenAI, отзывы очень хорошие."
     ),
     (
         "2",

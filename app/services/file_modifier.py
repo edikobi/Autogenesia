@@ -1995,9 +1995,7 @@ class FileModifier:
                 message="target_method and replace_pattern required for REPLACE_IN_METHOD",
             )
         
-        if not target_class:
-            # Делегируем _replace_in_function
-            return self._replace_in_function(existing_content, instruction)
+        # DELEGATION REMOVED: Allow this method to handle global functions directly
         
         lines = existing_content.splitlines(keepends=True)
         
@@ -2049,7 +2047,7 @@ class FileModifier:
         old_line = lines[target_line_idx]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # FIX: Force strict normalization
+        # FIX: Force strict normalization (Preserved from previous step)
         formatted_code = self._normalize_and_indent_code(code, line_indent)
         
         if not formatted_code.endswith('\n'):

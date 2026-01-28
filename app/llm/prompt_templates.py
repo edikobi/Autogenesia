@@ -49,7 +49,7 @@ MAX_WEB_SEARCH_CALLS = 3  # Maximum web_search calls per session
 # Exact model IDs from config/settings.py for reference:
 # - Claude Opus 4.5:    "anthropic/claude-opus-4.5"
 # - Claude Sonnet 4.5:  "anthropic/claude-sonnet-4.5"
-# - GPT-5.1 Codex Max:  "openai/gpt-5.1-codex-max"
+# - GPT-5.1 Codex Max:  "openai/gpt-5.2-codex"
 # - Gemini 3.0 Pro:     "google/gemini-3-pro-preview"
 # - Gemini 2.0 Flash:   "google/gemini-2.0-flash-001"
 # - DeepSeek Reasoner:  "deepseek-reasoner"
@@ -65,7 +65,7 @@ MODEL_COGNITIVE_TYPES: Dict[str, str] = {
     
     # Executor - ориентированы на выполнение задач
     # Стандартные промпты работают хорошо, дополнения не нужны
-    Config.MODEL_GPT_5_1_Codex_MAX: "executor", # "openai/gpt-5.1-codex-max"
+    Config.MODEL_GPT_5_2_Codex: "executor", # "openai/gpt-5.2-codex"
     Config.MODEL_GEMINI_3_PRO: "executor", # "google/gemini-3-pro-preview"
     
     # Reasoner - модели с цепочкой рассуждений
@@ -113,7 +113,7 @@ def get_model_cognitive_type(model_id: str) -> str:
             return "executor"
     
     # === GPT FAMILY → executor ===
-    # Matches: gpt-5.1-codex-max, openai/gpt-5.1-codex-max, etc.
+    # Matches: gpt-5.1-codex-max, openai/gpt-5.2-codex, etc.
     if "gpt" in model_lower:
         # GPT-5.x and Codex models are executors
         if "5" in model_lower or "codex" in model_lower:
@@ -3118,7 +3118,7 @@ def format_orchestrator_prompt_ask(
     compact_index: str = "",
     project_map: str = "",
     remaining_web_searches: int = MAX_WEB_SEARCH_CALLS,
-    orchestrator_model_id: str = "openai/gpt-5.1-codex-max",
+    orchestrator_model_id: str = "openai/gpt-5.2-codex",
     conversation_summary: str = "No previous context."
 ) -> Dict[str, str]:
     """
@@ -3168,7 +3168,7 @@ def format_orchestrator_prompt_ask(
 def format_orchestrator_prompt_new_project(
     user_query: str,
     remaining_web_searches: int = MAX_WEB_SEARCH_CALLS,
-    orchestrator_model_id: str = "openai/gpt-5.1-codex-max",
+    orchestrator_model_id: str = "openai/gpt-5.2-codex",
 ) -> Dict[str, str]:
     """
     Format Orchestrator prompts for NEW PROJECT mode.
@@ -3209,7 +3209,7 @@ def format_orchestrator_prompt(
     project_map: str = "",
     is_new_project: bool = False,
     remaining_web_searches: int = MAX_WEB_SEARCH_CALLS,
-    orchestrator_model_id: str = "openai/gpt-5.1-codex-max",
+    orchestrator_model_id: str = "openai/gpt-5.2-codex",
 ) -> Dict[str, str]:
     """
     Format orchestrator prompts with variables (unified interface).
@@ -3755,14 +3755,14 @@ def get_messages_for_role(role: str, kwargs) -> List[Dict[str, str]]:
             kwargs.get("project_map", ""),
             is_new_project=False,
             remaining_web_searches=kwargs.get("remaining_web_searches", MAX_WEB_SEARCH_CALLS),
-            orchestrator_model_id=kwargs.get("orchestrator_model_id", "openai/gpt-5.1-codex-max"),
+            orchestrator_model_id=kwargs.get("orchestrator_model_id", "openai/gpt-5.2-codex"),
         ),
         "orchestrator_new": lambda: format_orchestrator_prompt(
             kwargs.get("user_query", ""), 
             "", "", "", # No chunks/index for new project
             is_new_project=True,
             remaining_web_searches=kwargs.get("remaining_web_searches", MAX_WEB_SEARCH_CALLS),
-            orchestrator_model_id=kwargs.get("orchestrator_model_id", "openai/gpt-5.1-codex-max"),
+            orchestrator_model_id=kwargs.get("orchestrator_model_id", "openai/gpt-5.2-codex"),
         ),
         "code_generator": lambda: format_code_generator_prompt(
             kwargs.get("orchestrator_instruction", ""), 
@@ -5363,7 +5363,7 @@ def format_orchestrator_prompt_ask_agent(
     compact_index: str = "",
     project_map: str = "",
     remaining_web_searches: int = MAX_WEB_SEARCH_CALLS,
-    orchestrator_model_id: str = "openai/gpt-5.1-codex-max",
+    orchestrator_model_id: str = "openai/gpt-5.2-codex",
     conversation_summary: str = "No previous context.",
     # Feedback parameters (separate!)
     validator_feedback: str = "",
@@ -5450,7 +5450,7 @@ def format_orchestrator_prompt_ask_agent(
 def format_orchestrator_prompt_new_project_agent(
     user_query: str,
     remaining_web_searches: int = MAX_WEB_SEARCH_CALLS,
-    orchestrator_model_id: str = "openai/gpt-5.1-codex-max",
+    orchestrator_model_id: str = "openai/gpt-5.2-codex",
     conversation_summary: str = "No previous context.",
     # Feedback parameters
     validator_feedback: str = "",

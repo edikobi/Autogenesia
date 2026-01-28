@@ -42,8 +42,8 @@ class Config:
     MODEL_SONNET_4_5 = "anthropic/claude-sonnet-4.5"
     
     # GPT-5.1 Codex Max - для простых задач
-    # (переменная называется MODEL_GPT_5_1_Codex_MAX по историческим причинам)
-    MODEL_GPT_5_1_Codex_MAX = "openai/gpt-5.1-codex-max"
+    # (переменная называется MODEL_GPT_5_2_Codex по историческим причинам)
+    MODEL_GPT_5_2_Codex = "openai/gpt-5.2-codex"
     
 # !!! GEMINI 3.0 PRO (РЕАЛЬНАЯ МОДЕЛЬ) !!!
     # ID модели в RouterAI/OpenRouter для версии 3.0 Pro
@@ -109,7 +109,7 @@ class Config:
                 }
             }
         },
-        "openai/gpt-5.1-codex-max": {
+        "openai/gpt-5.2-codex": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER",
@@ -196,7 +196,7 @@ class Config:
         Используйте этот метод при создании клиента OpenAI!
         """
         # 1. Принудительные правила для RouterAI
-        if model_name in [ cls.MODEL_GPT_5_1_Codex_MAX]:
+        if model_name in [ cls.MODEL_GPT_5_2_Codex]:
             return {
                 "api_key": cls.ROUTERAI_API_KEY,
                 "base_url": cls.ROUTERAI_BASE_URL,
@@ -235,7 +235,7 @@ class Config:
     
     # Модели для автоматического выбора (если ROUTER_ENABLED = True)
     # ТРЁХУРОВНЕВАЯ СИСТЕМА:
-    ORCHESTRATOR_SIMPLE_MODEL = MODEL_GPT_5_1_Codex_MAX   # 🟢 Простые задачи → GPT-5.1 Codex Max
+    ORCHESTRATOR_SIMPLE_MODEL = MODEL_GPT_5_2_Codex   # 🟢 Простые задачи → GPT-5.1 Codex Max
     ORCHESTRATOR_MEDIUM_MODEL = MODEL_SONNET_4_5     # 🟡 Средние задачи → Claude Sonnet 4.5 (NEW!)
     ORCHESTRATOR_COMPLEX_MODEL = MODEL_OPUS_4_5      # 🔴 Сложные задачи → Claude Opus 4.5
     
@@ -269,7 +269,7 @@ class Config:
     PROJECT_MAP_DESCRIBE_MODEL = MODEL_NORMAL  # DeepSeek для описаний    
     
     # Модель по умолчанию для режима General Chat (используем мощную GPT-5.1)
-    GENERAL_CHAT_MODEL = os.getenv("GENERAL_CHAT_MODEL", MODEL_GPT_5_1_Codex_MAX)    
+    GENERAL_CHAT_MODEL = os.getenv("GENERAL_CHAT_MODEL", MODEL_GPT_5_2_Codex)    
     
     # Лимит токенов на все файлы пользователя в режиме General Chat (PDF, DOCX, TXT и т.д.)
     MAX_USER_FILES_TOKENS = 55000
@@ -377,7 +377,7 @@ class Config:
         return [
             cls.MODEL_OPUS_4_5,
             cls.MODEL_SONNET_4_5,  # NEW!
-            cls.MODEL_GPT_5_1_Codex_MAX,
+            cls.MODEL_GPT_5_2_Codex,
             cls.MODEL_GEMINI_2_FLASH,
             cls.MODEL_GEMINI_3_PRO,
             cls.MODEL_DEEPSEEK_REASONER,
@@ -409,10 +409,10 @@ class Config:
     def get_model_display_name(cls, model_id):
         # Словарь красивых имен
         model_names = {
-            cls.MODEL_OPUS_4_5: "Claude Opus 4.5 (RouterAI)",
-            cls.MODEL_SONNET_4_5: "Claude Sonnet 4.5 (RouterAI)",  # NEW!
+            cls.MODEL_OPUS_4_5: "Claude Opus 4.5",
+            cls.MODEL_SONNET_4_5: "Claude Sonnet 4.5",  # NEW!
             cls.MODEL_DEEPSEEK_REASONER: "DeepSeek V3.2 Reasoning",
-            cls.MODEL_GPT_5_1_Codex_MAX: "GPT-5.1 Codex Max (RouterAI)",
+            cls.MODEL_GPT_5_2_Codex: "GPT-5.2 Codex",
             cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.0 Pro (Thinking)",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
