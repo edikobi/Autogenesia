@@ -1344,8 +1344,8 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                # FIX 1: Strict normalization
-                formatted_code = self._normalize_and_indent_code(code, body_indent)
+                # FIX 1: Use aggressive strip to handle comments/garbage correctly
+                formatted_code = self._normalize_and_indent_code(code, body_indent, aggressive_strip=True)
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -1486,8 +1486,8 @@ class FileModifier:
             # No context line (e.g. empty method or default pos), use method body base indent
             body_indent = body_base_indent
         
-        # FIX 3: Strict normalization (bypass "smart" check to kill phantom spaces)
-        formatted_code = self._normalize_and_indent_code(code, body_indent)
+        # FIX 3: Use aggressive strip for main patch logic
+        formatted_code = self._normalize_and_indent_code(code, body_indent, aggressive_strip=True)
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -2047,8 +2047,8 @@ class FileModifier:
         old_line = lines[target_line_idx]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # FIX: Force strict normalization (Preserved from previous step)
-        formatted_code = self._normalize_and_indent_code(code, line_indent)
+        # FIX: Use aggressive strip to prevent "16 spaces" bug
+        formatted_code = self._normalize_and_indent_code(code, line_indent, aggressive_strip=True)
         
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
@@ -2394,27 +2394,66 @@ class FileModifier:
         return '\n'.join(result_lines)
     
     
-    def _normalize_and_indent_code(self, code: str, target_indent: int) -> str:
+    def _normalize_and_indent_code(self, code: str, target_indent: int, aggressive_strip: bool = False) -> str:
         """
-        Нормализует отступы в коде используя textwrap для надежности.
+        Нормализует отступы в коде.
         
-        1. Удаляет общий отступ (dedent)
-        2. Добавляет целевой отступ (indent)
+        Args:
+            code: Исходный код
+            target_indent: Целевой отступ (в пробелах)
+            aggressive_strip: Если True, игнорирует комментарии и пустые строки при вычислении базового отступа.
+                            Полезно для PATCH_METHOD, где LLM может вернуть код с рандомными комментариями на 0 отступе.
         """
         if not code or not code.strip():
             return code
             
-        # 1. Remove common whitespace (dedent)
-        # textwrap.dedent handles mixed indentation and empty first lines correctly
-        dedented_code = textwrap.dedent(code)
+        # 1. Expand tabs for consistency
+        code = code.expandtabs(4)
         
+        dedented_code = ""
+        
+        if aggressive_strip:
+            lines = code.splitlines()
+            min_indent = None
+            
+            # Find min indent of SIGNIFICANT lines (ignoring comments/empty)
+            for line in lines:
+                stripped = line.strip()
+                # Ignore empty lines and comments for anchor calculation
+                if not stripped or stripped.startswith('#'):
+                    continue
+                
+                curr_indent = len(line) - len(line.lstrip())
+                if min_indent is None or curr_indent < min_indent:
+                    min_indent = curr_indent
+            
+            if min_indent is not None and min_indent > 0:
+                # Manual dedent based on calculated min_indent
+                result_lines = []
+                for line in lines:
+                    if not line.strip():
+                        result_lines.append('')
+                    else:
+                        curr_indent = len(line) - len(line.lstrip())
+                        # Strip up to min_indent. 
+                        # If a comment is at 0 (less than min), it stays at 0 (strip all its indent).
+                        cut_len = min(curr_indent, min_indent)
+                        result_lines.append(line[cut_len:])
+                dedented_code = '\n'.join(result_lines)
+            else:
+                # Fallback: standard dedent if no significant lines or already 0
+                dedented_code = textwrap.dedent(code)
+        else:
+            # Standard behavior for other modes
+            dedented_code = textwrap.dedent(code)
+            
         # 2. Add target indent
-        # textwrap.indent adds prefix to every line that is not whitespace-only
         prefix = ' ' * target_indent
         indented_code = textwrap.indent(dedented_code, prefix)
         
-        # 3. Trim surrounding newlines to prevent drift
+        # 3. Trim surrounding newlines
         return indented_code.strip('\n')
+
 
 
     def _analyze_and_normalize_indent(self, code: str, target_indent: int) -> str:
