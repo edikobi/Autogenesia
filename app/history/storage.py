@@ -258,6 +258,73 @@ class HistoryStorage:
                 for row in rows
             ]
 
+    def list_threads_paginated(
+        self, 
+        user_id: str, 
+        page: int = 1, 
+        per_page: int = 5
+    ) -> tuple[List[Thread], int, int]:
+        """
+        Получает диалоги пользователя с пагинацией.
+        
+        Args:
+            user_id: ID пользователя.
+            page: Номер страницы (начиная с 1).
+            per_page: Количество диалогов на странице.
+            
+        Returns:
+            Кортеж (список Thread, общее количество, количество страниц).
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Получаем общее количество
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM threads WHERE user_id = ?", 
+                (user_id,)
+            )
+            total_count = cursor.fetchone()["cnt"]
+            
+            if total_count == 0:
+                return [], 0, 0
+            
+            # Вычисляем количество страниц
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            # Ограничиваем номер страницы
+            page = max(1, min(page, total_pages))
+            offset = (page - 1) * per_page
+            
+            # Получаем треды для страницы
+            cursor.execute(
+                """
+                SELECT * FROM threads 
+                WHERE user_id = ? 
+                ORDER BY updated_at DESC 
+                LIMIT ? OFFSET ?
+                """,
+                (user_id, per_page, offset)
+            )
+            rows = cursor.fetchall()
+            
+            threads = [
+                Thread(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    project_path=row["project_path"],
+                    project_name=row["project_name"],
+                    is_archived=bool(row["is_archived"]),
+                    title=row["title"],
+                    message_count=row["message_count"],
+                    total_tokens=row["total_tokens"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"]
+                )
+                for row in rows
+            ]
+            
+            return threads, total_count, total_pages
+
     def update_thread(
         self,
         thread_id: str,
@@ -379,6 +446,7 @@ class HistoryStorage:
         """
         message_id = f"msg-{uuid.uuid4().hex[:8]}"
         metadata_json = json.dumps(metadata) if metadata else None
+        now = datetime.now().isoformat()
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -386,22 +454,22 @@ class HistoryStorage:
             # Добавляем сообщение
             cursor.execute(
                 """
-                INSERT INTO messages (id, thread_id, role, content, tokens, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (id, thread_id, role, content, tokens, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, thread_id, role, content, tokens, metadata_json)
+                (message_id, thread_id, role, content, tokens, metadata_json, now)
             )
 
-            # Атомарно обновляем счетчики в диалоге
+            # Атомарно обновляем счетчики в диалоге с локальным временем
             cursor.execute(
                 """
                 UPDATE threads
                 SET message_count = message_count + 1,
                     total_tokens = total_tokens + ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (tokens, thread_id)
+                (tokens, now, thread_id)
             )
 
             # Получаем созданное сообщение

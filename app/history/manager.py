@@ -78,6 +78,35 @@ class HistoryManager:
             logger.error(f"Failed to list threads: {e}", exc_info=True)
             return []
 
+    async def list_threads_paginated(
+        self, 
+        user_id: str, 
+        page: int = 1, 
+        per_page: int = 5
+    ) -> tuple[List[Thread], int, int]:
+        """
+        Получает список диалогов пользователя с пагинацией.
+        
+        Args:
+            user_id: ID пользователя
+            page: Номер страницы (начиная с 1)
+            per_page: Количество диалогов на странице
+            
+        Returns:
+            Кортеж (список Thread, общее количество, количество страниц)
+        """
+        logger.debug(f"Listing threads paginated: user_id={user_id}, page={page}, per_page={per_page}")
+        try:
+            result = await asyncio.to_thread(
+                self.storage.list_threads_paginated, user_id, page, per_page
+            )
+            threads, total, pages = result
+            logger.debug(f"Found {len(threads)} threads on page {page}/{pages} (total: {total})")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to list threads paginated: {e}", exc_info=True)
+            return [], 0, 0
+
     async def get_thread(self, thread_id: str) -> Optional[Thread]:
         """
         Получает диалог по ID.

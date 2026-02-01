@@ -2618,131 +2618,41 @@ class FileModifier:
             return indented_code.strip('\n')
 
     def _repair_first_line_indent(self, code: str) -> str:
-        """Heuristically fixes code where the first line is stripped (indent 0) but subsequent lines are indented, using AST analysis."""
-        lines = code.splitlines()
-        
-        # 1. Return original if < 2 lines
-        if len(lines) < 2:
-            return code
-        
-        # 2. Find indices of first two non-empty, non-comment lines
-        idx0 = None
-        idx1 = None
-        
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped and not stripped.startswith('#'):
-                if idx0 is None:
-                    idx0 = i
-                elif idx1 is None:
-                    idx1 = i
-                    break
-        
-        # If not found, return code
-        if idx0 is None or idx1 is None:
-            return code
-        
-        # 3. Check indentation
-        i0 = len(lines[idx0]) - len(lines[idx0].lstrip())
-        i1 = len(lines[idx1]) - len(lines[idx1].lstrip())
-        
-        # 4. Condition: If i0 == 0 AND i1 > 0
-        if i0 == 0 and i1 > 0:
-            # Try to parse the first line
-            try:
-                first_line_stripped = lines[idx0].strip()
-                ast.parse(first_line_stripped)
-                # If AST parse succeeds: The line is a complete statement
-                # It should NOT have indented children. The indentation of the next line
-                # implies the first line was stripped.
-                # Action: Pad the first line with spaces equal to i1
-                lines[idx0] = ' ' * i1 + lines[idx0]
-                return '\n'.join(lines)
-            except (SyntaxError, ValueError):
-                # If AST parse fails: The line is likely a block opener or incomplete
-                # It expects indentation. Return code as is (valid structure).
-                return code
-        
-        # 5. Return original code if no condition met
+        """
+        DEPRECATED: Heuristic repair disabled.
+        Returns code as-is to let SyntaxChecker handle indentation fixes reliably.
+        """
         return code
 
 
     def _prepare_code_for_mode_switch(self, code: str) -> str:
         """
         Подготавливает код для переключения режима вставки в _try_auto_correct.
-
-        Решает проблему "unindent does not match any outer indentation level",
-        которая возникает когда LLM генерирует код с "оторванной" первой строкой
-        (например, `if salary:` с отступом 0, а тело с отступом 8).
-
-        Алгоритм:
-        1. Выравнивает первую строку с остальными (если она "оторвана")
-        2. Применяет textwrap.dedent для снятия общего отступа до нуля
-        3. Результат: код с нулевым базовым отступом и консистентными внутренними отступами
-
-        После этого режимы вставки (_replace_function, _replace_method и т.д.)
-        применят правильный целевой отступ, а SyntaxChecker исправит мелкие проблемы.
-
-        Returns:
-            Код с нулевым базовым отступом и консистентными внутренними отступами.
+        
+        УПРОЩЕНО: Мы больше не пытаемся "умно" выравнивать первую строку, так как
+        это часто ломает структуру блоков (например, сплющивает if/def).
+        
+        Вместо этого мы делаем простой dedent. Если это приведет к IndentationError
+        (например, unexpected indent), это будет исправлено штатным SyntaxChecker
+        (autopep8/black) на этапе валидации, который справляется с этим лучше.
         """
-        # 1. Если код пустой или содержит только пробелы, вернуть его как есть
         if not code or not code.strip():
             return code
-        
-        # 2. Расширить табы до 4 пробелов
+            
+        # 1. Expand tabs
         code = code.expandtabs(4)
         
-        # 3. Разбить код на строки
-        lines = code.splitlines()
+        # 2. Dedent to remove common leading whitespace
+        # Note: If the first line is detached (indent 0) and body is indented,
+        # dedent will do nothing. This is INTENTIONAL. 
+        # The resulting code might look like:
+        #   x = 1
+        #       y = 2
+        # Inserting this will cause IndentationError, which SyntaxChecker will fix
+        # by aligning y=2 with x=1 (dedenting y).
+        dedented_code = textwrap.dedent(code)
         
-        # 4. Найти первую непустую строку и её отступ
-        first_idx = None
-        first_indent = 0
-        for i, line in enumerate(lines):
-            if line.strip():
-                first_idx = i
-                first_indent = len(line) - len(line.lstrip())
-                break
-        
-        # Если нет непустых строк — вернуть как есть
-        if first_idx is None:
-            return code
-        
-        # 5. Найти минимальный отступ среди непустых строк ПОСЛЕ первой,
-        #    игнорируя комментарии
-        min_rest_indent = None
-        for i in range(first_idx + 1, len(lines)):
-            line = lines[i]
-            stripped = line.strip()
-            # FIX: Ignore comments when calculating minimum indent
-            if stripped and not stripped.startswith('#'):
-                indent = len(line) - len(line.lstrip())
-                if min_rest_indent is None or indent < min_rest_indent:
-                    min_rest_indent = indent
-        
-        # 6. Если первая строка "оторвана" (имеет меньший отступ) — выровнять её
-        if min_rest_indent is not None and first_indent < min_rest_indent:
-            # FIX: Use AST to verify if the first line is a complete statement.
-            # If it raises SyntaxError (e.g. 'if x:', 'def f():', 'x = ('), it's likely a block opener
-            # or context-dependent statement. We should NOT align these, as that flattens the structure.
-            should_align = True
-            try:
-                ast.parse(lines[first_idx].strip())
-            except (SyntaxError, ValueError):
-                should_align = False
-            
-            if should_align:
-                # Добавить пробелы к первой строке, чтобы выровнять с остальными
-                padding = min_rest_indent - first_indent
-                lines[first_idx] = ' ' * padding + lines[first_idx]
-        
-        # 7. Собрать строки и применить dedent для снятия общего отступа
-        aligned_code = '\n'.join(lines)
-        dedented_code = textwrap.dedent(aligned_code)
-        
-        # 8. Вернуть результат без лишних переводов строк
-        return dedented_code.strip('\n')
+        return dedented_code.strip()
 
     def _normalize_code_for_insertion(self, code: str, target_indent: int) -> str:
         """

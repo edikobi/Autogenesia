@@ -162,7 +162,7 @@ async def compress_history_if_needed(
 
 async def _compress_message(msg: Message, content_type: str) -> Message:
     """
-    Сжимает отдельное сообщение с помощью LLM, используя шаблоны промптов.
+    Сжимает отдельное сообщение с помощью LLM, гарантируя минимум 30% сжатия.
     Не сжимает уже сжатые сообщения или сообщения с блоками кода.
 
     Args:
@@ -180,10 +180,18 @@ async def _compress_message(msg: Message, content_type: str) -> Message:
     if _contains_code_block(msg.content):
         return msg
     
+    # Не сжимаем короткие сообщения (менее 500 токенов)
+    token_counter = TokenCounter()
+    original_tokens = token_counter.count(msg.content)
+    if original_tokens < 500:
+        return msg
+    
     try:
-        # Форматируем промпт для сжатия
+        # Форматируем промпт для сжатия с целевым коэффициентом
+        target_tokens = int(original_tokens * 0.6)  # Целевое сжатие до 60%
         prompt = format_compression_prompt(msg.content, content_type)
-        logger.debug(f"Compression prompt preview: {prompt[:200]}...")
+        
+        logger.debug(f"Compressing {content_type} message: {original_tokens} tokens -> target {target_tokens}")
         
         # Получаем модель для сжатия
         model = cfg.AGENT_MODELS.get("history_compressor", "deepseek/deepseek-chat")
@@ -193,19 +201,31 @@ async def _compress_message(msg: Message, content_type: str) -> Message:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=COMPRESSION_MAX_TOKENS
+            max_tokens=min(COMPRESSION_MAX_TOKENS, target_tokens + 200)
         )
         
-        # Создаем новое сжатое сообщение
+        # Проверяем эффективность сжатия
         compressed_content = "[COMPRESSED] " + compressed.strip()
+        compressed_tokens = token_counter.count(compressed_content)
+        compression_ratio = compressed_tokens / original_tokens
         
-        # Копируем все поля из оригинального сообщения
+        logger.info(
+            f"Compression result: {original_tokens} -> {compressed_tokens} tokens "
+            f"(ratio: {compression_ratio:.1%}, saved: {original_tokens - compressed_tokens})"
+        )
+        
+        # Если сжатие недостаточное (менее 25% экономии), применяем fallback
+        if compression_ratio > 0.75:
+            logger.warning(f"Compression insufficient ({compression_ratio:.1%}), applying fallback truncation")
+            compressed_content = "[COMPRESSED] " + msg.content[:target_tokens]
+        
+        # Создаем новое сжатое сообщение
         compressed_msg = Message(
             id=msg.id,
             thread_id=msg.thread_id,
             role=msg.role,
             content=compressed_content,
-            tokens=TokenCounter().count(compressed_content),
+            tokens=token_counter.count(compressed_content),
             metadata=msg.metadata,
             created_at=msg.created_at
         )

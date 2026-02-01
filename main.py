@@ -2578,7 +2578,7 @@ async def find_or_create_thread_for_project(project_dir: Optional[str]) -> Optio
 async def select_thread() -> Optional[Thread]:
     """
     Выбор существующего треда из меню "История диалогов".
-    Показывает превью последнего запроса.
+    Показывает превью последнего запроса с пагинацией по 5 диалогов на странице.
     
     Returns:
         Выбранный Thread или None
@@ -2589,81 +2589,105 @@ async def select_thread() -> Optional[Thread]:
     if not state.history_manager:
         return None
     
-    threads = await state.history_manager.list_user_threads(state.user_id, limit=20)
+    current_page = 1
+    per_page = 5
     
-    if not threads:
-        console.print("[dim]Нет сохранённых диалогов. Создаём новый...[/]")
-        return await create_new_thread()
-    
-    console.print(f"\n[bold]📜 Все диалоги[/] ({len(threads)} шт.)\n")
-    
-    # Отображаем треды с превью
-    table = Table(show_header=True, box=box.ROUNDED)
-    table.add_column("#", style="bold cyan", width=3)
-    table.add_column("Название", max_width=25)
-    table.add_column("Проект", max_width=15)
-    table.add_column("Сообщ.", width=7)
-    table.add_column("Обновлён", width=12)
-    table.add_column("Последний запрос", max_width=40)
-    
-    # Собираем превью
-    display_threads = threads[:15]  # Показываем макс 15
-    previews = []
-    for t in display_threads:
-        preview = await get_thread_preview(t)
-        previews.append(preview)
-    
-    for i, (t, preview) in enumerate(zip(display_threads, previews), 1):
-        # Форматируем данные
-        date_str = t.updated_at[5:16].replace('T', ' ') if t.updated_at else "-"
-        title = t.title[:22] + "..." if len(t.title) > 25 else t.title
-        project = t.project_name[:12] + "..." if t.project_name and len(t.project_name) > 15 else (t.project_name or "-")
-        
-        table.add_row(
-            str(i),
-            title,
-            project,
-            str(t.message_count),
-            date_str,
-            preview[:37] + "..." if len(preview) > 40 else preview
+    while True:
+        # Получаем диалоги с пагинацией
+        threads, total_count, total_pages = await state.history_manager.list_threads_paginated(
+            state.user_id, current_page, per_page
         )
-    
-    console.print(table)
-    
-    if len(threads) > 15:
-        console.print(f"[dim]... и ещё {len(threads) - 15} диалогов[/]")
-    
-    console.print("\n[n] Создать новый диалог")
-    
-    try:
-        choice = prompt_with_navigation("Выбор", default="1")
-    except (BackException, BackToMenuException, QuitException):
-        raise
-    
-    if choice.lower() == 'n':
-        return await create_new_thread()
-    
-    try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(display_threads):
-            selected = display_threads[idx]
+        
+        if total_count == 0:
+            console.print("[dim]Нет сохранённых диалогов. Создаём новый...[/]")
+            return await create_new_thread()
+        
+        # Заголовок с информацией о пагинации
+        console.print(f"\n[bold]📜 История диалогов[/] ({total_count} шт.)")
+        if total_pages > 1:
+            console.print(f"[dim]Страница {current_page} из {total_pages}[/]\n")
+        else:
+            console.print()
+        
+        # Таблица диалогов
+        table = Table(show_header=True, box=box.ROUNDED)
+        table.add_column("#", style="bold cyan", width=3)
+        table.add_column("Название", max_width=25)
+        table.add_column("Проект", max_width=15)
+        table.add_column("Сообщ.", width=7)
+        table.add_column("Обновлён", width=12)
+        table.add_column("Последний запрос", max_width=40)
+        
+        # Собираем превью для текущей страницы
+        previews = []
+        for t in threads:
+            preview = await get_thread_preview(t)
+            previews.append(preview)
+        
+        for i, (t, preview) in enumerate(zip(threads, previews), 1):
+            # Форматируем данные
+            date_str = t.updated_at[5:16].replace('T', ' ') if t.updated_at else "-"
+            title = t.title[:22] + "..." if len(t.title) > 25 else t.title
+            project = t.project_name[:12] + "..." if t.project_name and len(t.project_name) > 15 else (t.project_name or "-")
             
-            # Определяем режим по проекту
-            display_mode = "general"
-            if selected.project_path:
-                display_mode = "ask"  # или agent, но для просмотра истории это не важно
-            
-            console.print(f"\n[green]✓[/] Выбран диалог: [bold]{selected.title}[/]")
-            
-            # Показываем историю
-            await display_thread_history(selected, display_mode, limit=5)
-            
-            return selected
-    except ValueError:
-        pass
-    
-    console.print("[dim]Неверный выбор[/]")
-    return await select_thread()  # Повторить
+            table.add_row(
+                str(i),
+                title,
+                project,
+                str(t.message_count),
+                date_str,
+                preview[:37] + "..." if len(preview) > 40 else preview
+            )
+        
+        console.print(table)
+        
+        # Навигация по страницам
+        console.print()
+        nav_options = []
+        if current_page > 1:
+            nav_options.append("[<] Предыдущая")
+        if current_page < total_pages:
+            nav_options.append("[>] Следующая")
+        nav_options.append("[n] Новый диалог")
+        
+        console.print(" │ ".join(nav_options))
+        
+        try:
+            choice = prompt_with_navigation("Выбор (номер, <, >, n)", default="1")
+        except (BackException, BackToMenuException, QuitException):
+            raise
+        
+        # Обработка навигации
+        if choice == '<' and current_page > 1:
+            current_page -= 1
+            continue
+        elif choice == '>' and current_page < total_pages:
+            current_page += 1
+            continue
+        elif choice.lower() == 'n':
+            return await create_new_thread()
+        
+        # Выбор диалога по номеру
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(threads):
+                selected = threads[idx]
+                
+                # Определяем режим по проекту
+                display_mode = "general"
+                if selected.project_path:
+                    display_mode = "ask"
+                
+                console.print(f"\n[green]✓[/] Выбран диалог: [bold]{selected.title}[/]")
+                
+                # Показываем историю
+                await display_thread_history(selected, display_mode, limit=5)
+                
+                return selected
+        except ValueError:
+            pass
+        
+        console.print("[dim]Неверный выбор. Попробуйте снова.[/]")
 
 
 async def load_conversation_history(current_query: str = "", active_model: Optional[str] = None) -> List[Dict[str, str]]:
@@ -6168,11 +6192,40 @@ async def main_menu_loop():
                 if thread:
                     state.current_thread = thread
                     state.project_dir = thread.project_path
-                    if state.project_dir:
+                    
+                    # Определяем режим по наличию проекта
+                    if thread.project_path:
+                        state.mode = "ask"  # По умолчанию ask для проектов
                         state.project_index = await load_project_index(state.project_dir)
-                    await view_history()
-            except (BackException, BackToMenuException, QuitException):
+                    else:
+                        state.mode = "general"
+                        state.project_index = {}
+                    
+                    # Показываем статус
+                    print_status_bar()
+                    
+                    # Спрашиваем, хочет ли пользователь продолжить диалог
+                    console.print("\n[bold]Продолжить этот диалог?[/]")
+                    console.print("[dim]Вы сможете отправлять новые сообщения в этот диалог[/]\n")
+                    
+                    try:
+                        if confirm_with_navigation("Продолжить диалог?", default=True):
+                            # Запускаем chat_loop для продолжения
+                            result = await chat_loop()
+                            if result == "quit":
+                                state.running = False
+                                break
+                    except BackException:
+                        # Возврат к списку диалогов
+                        continue
+                        
+            except BackException:
                 continue
+            except BackToMenuException:
+                continue
+            except QuitException:
+                state.running = False
+                break
         
         # Настройки модели оркестратора
         elif choice == "5":
