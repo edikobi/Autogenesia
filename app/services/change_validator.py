@@ -129,6 +129,9 @@ class ValidationResult:
     runtime_files_skipped: int = 0
     runtime_test_summary: Optional[Dict[str, Any]] = None  # RuntimeTestSummary.to_dict()
     
+    auto_format_stats: Dict[str, Any] = field(default_factory=dict)
+
+    
     @property
     def errors(self) -> List[ValidationIssue]:
         return [i for i in self.issues if i.severity == IssueSeverity.ERROR]
@@ -184,6 +187,7 @@ class ValidationResult:
             "runtime_files_failed": self.runtime_files_failed,
             "runtime_files_skipped": self.runtime_files_skipped,  # NEW
             "runtime_test_summary": self.runtime_test_summary,     # NEW
+            "auto_format_stats": self.auto_format_stats,
         }
 
 
@@ -281,7 +285,9 @@ class ChangeValidator:
     def syntax_checker(self):
         if self._syntax_checker is None:
             from app.services.syntax_checker import SyntaxChecker
-            self._syntax_checker = SyntaxChecker()
+            # Pass project python path to ensure formatting tools are found in project's venv
+            project_python = self.vfs.get_project_python()
+            self._syntax_checker = SyntaxChecker(project_python_path=project_python)
         return self._syntax_checker
     
     # ========================================================================
@@ -408,10 +414,11 @@ class ChangeValidator:
         self,
         level: ValidationLevel,
         files: List[str],
-        result: ValidationResult,
+        result: Optional[ValidationResult] = None,
     ) -> List[ValidationIssue]:
+        """Run validation for a specific level."""
         if level == ValidationLevel.SYNTAX:
-            return await self._check_syntax(files)
+            return await self._check_syntax(files, result)
         elif level == ValidationLevel.IMPORTS:
             return await self._check_imports(files)
         elif level == ValidationLevel.TYPES:
@@ -419,10 +426,13 @@ class ChangeValidator:
         elif level == ValidationLevel.INTEGRATION:
             return await self._check_integration(files)
         elif level == ValidationLevel.RUNTIME:
-            return await self._check_runtime(files, result)  # ← Добавить result
+            return await self._check_runtime(files, result)
         elif level == ValidationLevel.TESTS:
+            if result is None:
+                return []
             return await self._check_tests(result)
-        return []    
+        else:
+            return []
     
     
     
@@ -430,13 +440,36 @@ class ChangeValidator:
     # LEVEL 1: SYNTAX
     # ========================================================================
     
-    async def _check_syntax(self, files: List[str]) -> List[ValidationIssue]:
+    async def _check_syntax(self, files: List[str], result: Optional[ValidationResult] = None) -> List[ValidationIssue]:
         """Проверяет синтаксис Python файлов."""
         issues = []
+        
+        # Initialize stats if result object is provided
+        if result is not None and "tools" not in result.auto_format_stats:
+            checker = self.syntax_checker
+            result.auto_format_stats = {
+                "tools": {
+                    "black": getattr(checker, "_black_available", False),
+                    "autopep8": getattr(checker, "_autopep8_available", False),
+                    "isort": getattr(checker, "_isort_available", False),
+                    "yapf": getattr(checker, "_yapf_available", False),
+                },
+                "stats": {
+                    "checked": 0,
+                    "with_errors": 0,
+                    "fixed": 0,
+                    "failed": 0
+                },
+                "fixed_files": [],
+                "failed_files": []  # NEW: Track failures
+            }
         
         for file_path in files:
             if not file_path.endswith('.py'):
                 continue
+            
+            if result:
+                result.auto_format_stats["stats"]["checked"] += 1
             
             content = self.vfs.read_file(file_path)
             if content is None:
@@ -444,6 +477,30 @@ class ChangeValidator:
             
             check_result = self.syntax_checker.check_python(content, auto_fix=True)
             
+            # === LOGIC FOR STATS ===
+            if check_result.was_auto_fixed:
+                # Success
+                logger.info(f"[VALIDATION] Auto-formatted {file_path}: {check_result.applied_fixes}")
+                if result:
+                    result.auto_format_stats["stats"]["fixed"] += 1
+                    result.auto_format_stats["stats"]["with_errors"] += 1
+                    result.auto_format_stats["fixed_files"].append({
+                        "file": file_path,
+                        "fixes": check_result.applied_fixes
+                    })
+            elif not check_result.is_valid:
+                # Failure
+                logger.warning(f"[VALIDATION] Syntax errors in {file_path} could not be auto-fixed.")
+                if result:
+                    result.auto_format_stats["stats"]["failed"] += 1
+                    result.auto_format_stats["stats"]["with_errors"] += 1
+                    result.auto_format_stats["failed_files"].append({
+                        "file": file_path,
+                        "attempts": getattr(check_result, "attempted_fixes", []),
+                        "errors": [i.message for i in check_result.issues[:2]]
+                    })
+            
+            # === COLLECT ISSUES ===
             if not check_result.is_valid:
                 for issue in check_result.issues:
                     issues.append(ValidationIssue(
@@ -456,8 +513,9 @@ class ChangeValidator:
                         suggestion=issue.suggestion,
                     ))
             
-            if check_result.was_auto_fixed and check_result.fixed_content:
-                logger.info(f"Auto-fixed syntax in {file_path}")
+            # === STAGE VALID CHANGES ===
+            if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
+                logger.info(f"[VALIDATION] Staging auto-fixed content for {file_path}")
                 self.vfs.stage_change(file_path, check_result.fixed_content)
         
         return issues

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
+import ast
 import textwrap
   
 
@@ -334,12 +335,15 @@ class FileModifier:
     
 
 
-    def __init__(self, default_indent: int = 4):
+    def __init__(self, default_indent: int = 4, project_python_path: Optional[str] = None):
         """
         Args:
             default_indent: Размер отступа по умолчанию (пробелы)
+            project_python_path: Путь к Python интерпретатору проекта (для SyntaxChecker)
         """
         self.default_indent = default_indent
+        self.project_python_path = project_python_path
+    
     
     def apply(
         self,
@@ -449,10 +453,12 @@ class FileModifier:
     ) -> Optional[ModifyResult]:
         """
         Attempts to auto-correct common staging errors (e.g. Function vs Method confusion).
-        Only triggers if the original modification failed with a 'not found' error.
+        Only triggers if the original modification failed with a 'not found' or 'required' error.
         """
-        # 1. Basic checks (unchanged)
-        if "not found" not in failed_result.message.lower():
+        msg = failed_result.message.lower()
+        
+        # 1. Allow "not found" (obj missing) AND "required" (field missing) errors
+        if "not found" not in msg and "required" not in msg:
             return None
 
         # Get parser
@@ -466,54 +472,62 @@ class FileModifier:
             logger.warning(f"Auto-correct parse failed: {e}")
             return None
 
-        # === EXISTING HANDLERS (Preserve SCENARIO 1, 2, 3, 4) ===
-        
-        # SCENARIO 1: REPLACE_METHOD -> REPLACE_FUNCTION
+        # 2. CRITICAL FIX: Prepare code for mode switching
+        # Fixes "first line stripped" issue and normalizes to zero-based indent
+        cleaned_code = self._prepare_code_for_mode_switch(instruction.code)
+
+        # Helper to simplify instruction creation
+        def create_correction(new_mode: ModifyMode, **kwargs) -> ModifyInstruction:
+            return ModifyInstruction(
+                mode=new_mode,
+                code=cleaned_code,  # Use repaired code
+                target_class=kwargs.get('target_class', instruction.target_class),
+                target_method=kwargs.get('target_method', instruction.target_method),
+                target_function=kwargs.get('target_function', instruction.target_function),
+                target_attribute=kwargs.get('target_attribute', instruction.target_attribute),
+                insert_after=kwargs.get('insert_after', instruction.insert_after),
+                insert_before=kwargs.get('insert_before', instruction.insert_before),
+                replace_pattern=kwargs.get('replace_pattern', instruction.replace_pattern),
+                preserve_imports=instruction.preserve_imports,
+                auto_format=instruction.auto_format
+            )
+
+        # === SCENARIO 1: REPLACE_METHOD -> REPLACE_FUNCTION ===
         if instruction.mode == ModifyMode.REPLACE_METHOD:
-            target_method = instruction.target_method
-            if target_method and parse_result.get_function(target_method):
-                logger.info(f"Auto-correction: '{target_method}' is a function. Switching to REPLACE_FUNCTION.")
-                new_instruction = ModifyInstruction(
-                    mode=ModifyMode.REPLACE_FUNCTION,
-                    code=instruction.code,
-                    target_function=target_method,
-                    # Copy fields
-                    insert_after=instruction.insert_after,
-                    insert_before=instruction.insert_before,
-                    replace_pattern=instruction.replace_pattern,
-                    preserve_imports=instruction.preserve_imports,
-                    auto_format=instruction.auto_format
+            target_name = instruction.target_method
+            if target_name and parse_result.get_function(target_name):
+                logger.info(f"Auto-correction: '{target_name}' is a function. Switching to REPLACE_FUNCTION.")
+                new_instruction = create_correction(
+                    ModifyMode.REPLACE_FUNCTION,
+                    target_function=target_name,
+                    target_method=None,
+                    target_class=None
                 )
                 return self._replace_function(existing_content, new_instruction)
 
-        # SCENARIO 2: REPLACE_FUNCTION -> REPLACE_METHOD
+        # === SCENARIO 2: REPLACE_FUNCTION -> REPLACE_METHOD ===
         elif instruction.mode == ModifyMode.REPLACE_FUNCTION:
-            target_function = instruction.target_function
-            if target_function:
+            # Try both fields
+            target_name = instruction.target_function or instruction.target_method
+            if target_name:
+                # Find which class has this method
                 candidates = []
                 for cls in parse_result.classes:
                     for method in cls.methods:
-                        if method.name == target_function:
+                        if method.name == target_name:
                             candidates.append(cls.name)
                 
                 if len(candidates) == 1:
                     class_name = candidates[0]
-                    logger.info(f"Auto-correction: '{target_function}' is a method in '{class_name}'. Switching to REPLACE_METHOD.")
-                    new_instruction = ModifyInstruction(
-                        mode=ModifyMode.REPLACE_METHOD,
-                        code=instruction.code,
+                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Switching to REPLACE_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_METHOD,
                         target_class=class_name,
-                        target_method=target_function,
-                        # Copy fields
-                        insert_after=instruction.insert_after,
-                        insert_before=instruction.insert_before,
-                        replace_pattern=instruction.replace_pattern,
-                        preserve_imports=instruction.preserve_imports,
-                        auto_format=instruction.auto_format
+                        target_method=target_name
                     )
                     return self._replace_method(existing_content, new_instruction)
 
-        # SCENARIO 3: REPLACE_IN_CLASS -> REPLACE_METHOD
+        # === SCENARIO 3: REPLACE_IN_CLASS -> REPLACE_METHOD ===
         elif instruction.mode == ModifyMode.REPLACE_IN_CLASS:
             target_class = instruction.target_class
             target_attribute = instruction.target_attribute
@@ -521,105 +535,109 @@ class FileModifier:
                 method_info = parse_result.get_method(target_class, target_attribute)
                 if method_info:
                     logger.info(f"Auto-correction: '{target_attribute}' is a method. Switching to REPLACE_METHOD.")
-                    new_instruction = ModifyInstruction(
-                        mode=ModifyMode.REPLACE_METHOD,
-                        code=instruction.code,
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_METHOD,
                         target_class=target_class,
-                        target_method=target_attribute,
-                        # Copy fields
-                        insert_after=instruction.insert_after,
-                        insert_before=instruction.insert_before,
-                        replace_pattern=instruction.replace_pattern,
-                        preserve_imports=instruction.preserve_imports,
-                        auto_format=instruction.auto_format
+                        target_method=target_attribute
                     )
                     return self._replace_method(existing_content, new_instruction)
 
-        # SCENARIO 4: REPLACE_IN_FUNCTION -> REPLACE_IN_METHOD
+        # === SCENARIO 4: REPLACE_IN_FUNCTION (Fix fields OR Switch to Method) ===
         elif instruction.mode == ModifyMode.REPLACE_IN_FUNCTION:
-            target_function = instruction.target_function
-            if not target_function:
-                return None
+            target_name = instruction.target_function or instruction.target_method
+            if target_name:
+                # A) Is it a global function? (Fix missing field)
+                if parse_result.get_function(target_name):
+                    logger.info(f"Auto-correction: '{target_name}' is a global function. Retrying REPLACE_IN_FUNCTION with correct fields.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_IN_FUNCTION,
+                        target_function=target_name
+                    )
+                    return self._replace_in_function(existing_content, new_instruction)
                 
-            # Search for this function as a method in any class
-            candidates = []
-            for cls in parse_result.classes:
-                for method in cls.methods:
-                    if method.name == target_function:
-                        candidates.append(cls.name)
-            
-            if len(candidates) == 1:
-                class_name = candidates[0]
-                logger.info(f"Auto-correction: '{target_function}' is a method in '{class_name}'. Switching to REPLACE_IN_METHOD.")
-                
-                new_instruction = ModifyInstruction(
-                    mode=ModifyMode.REPLACE_IN_METHOD,
-                    code=instruction.code,
-                    target_class=class_name,
-                    target_method=target_function,
-                    replace_pattern=instruction.replace_pattern,
-                    # Copy other fields
-                    insert_after=instruction.insert_after,
-                    insert_before=instruction.insert_before,
-                    preserve_imports=instruction.preserve_imports,
-                    auto_format=instruction.auto_format
-                )
-                return self._replace_in_method(existing_content, new_instruction)
-            
-            elif len(candidates) > 1:
-                logger.warning(f"Auto-correction ambiguous: '{target_function}' found in multiple classes: {candidates}")
-
-        # === NEW HANDLERS ===
-
-        # SCENARIO 5: PATCH_METHOD (Function -> Method)
-        # User tried PATCH_METHOD without target_class (implying function), but it's a method
-        elif instruction.mode == ModifyMode.PATCH_METHOD and not instruction.target_class:
-            target_method = instruction.target_method
-            if target_method:
+                # B) Is it a method? (Switch mode)
                 candidates = []
                 for cls in parse_result.classes:
                     for method in cls.methods:
-                        if method.name == target_method:
+                        if method.name == target_name:
                             candidates.append(cls.name)
                 
                 if len(candidates) == 1:
                     class_name = candidates[0]
-                    logger.info(f"Auto-correction: '{target_method}' is a method in '{class_name}'. Updating PATCH_METHOD target_class.")
-                    
-                    new_instruction = ModifyInstruction(
-                        mode=ModifyMode.PATCH_METHOD,
-                        code=instruction.code,
+                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Switching to REPLACE_IN_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_IN_METHOD,
                         target_class=class_name,
-                        target_method=target_method,
-                        insert_after=instruction.insert_after,
-                        insert_before=instruction.insert_before,
-                        replace_pattern=instruction.replace_pattern,
-                        preserve_imports=instruction.preserve_imports,
-                        auto_format=instruction.auto_format
+                        target_method=target_name
+                    )
+                    return self._replace_in_method(existing_content, new_instruction)
+
+        # === SCENARIO 5: REPLACE_IN_METHOD (Fix fields OR Switch to Function) ===
+        elif instruction.mode == ModifyMode.REPLACE_IN_METHOD:
+            target_name = instruction.target_method or instruction.target_function
+            if target_name:
+                # A) Is it a global function? (Switch mode)
+                if parse_result.get_function(target_name):
+                    logger.info(f"Auto-correction: '{target_name}' is a global function. Switching to REPLACE_IN_FUNCTION.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_IN_FUNCTION,
+                        target_function=target_name,
+                        target_method=None,
+                        target_class=None
+                    )
+                    return self._replace_in_function(existing_content, new_instruction)
+
+                # B) Is it a method? (Fix missing class/fields)
+                candidates = []
+                for cls in parse_result.classes:
+                    for method in cls.methods:
+                        if method.name == target_name:
+                            candidates.append(cls.name)
+                
+                if len(candidates) == 1:
+                    class_name = candidates[0]
+                    # Only correct if class was missing or wrong
+                    if instruction.target_class != class_name:
+                        logger.info(f"Auto-correction: Found '{target_name}' in '{class_name}'. Retrying REPLACE_IN_METHOD.")
+                        new_instruction = create_correction(
+                            ModifyMode.REPLACE_IN_METHOD,
+                            target_class=class_name,
+                            target_method=target_name
+                        )
+                        return self._replace_in_method(existing_content, new_instruction)
+
+        # === SCENARIO 6: PATCH_METHOD / INSERT_IN_FUNCTION (Universal Fix) ===
+        elif instruction.mode in (ModifyMode.PATCH_METHOD, ModifyMode.INSERT_IN_FUNCTION):
+            target_name = instruction.target_method or instruction.target_function
+            if target_name:
+                # A) Is it a global function?
+                if parse_result.get_function(target_name):
+                    # For INSERT_IN_FUNCTION, just ensure fields are right
+                    # For PATCH_METHOD, ensure target_class is None
+                    logger.info(f"Auto-correction: '{target_name}' is a global function. Using PATCH_METHOD(class=None).")
+                    new_instruction = create_correction(
+                        ModifyMode.PATCH_METHOD,
+                        target_method=target_name,
+                        target_class=None
                     )
                     return self._patch_method(existing_content, new_instruction)
-                elif len(candidates) > 1:
-                    logger.warning(f"Auto-correction ambiguous: '{target_method}' found in multiple classes: {candidates}")
-
-        # SCENARIO 6: PATCH_METHOD (Method -> Function)
-        # User tried PATCH_METHOD with target_class, but it's a global function
-        elif instruction.mode == ModifyMode.PATCH_METHOD and instruction.target_class:
-            target_method = instruction.target_method
-            if target_method and parse_result.get_function(target_method):
-                logger.info(f"Auto-correction: '{target_method}' is a global function. Removing target_class.")
                 
-                new_instruction = ModifyInstruction(
-                    mode=ModifyMode.PATCH_METHOD,
-                    code=instruction.code,
-                    target_class=None,
-                    target_method=target_method,
-                    insert_after=instruction.insert_after,
-                    insert_before=instruction.insert_before,
-                    replace_pattern=instruction.replace_pattern,
-                    preserve_imports=instruction.preserve_imports,
-                    auto_format=instruction.auto_format
-                )
-                return self._patch_method(existing_content, new_instruction)
+                # B) Is it a method?
+                candidates = []
+                for cls in parse_result.classes:
+                    for method in cls.methods:
+                        if method.name == target_name:
+                            candidates.append(cls.name)
+                
+                if len(candidates) == 1:
+                    class_name = candidates[0]
+                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Using PATCH_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.PATCH_METHOD,
+                        target_class=class_name,
+                        target_method=target_name
+                    )
+                    return self._patch_method(existing_content, new_instruction)
 
         return None
     
@@ -2034,6 +2052,50 @@ class FileModifier:
             lines_removed=1,
         )
     
+    def _find_multiline_match(self, source_lines: List[str], pattern: str, start_idx: int, end_idx: int) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Finds a multi-line pattern within a range of source lines. 
+        Robust to whitespace and quote differences.
+        """
+        def normalize(s: str) -> str:
+            # Replace non-breaking spaces and unify quotes
+            s = s.replace('\xa0', ' ').replace('"', "'")
+            # Collapse whitespace
+            return ' '.join(s.split())
+
+        # 1. Prepare pattern
+        pattern_lines = [normalize(line) for line in pattern.splitlines() if line.strip()]
+        
+        if not pattern_lines:
+            return (None, None)
+        
+        # 2. Case 1: Single-line pattern
+        if len(pattern_lines) == 1:
+            target = pattern_lines[0]
+            for i in range(start_idx, end_idx):
+                if i < len(source_lines):
+                    # Check if normalized pattern is in normalized source line
+                    if target in normalize(source_lines[i]):
+                        return (i, i + 1)
+            return (None, None)
+        
+        # 3. Case 2: Multi-line pattern
+        for i in range(start_idx, end_idx - len(pattern_lines) + 1):
+            # Check if slice matches
+            match = True
+            for j, p_line in enumerate(pattern_lines):
+                if i + j >= len(source_lines):
+                    match = False
+                    break
+                s_line = normalize(source_lines[i + j])
+                if s_line != p_line:  # Exact match required for multi-line blocks structure
+                    match = False
+                    break
+            
+            if match:
+                return (i, i + len(pattern_lines))
+        
+        return (None, None)
     
     def _replace_in_method(
         self,
@@ -2063,8 +2125,6 @@ class FileModifier:
                 message="target_method and replace_pattern required for REPLACE_IN_METHOD",
             )
         
-        # DELEGATION REMOVED: Allow this method to handle global functions directly
-        
         lines = existing_content.splitlines(keepends=True)
         
         ts_parser = _get_tree_sitter_parser()
@@ -2093,17 +2153,15 @@ class FileModifier:
                 message=f"Method/function '{target_name}' not found",
             )
         
-        # Находим строку для замены внутри метода
+        # Находим диапазон метода
         method_start = method_info.span.start_line - 1
         method_end = method_info.span.end_line
         
-        target_line_idx = -1
-        for i in range(method_start, method_end):
-            if replace_pattern in lines[i]:
-                target_line_idx = i
-                break
+        # Используем _find_multiline_match для поиска паттерна
+        match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
         
-        if target_line_idx == -1:
+        # Check if match_start is None
+        if match_start is None:
             target_name = f"{target_class}.{target_method}" if target_class else target_method
             return ModifyResult(
                 success=False,
@@ -2111,35 +2169,34 @@ class FileModifier:
                 message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
             )
         
-        # Определяем отступ строки
-        old_line = lines[target_line_idx]
+        # Determine indent from lines[match_start]
+        old_line = lines[match_start]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # FIX: Use _normalize_code_for_insertion instead of _normalize_and_indent_code
+        # Normalize new code
         formatted_code = self._normalize_code_for_insertion(code, line_indent)
         
+        # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
         
-        # Улучшаем проверку на многострочность
+        # Replace lines: handle splitting formatted_code if it has newlines
         if '\n' in formatted_code.rstrip('\n'):
-            # Замена блока - удаляем старую строку, вставляем новые
-            lines.pop(target_line_idx)
-            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
-                lines.insert(target_line_idx + i, line)
+            # Multi-line replacement
+            new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         else:
-            # Замена одной строки
-            lines[target_line_idx] = formatted_code
+            # Single-line replacement
+            new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         
-        new_content = ''.join(lines)
+        new_content = ''.join(new_lines)
         
         return ModifyResult(
             success=True,
             new_content=new_content,
             message=f"Replaced code in {target_method}",
-            changes_made=[f"Replaced line in {target_method}"],
+            changes_made=[f"Replaced lines {match_start + 1}-{match_end} in {target_method}"],
             lines_added=len(formatted_code.splitlines()),
-            lines_removed=1,
+            lines_removed=match_end - match_start,
         )
     
             
@@ -2560,81 +2617,213 @@ class FileModifier:
             # Trim surrounding newlines
             return indented_code.strip('\n')
 
-    def _normalize_code_for_insertion(self, code: str, target_indent: int) -> str:
+    def _repair_first_line_indent(self, code: str) -> str:
+        """Heuristically fixes code where the first line is stripped (indent 0) but subsequent lines are indented, using AST analysis."""
+        lines = code.splitlines()
+        
+        # 1. Return original if < 2 lines
+        if len(lines) < 2:
+            return code
+        
+        # 2. Find indices of first two non-empty, non-comment lines
+        idx0 = None
+        idx1 = None
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                if idx0 is None:
+                    idx0 = i
+                elif idx1 is None:
+                    idx1 = i
+                    break
+        
+        # If not found, return code
+        if idx0 is None or idx1 is None:
+            return code
+        
+        # 3. Check indentation
+        i0 = len(lines[idx0]) - len(lines[idx0].lstrip())
+        i1 = len(lines[idx1]) - len(lines[idx1].lstrip())
+        
+        # 4. Condition: If i0 == 0 AND i1 > 0
+        if i0 == 0 and i1 > 0:
+            # Try to parse the first line
+            try:
+                first_line_stripped = lines[idx0].strip()
+                ast.parse(first_line_stripped)
+                # If AST parse succeeds: The line is a complete statement
+                # It should NOT have indented children. The indentation of the next line
+                # implies the first line was stripped.
+                # Action: Pad the first line with spaces equal to i1
+                lines[idx0] = ' ' * i1 + lines[idx0]
+                return '\n'.join(lines)
+            except (SyntaxError, ValueError):
+                # If AST parse fails: The line is likely a block opener or incomplete
+                # It expects indentation. Return code as is (valid structure).
+                return code
+        
+        # 5. Return original code if no condition met
+        return code
+
+
+    def _prepare_code_for_mode_switch(self, code: str) -> str:
         """
-        Нормализует код для вставки внутрь метода/функции.
+        Подготавливает код для переключения режима вставки в _try_auto_correct.
 
-        Использует Tree-sitter для определения структуры кода и вычисления
-        правильных отступов для каждой строки. Решает проблему "лишних пробелов"
-        при вставке кода с комментариями и пустыми строками.
+        Решает проблему "unindent does not match any outer indentation level",
+        которая возникает когда LLM генерирует код с "оторванной" первой строкой
+        (например, `if salary:` с отступом 0, а тело с отступом 8).
 
-        Args:
-            code: Исходный код для вставки
-            target_indent: Целевой отступ первой значимой строки кода
+        Алгоритм:
+        1. Выравнивает первую строку с остальными (если она "оторвана")
+        2. Применяет textwrap.dedent для снятия общего отступа до нуля
+        3. Результат: код с нулевым базовым отступом и консистентными внутренними отступами
+
+        После этого режимы вставки (_replace_function, _replace_method и т.д.)
+        применят правильный целевой отступ, а SyntaxChecker исправит мелкие проблемы.
 
         Returns:
-            Код с нормализованными отступами
+            Код с нулевым базовым отступом и консистентными внутренними отступами.
         """
         # 1. Если код пустой или содержит только пробелы, вернуть его как есть
         if not code or not code.strip():
             return code
         
-        # 2. Расширить табы на пробелы
+        # 2. Расширить табы до 4 пробелов
         code = code.expandtabs(4)
         
-        # 3. Удалить ведущие и завершающие пустые строки
-        code = code.strip('\n')
-        
-        # 4. Разбить код на строки
+        # 3. Разбить код на строки
         lines = code.splitlines()
         
-        # 5. Получить Tree-sitter парсер
+        # 4. Найти первую непустую строку и её отступ
+        first_idx = None
+        first_indent = 0
+        for i, line in enumerate(lines):
+            if line.strip():
+                first_idx = i
+                first_indent = len(line) - len(line.lstrip())
+                break
+        
+        # Если нет непустых строк — вернуть как есть
+        if first_idx is None:
+            return code
+        
+        # 5. Найти минимальный отступ среди непустых строк ПОСЛЕ первой,
+        #    игнорируя комментарии
+        min_rest_indent = None
+        for i in range(first_idx + 1, len(lines)):
+            line = lines[i]
+            stripped = line.strip()
+            # FIX: Ignore comments when calculating minimum indent
+            if stripped and not stripped.startswith('#'):
+                indent = len(line) - len(line.lstrip())
+                if min_rest_indent is None or indent < min_rest_indent:
+                    min_rest_indent = indent
+        
+        # 6. Если первая строка "оторвана" (имеет меньший отступ) — выровнять её
+        if min_rest_indent is not None and first_indent < min_rest_indent:
+            # FIX: Use AST to verify if the first line is a complete statement.
+            # If it raises SyntaxError (e.g. 'if x:', 'def f():', 'x = ('), it's likely a block opener
+            # or context-dependent statement. We should NOT align these, as that flattens the structure.
+            should_align = True
+            try:
+                ast.parse(lines[first_idx].strip())
+            except (SyntaxError, ValueError):
+                should_align = False
+            
+            if should_align:
+                # Добавить пробелы к первой строке, чтобы выровнять с остальными
+                padding = min_rest_indent - first_indent
+                lines[first_idx] = ' ' * padding + lines[first_idx]
+        
+        # 7. Собрать строки и применить dedent для снятия общего отступа
+        aligned_code = '\n'.join(lines)
+        dedented_code = textwrap.dedent(aligned_code)
+        
+        # 8. Вернуть результат без лишних переводов строк
+        return dedented_code.strip('\n')
+
+    def _normalize_code_for_insertion(self, code: str, target_indent: int) -> str:
+        """
+        Нормализует код для вставки внутрь метода/функции.
+        
+        Автоматически исправляет проблему "First Line Stripped", когда первая строка
+        потеряла отступ, а последующие сохранили его.
+        """
+        if not code or not code.strip():
+            return code
+        
+        # 1. Basic check: if code empty, return
+        # 2. Preprocessing: expand tabs
+        code = code.expandtabs(4)
+        
+        # 3. Repair: repair first line indent
+        code = self._repair_first_line_indent(code)
+        
+        # 4. Split into lines
+        lines = code.splitlines()
+        
+        # 5. Anchor Detection (Tree-sitter)
+        anchor_indent = None
         parser = _get_tree_sitter_parser()
         
-        # 6. Если парсер доступен
-        anchor_indent = None
         if parser:
             try:
-                # Распарсить код
                 parse_result = parser.parse(code)
-                
-                # Если есть root_node, найти первый значимый узел
                 if parse_result.root_node:
+                    # Iterate root children
                     for child in parse_result.root_node.children:
-                        if child.type not in ('ERROR', 'comment', ''):
-                            anchor_indent = child.start_point[1]  # column = indent
-                            break
+                        # Skip ERROR, comment, empty types
+                        if child.type in ('ERROR', 'comment', ''):
+                            continue
+                        
+                        # Skip nodes with text length <= 1
+                        child_text = code.encode('utf-8')[child.start_byte:child.end_byte].decode('utf-8').strip()
+                        if len(child_text) <= 1:
+                            continue
+                        
+                        # Set anchor_indent from first valid node
+                        anchor_indent = child.start_point[1]
+                        break
             except Exception as e:
-                logger.debug(f"Tree-sitter parsing failed in _normalize_code_for_insertion: {e}")
+                logger.debug(f"Tree-sitter anchor detection failed: {e}")
         
-        # 7. Если парсер недоступен или не нашёл якорь, использовать fallback
+        # 6. Anchor Detection (Fallback)
         if anchor_indent is None:
-            # Найти минимальный отступ среди непустых строк, которые не являются комментариями
-            anchor_indent = None
+            valid_indents = []
+            
             for line in lines:
                 stripped = line.strip()
+                # Skip empty, # comments, ``` fences, single-char lines
                 if not stripped:
                     continue
                 if stripped.startswith('#'):
                     continue
                 if stripped.startswith('```'):
                     continue
+                if len(stripped) <= 1:
+                    continue
+                
                 current_indent = len(line) - len(line.lstrip())
-                if anchor_indent is None or current_indent < anchor_indent:
-                    anchor_indent = current_indent
+                valid_indents.append(current_indent)
             
-            if anchor_indent is None:
+            if valid_indents:
+                anchor_indent = min(valid_indents)
+            else:
                 anchor_indent = 0
         
-        # 8. Построить результат, применяя относительные отступы
+        # 7. Normalization Loop
         result_lines = []
         for line in lines:
             if not line.strip():
                 result_lines.append('')
                 continue
+            
             current_indent = len(line) - len(line.lstrip())
             relative_offset = current_indent - anchor_indent
             new_indent = max(0, target_indent + relative_offset)
+            
             content = line.lstrip()
             result_lines.append(' ' * new_indent + content)
         
@@ -2743,7 +2932,12 @@ class FileModifier:
         # Пробуем через SyntaxChecker (если доступен)
         try:
             from app.services.syntax_checker import SyntaxChecker
-            checker = SyntaxChecker(use_black=False, use_autopep8=True)
+            # Pass project python path to ensure formatting tools are found in project's venv
+            checker = SyntaxChecker(
+                use_black=False, 
+                use_autopep8=True,
+                project_python_path=self.project_python_path
+            )
             
             fix_result = checker.check_python(content, auto_fix=True)
             

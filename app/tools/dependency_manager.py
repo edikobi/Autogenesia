@@ -379,6 +379,65 @@ class DependencyManager:
             return False
     
     
+    def ensure_formatting_tools(self, tools: Optional[List[str]] = None) -> Dict[str, bool]:
+        """Ensures formatting tools are installed in the project's virtual environment. Installs black, autopep8, isort, yapf if not already present. Returns dict of {tool_name: success}."""
+        import subprocess
+        
+        # 1. Define default tools list if not provided
+        if tools is None:
+            tools = ["black", "autopep8", "isort", "yapf"]
+        
+        # 2. Create result dict
+        results: Dict[str, bool] = {}
+        
+        # 3. For each tool in tools list
+        for tool in tools:
+            try:
+                # Check if tool is already available
+                result = subprocess.run(
+                    [self._python_path, "-m", tool, "--version"],
+                    capture_output=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0:
+                    results[tool] = True
+                    logger.info(f"Formatting tool '{tool}' is already available")
+                    continue
+                
+                # If not available, install via pip
+                logger.info(f"Installing formatting tool '{tool}'...")
+                install_result = subprocess.run(
+                    [self._python_path, "-m", "pip", "install", tool],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=120
+                )
+                
+                results[tool] = (install_result.returncode == 0)
+                
+                if install_result.returncode == 0:
+                    logger.info(f"Successfully installed formatting tool '{tool}'")
+                else:
+                    logger.warning(f"Failed to install formatting tool '{tool}': {install_result.stderr}")
+            
+            except subprocess.TimeoutExpired:
+                results[tool] = False
+                logger.warning(f"Timeout while checking/installing formatting tool '{tool}'")
+            except FileNotFoundError:
+                results[tool] = False
+                logger.warning(f"Python executable not found at {self._python_path}")
+            except Exception as e:
+                results[tool] = False
+                logger.warning(f"Error with formatting tool '{tool}': {e}")
+        
+        # 4. Invalidate cache after installations
+        self._installed_cache = None
+        
+        # 5. Return results dict
+        return results
     
     # ========================================================================
     # PUBLIC API: LIST PACKAGES

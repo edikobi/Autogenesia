@@ -78,6 +78,14 @@ class IterationTrace:
     # Staging errors
     staging_errors: List[Dict[str, Any]] = field(default_factory=list)
     
+    # NEW: Автоформатирование
+    auto_format_ran: bool = False
+    auto_format_success: bool = False
+    auto_format_message: str = ""
+    auto_format_fixes: List[str] = field(default_factory=list)
+    auto_format_tools: Dict[str, bool] = field(default_factory=dict)
+    
+    
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
@@ -314,6 +322,36 @@ class PipelineTraceLogger:
         self._current_iteration.tech_validation_errors = errors
         self._current_iteration.tech_validation_summary = summary[:500]
         self._save()
+    
+    def set_auto_format_status(
+        self,
+        ran: bool,
+        success: bool,
+        message: str,
+        fixes: Optional[List[str]] = None,
+        tools: Optional[Dict[str, bool]] = None,
+    ) -> None:
+        """
+        Log auto-formatting status to current iteration trace.
+        
+        Args:
+            ran: Whether auto-formatting was attempted
+            success: Whether auto-formatting succeeded
+            message: Status message
+            fixes: List of fixes applied
+            tools: Dict of tool availability status
+        """
+        if not self._current_iteration:
+            return
+        
+        self._current_iteration.auto_format_ran = ran
+        self._current_iteration.auto_format_success = success
+        self._current_iteration.auto_format_message = message
+        self._current_iteration.auto_format_fixes = fixes or []
+        self._current_iteration.auto_format_tools = tools or {}
+        
+        self._save()
+    
     
     # === AI Validator (подробно) ===
     

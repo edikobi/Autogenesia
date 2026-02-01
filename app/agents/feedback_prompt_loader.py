@@ -136,8 +136,10 @@ def _build_feedback_handling_block() -> str:
     parts.append("│ Approach:                                                  │")
     parts.append("│ 1. Read the error message carefully                        │")
     parts.append("│ 2. Find the error in the GENERATED CODE shown to you       │")
-    parts.append("│ 3. Identify what in YOUR INSTRUCTION caused this           │")
-    parts.append("│ 4. Write corrected instruction                             │")
+    parts.append("│ 3. Check structural validity: does the instruction match │")
+    parts.append("│ the file's nesting level (Class vs Top-level)? │")
+    parts.append("│ 4. Identify what in YOUR INSTRUCTION caused this           │")
+    parts.append("│ 5. Write corrected instruction                             │")
     parts.append("└" + "─" * 58 + "┘")
     parts.append("")
     

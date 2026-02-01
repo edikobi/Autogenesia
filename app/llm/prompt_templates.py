@@ -3903,6 +3903,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("")
     prompt_parts.append("Your instruction will be processed by an automated pipeline.")
+    prompt_parts.append("Maintain strict structural alignment: map every code change to its exact container. Actions must reflect the target's true location in the file hierarchy, distinguishing between encapsulated members and independent logic.")
     prompt_parts.append("Follow this EXACT format for proper parsing and execution.")
     prompt_parts.append("")
     prompt_parts.append("## Instruction for Code Generator")
@@ -3936,7 +3937,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("#### ACTION: [MODIFY_METHOD | PATCH_METHOD | ADD_METHOD | ADD_FUNCTION | MODIFY_FUNCTION | MODIFY_ATTRIBUTE | MODIFY_GLOBAL | UPDATE_IMPORTS | REPLACE_FILE]")
     prompt_parts.append("**Target:** `ClassName.method_name` or `function_name` or `ClassName`")
-    prompt_parts.append("**Structural Scope:** [Class Body | Method Body | Module Level]") 
+    prompt_parts.append("**Structural Scope:** [Class Body | Method Body | Module Level (No Class)]")
     prompt_parts.append("**Location:**")
     prompt_parts.append("• Lines: X-Y (for MODIFY)")
     prompt_parts.append("• Insert after: `method_name` line Z (for ADD)")
@@ -3950,6 +3951,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("`def method_name(self, param: str, new_param: int = 0) -> bool`")
     prompt_parts.append("")
     prompt_parts.append("**Implementation Strategy:**")
+    prompt_parts.append("0. [Confirm target location: inside `Class` or at `Module Level`]") # добавил, так как ИИ заебал путать методы и функции
     prompt_parts.append("1. [Step-by-step logic description]")
     prompt_parts.append("2. [Mention specific variable names/types to use]")
     prompt_parts.append("3. [Describe external function calls with signatures]")
@@ -3971,7 +3973,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("These are the only operation keywords supported by the execution pipeline.")
     prompt_parts.append("The pipeline relies on exact string matching with this specific list to function.")
     prompt_parts.append("")
-    prompt_parts.append("• **MODIFY_METHOD** — Redesign method logic completely. (Scope: Method Body)")
+    prompt_parts.append("• **MODIFY_METHOD** — Operations on logic nested within a defined Structure or Class.")
     prompt_parts.append(" Code Generator: writes new implementation based on your strategy")
     prompt_parts.append("  Use when: changing logic significantly, refactoring method")
     prompt_parts.append("")
@@ -3983,7 +3985,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("• **ADD_METHOD** — Add NEW method to class (method doesn't exist yet)")
     prompt_parts.append(" Code Generator: implements body from your defined signature and strategy")
     prompt_parts.append("  Use when: creating new functionality")
-    prompt_parts.append("• **MODIFY_FUNCTION** — Request changes to a global function")
+    prompt_parts.append("• **MODIFY_FUNCTION** — Operations on standalone, top-level logic independent of any Class.")
     prompt_parts.append(" Task: Describe logic changes or new behavior")
     prompt_parts.append(" Use when: changing logic of module-level function (outside any class)")
     prompt_parts.append("")
@@ -4856,7 +4858,9 @@ def _build_code_generator_system_prompt_agent() -> str:
     # Про адптацию инструкции в части вставки кода
     prompt_parts.append("")
     prompt_parts.append("🛠️ INSTRUCTION ADAPTATION PROTOCOL:")
+    prompt_parts.append("Precision in selecting targets and their descriptors ensures successful code integration. Review each parameter's definition to match the task requirements accurately.")
     prompt_parts.append("You are authorized to interpret and normalize the Orchestrator's technical commands.")
+    prompt_parts.append("Prioritize structural location over terminology: map nested targets to container-specific Modes and root targets to global Modes.")
     prompt_parts.append("If an Action Type or parameter appears non-standard, automatically map it to the correct valid system operation.")
     prompt_parts.append("Extract any missing technical targets (like class or method names) directly from the provided context.")
     prompt_parts.append("Focus on executing the intended logic by ensuring the output format matches system requirements, while strictly preserving the requested code logic.")
@@ -4901,7 +4905,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("| REPLACE_IMPORT | Replace existing import statement | REPLACE_PATTERN |")
     prompt_parts.append("| PATCH_METHOD | Insert lines INSIDE existing method | TARGET_CLASS (if in class), TARGET_METHOD, INSERT_AFTER or INSERT_BEFORE |")
     prompt_parts.append("| INSERT_IN_CLASS | Add a NEW ATTRIBUTE/FIELD to class body  | TARGET_CLASS, INSERT_AFTER |")
-    prompt_parts.append("| REPLACE_IN_CLASS | Replace a class ATTRIBUTE/FIELD in class body | TARGET_CLASS, TARGET_ATTRIBUTE |")
+    prompt_parts.append("| REPLACE_IN_CLASS | Replace a class ATTRIBUTE/FIELD in class body | TARGET_CLASS, TARGET_ATTRIBUTE, REPLACE_PATTERN |")
     prompt_parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional) |")
     prompt_parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN |")
     prompt_parts.append("| INSERT_IN_FUNCTION | Insert lines INSIDE existing function | TARGET_FUNCTION, INSERT_AFTER or INSERT_BEFORE |")
@@ -4971,6 +4975,27 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")
     
+    # Замена функции
+
+    prompt_parts.append("**Example 1b: Replace global function (Module Level)**")
+    prompt_parts.append("```")
+    prompt_parts.append("### CODE_BLOCK")
+    prompt_parts.append("FILE: app/utils/strings.py")
+    prompt_parts.append("MODE: REPLACE_FUNCTION")
+    prompt_parts.append("TARGET_FUNCTION: normalize_slug")
+    prompt_parts.append("# Note: No TARGET_CLASS provided for global scope")
+    prompt_parts.append("")
+    prompt_parts.append("```python")
+    prompt_parts.append("def normalize_slug(text: str) -> str:")
+    prompt_parts.append('    """Convert text to url-friendly slug."""')
+    prompt_parts.append("    import re")
+    prompt_parts.append("    text = text.lower().strip()")
+    prompt_parts.append("    return re.sub(r'[^a-z0-9]+', '-', text)")
+    prompt_parts.append("```")
+    prompt_parts.append("### END_CODE_BLOCK")
+    prompt_parts.append("```")
+    prompt_parts.append("")
+    
     # Example 2: Add new method
     prompt_parts.append("**Example 2: Add new method to class**")
     prompt_parts.append("```")
@@ -4993,8 +5018,29 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")
     
-    # Example 3: Create new file
-    prompt_parts.append("**Example 3: Create new file**")
+    # Example 3: Add new method
+    prompt_parts.append("**Example 3: Add New Function (Module Scope)**")
+    prompt_parts.append("```")
+    prompt_parts.append("### CODE_BLOCK")
+    prompt_parts.append("FILE: app/services/calculations.py")
+    prompt_parts.append("MODE: ADD_NEW_FUNCTION")
+    prompt_parts.append("# Adds a new standalone function to the end of the file or module")
+    prompt_parts.append("")
+    prompt_parts.append("```python")
+    prompt_parts.append("def calculate_tax(amount: float, rate: float) -> float:")
+    prompt_parts.append('    """Calculate tax amount based on rate."""')
+    prompt_parts.append("    if amount < 0:")
+    prompt_parts.append("        raise ValueError('Amount cannot be negative')")
+    prompt_parts.append("    return round(amount * rate, 2)")
+    prompt_parts.append("```")
+    prompt_parts.append("### END_CODE_BLOCK")
+    prompt_parts.append("```")
+    prompt_parts.append("")
+    
+    
+    
+    # Example 4: Create new file
+    prompt_parts.append("**Example 4: Create new file**")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("FILE: app/utils/validators.py")
@@ -5015,8 +5061,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")
     
-    # Example 4: Add imports
-    prompt_parts.append("**Example 4: Add imports**")
+    # Example 5: Add imports
+    prompt_parts.append("**Example 5: Add imports**")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("FILE: app/services/auth.py")
@@ -5031,8 +5077,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     
     
-# Example 5: Replace Import
-    prompt_parts.append("**Example 5: Replace import statement**")
+# Example 6: Replace Import
+    prompt_parts.append("**Example 6: Replace import statement**")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("FILE: app/main.py")
@@ -5095,8 +5141,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("Remember: Your output is parsed automatically. Any text outside CODE_BLOCK is ignored.")
     prompt_parts.append("")    
     
-# Example 6: Multiple files (NEW)
-    prompt_parts.append("**Example 6: Changes to multiple files**")
+# Example 7: Multiple files (NEW)
+    prompt_parts.append("**Example 7: Changes to multiple files**")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("FILE: app/services/api_client.py")
@@ -5126,8 +5172,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")    
     
-    # Example 7: Insert lines inside existing method (PATCH_METHOD)
-    prompt_parts.append("**Example 7: Insert lines inside existing method (PATCH_METHOD)**")
+    # Example 8: Insert lines inside existing method (PATCH_METHOD)
+    prompt_parts.append("**Example 8: Insert lines inside existing method (PATCH_METHOD)**")
     prompt_parts.append("")
     prompt_parts.append("Use PATCH_METHOD when you need to ADD lines inside an existing method")
     prompt_parts.append("WITHOUT replacing the entire method.")
@@ -5150,13 +5196,14 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")    
     
     
-    prompt_parts.append("**Example 8: Replacing a class attribute or field (REPLACE_IN_CLASS)")
+    prompt_parts.append("**Example 9: Replacing a class attribute or field (REPLACE_IN_CLASS)")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("```python")
     prompt_parts.append("FILE: app/models.py")
     prompt_parts.append("MODE: REPLACE_IN_CLASS")
     prompt_parts.append("TARGET_CLASS: User")
     prompt_parts.append("TARGET_ATTRIBUTE: email")
+    prompt_parts.append("REPLACE_PATTERN: email")
     prompt_parts.append("")
     prompt_parts.append("```python")
     prompt_parts.append("    email = Column(String(255), unique=True, nullable=False)")
@@ -5165,8 +5212,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     
         
-    # Example 9: Class Attributes (NEW)
-    prompt_parts.append("**Example 9: Working with Class Attributes (Models/Schemas)**")
+    # Example 10: Class Attributes (NEW)
+    prompt_parts.append("**Example 10: Working with Class Attributes (Models/Schemas)**")
     prompt_parts.append("Adds new definitions to the Class Body. Matches Orchestrator's 'Class Body' scope.")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
@@ -5183,8 +5230,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")
 
-    # Example 10: Surgical Replacement (NEW)
-    prompt_parts.append("**Example 10: Surgical Replacement inside Method**")
+    # Example 11: Surgical Replacement (NEW)
+    prompt_parts.append("**Example 11: Surgical Replacement inside Method**")
     prompt_parts.append("Performs surgical changes within the Method Body (indented logic). Matches Orchestrator's 'Method Body' scope.")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
@@ -5206,8 +5253,26 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("```")
     prompt_parts.append("")
 
-    # Example 11: Insert inside Function (NEW)
-    prompt_parts.append("**Example 11: Insert inside Global Function**")
+
+    prompt_parts.append("**Example 12: Surgical Replace inside Function (Module Scope)**")
+    prompt_parts.append("```")
+    prompt_parts.append("### CODE_BLOCK")
+    prompt_parts.append("FILE: app/tui.py")
+    prompt_parts.append("MODE: REPLACE_IN_FUNCTION")
+    prompt_parts.append("TARGET_FUNCTION: process_data")
+    prompt_parts.append("REPLACE_PATTERN: data = json.load(f)")
+    prompt_parts.append("")
+    prompt_parts.append("```python")
+    prompt_parts.append("# Replaces only the matching pattern line within the function body")
+    prompt_parts.append("data = json.loads(f.read())")
+    prompt_parts.append("```")
+    prompt_parts.append("### END_CODE_BLOCK")
+    prompt_parts.append("```")
+    prompt_parts.append("")
+
+
+    # Example 13: Insert inside Function (NEW)
+    prompt_parts.append("**Example 13: Insert inside Global Function**")
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
     prompt_parts.append("FILE: app/main.py")

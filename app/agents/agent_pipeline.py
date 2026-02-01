@@ -581,8 +581,8 @@ class AgentPipeline:
     """
     
     # Configuration
-    MAX_FEEDBACK_ITERATIONS = 25
-    MAX_VALIDATION_RETRIES = 25
+    MAX_FEEDBACK_ITERATIONS = 35
+    MAX_VALIDATION_RETRIES = 35
     
     def __init__(
         self,
@@ -620,10 +620,24 @@ class AgentPipeline:
         # Initialize services
         self.vfs = VirtualFileSystem(self.project_dir)
         self.backup_manager = BackupManager(self.project_dir)
-        self.file_modifier = FileModifier()
         self.ai_validator = AIValidator()
         self.token_counter = TokenCounter()
         self.dependency_manager = DependencyManager(Path(self.project_dir))
+        
+        # Ensure formatting tools are available in project venv
+        try:
+            formatting_result = self.dependency_manager.ensure_formatting_tools()
+            installed_tools = [t for t, success in formatting_result.items() if success]
+            if installed_tools:
+                logger.info(f"Formatting tools available in project venv: {installed_tools}")
+        except Exception as e:
+            logger.warning(f"Could not ensure formatting tools: {e}")
+        
+        # Store the project python path for later use
+        self._project_python_path = self.dependency_manager._python_path
+        
+        # Initialize FileModifier with project python path for auto-formatting
+        self.file_modifier = FileModifier(project_python_path=self._project_python_path)
         
         # State
         self.status = PipelineStatus.IDLE
@@ -646,7 +660,7 @@ class AgentPipeline:
         self._on_stage: Optional[Callable] = None
         self._on_user_decision: Optional[Callable] = None
         
-        logger.info(f"AgentPipeline initialized: project_dir={self.project_dir}, generator_model={generator_model}")    
+        logger.info(f"AgentPipeline initialized: project_dir={self.project_dir}, generator_model={generator_model}")
     # ========================================================================
     # MAIN ENTRY POINT
     # ========================================================================
@@ -1175,6 +1189,41 @@ class AgentPipeline:
                         errors=validation_result.error_count,
                         summary="; ".join(str(i) for i in validation_result.issues[:3]),
                     )
+                    
+                    if validation_result.auto_format_stats:
+                        stats_data = validation_result.auto_format_stats
+                        counts = stats_data.get("stats", {})
+                        tools = stats_data.get("tools", {})
+                        fixed_list = stats_data.get("fixed_files", [])
+                        failed_list = stats_data.get("failed_files", [])
+                        
+                        # Determine message
+                        missing_tools = [t for t, avail in tools.items() if not avail]
+                        
+                        if counts.get("fixed", 0) > 0:
+                            msg = f"Auto-formatted {counts['fixed']} file(s)"
+                            success_flag = True
+                        elif counts.get("failed", 0) > 0:
+                            msg = f"Failed to fix {counts['failed']} file(s)"
+                            if missing_tools:
+                                msg += f" (Missing tools: {', '.join(missing_tools)})"
+                            else:
+                                msg += " (Tools ran but failed)"
+                            success_flag = False
+                        elif counts.get("with_errors", 0) == 0:
+                            msg = "No syntax errors found (Validation OK)"
+                            success_flag = True
+                        else:
+                            msg = "Auto-formatting skipped"
+                            success_flag = False
+                            
+                        trace.set_auto_format_status(
+                            ran=True,
+                            success=success_flag,
+                            message=msg,
+                            fixes=[f"{f['file']}: {f['fixes']}" for f in fixed_list],
+                            tools=tools
+                        )
                     
                 except Exception as e:
                     vlog.log_error("VALIDATION", e)
@@ -3352,6 +3401,10 @@ Remember: You can override the validator if you believe the critique is incorrec
         
         validator = ChangeValidator(vfs=self.vfs, config=config)
         
+        # Pass project python path to syntax checker for proper tool resolution
+        if hasattr(self, '_project_python_path') and self._project_python_path:
+            validator.syntax_checker.set_project_python_path(self._project_python_path)
+        
         # Run validation
         if include_tests:
             result = await validator.validate_full()
@@ -3359,7 +3412,6 @@ Remember: You can override the validator if you believe the critique is incorrec
             result = await validator.validate_before_commit()
         
         return result
-    
     
     
     async def _run_ai_validation(
