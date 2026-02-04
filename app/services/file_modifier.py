@@ -1597,6 +1597,82 @@ class FileModifier:
         # If indentation > 0, return code exactly as is
         return code
     
+    def _normalize_block_indentation(self, code: str, target_indent: int) -> str:
+        """
+        Normalizes code block indentation for insertion inside methods/functions.
+        
+        This method solves the "wrong indentation from LLM" problem by:
+        1. Removing ALL existing indentation (tabs and spaces)
+        2. Rebuilding the code with correct indentation based on target_indent
+        3. Using structure analysis to handle nested blocks (if/for/while/etc.)
+        
+        Args:
+            code: Code block to normalize (may have wrong indentation)
+            target_indent: Target indentation level in spaces (e.g., 8 for method body)
+            
+        Returns:
+            Code with correct indentation
+        """
+        if not code or not code.strip():
+            return code
+        
+        # Step 1: Expand tabs and split into lines
+        code = code.expandtabs(4)
+        lines = code.splitlines()
+        
+        if not lines:
+            return code
+        
+        # Step 2: Strip ALL leading whitespace from every line (dedent to column 0)
+        stripped_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            stripped_lines.append(stripped if stripped else '')
+        
+        # Step 3: Rebuild with correct indentation based on structure
+        result_lines = []
+        current_indent = target_indent
+        indent_stack = [target_indent]
+        
+        # Keywords that decrease indent BEFORE the line (dedent keywords)
+        dedent_keywords = ('elif ', 'else:', 'except ', 'except:', 'finally:', 'case ')
+        
+        # Keywords that increase indent AFTER the line (block openers)
+        block_openers = ('def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ', 
+                        'try:', 'except ', 'except:', 'finally:', 'with ', 'async ', 
+                        'match ', 'case ')
+        
+        for stripped in stripped_lines:
+            # Handle empty lines
+            if not stripped:
+                result_lines.append('')
+                continue
+            
+            # Handle comments - use current indent
+            if stripped.startswith('#'):
+                result_lines.append(' ' * current_indent + stripped)
+                continue
+            
+            # Check if this line should dedent (elif, else, except, finally, case)
+            should_dedent = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in dedent_keywords)
+            
+            if should_dedent and len(indent_stack) > 1:
+                indent_stack.pop()
+                current_indent = indent_stack[-1]
+            
+            # Add line with current indent
+            result_lines.append(' ' * current_indent + stripped)
+            
+            # Check if this line opens a new block (ends with : and is a block keyword)
+            if stripped.endswith(':') and not stripped.startswith('#'):
+                is_block_opener = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in block_openers)
+                if is_block_opener:
+                    current_indent = current_indent + self.default_indent
+                    indent_stack.append(current_indent)
+        
+        return '\n'.join(result_lines)
+    
+    
     def _patch_method(
         self,
         existing_content: str,
@@ -1689,7 +1765,9 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                formatted_code = code.expandtabs(4).rstrip()
+                # === CRITICAL: Normalize indentation for insertion inside method ===
+                # This solves the "wrong indentation from LLM" problem
+                formatted_code = self._normalize_block_indentation(code, body_indent)
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -1830,11 +1908,9 @@ class FileModifier:
             # No context line (e.g. empty method or default pos), use method body base indent
             body_indent = body_base_indent
         
-        # FIX 3: CRITICAL FIX: ALWAYS skip normalization for "insert inside" modes
-        # The code should be inserted AS-IS with its original indentation.
-        # SyntaxChecker will fix any indentation issues during validation.
-        # This prevents the "First Line Stripped" problem from corrupting code.
-        formatted_code = code.expandtabs(4).rstrip()
+        # FIX 3: CRITICAL FIX: Use _normalize_block_indentation for proper handling
+        # This solves the "wrong indentation from LLM" problem
+        formatted_code = self._normalize_block_indentation(code, body_indent)
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -2521,10 +2597,9 @@ class FileModifier:
         old_line = lines[match_start]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # CRITICAL FIX: ALWAYS skip normalization for "replace inside" modes
-        # The code should be inserted AS-IS with its original indentation.
-        # SyntaxChecker will fix any indentation issues during validation.
-        formatted_code = code.expandtabs(4).rstrip()
+        # === CRITICAL: Normalize indentation for replacement inside method ===
+        # This solves the "wrong indentation from LLM" problem
+        formatted_code = self._normalize_block_indentation(code, line_indent)
         
         # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):

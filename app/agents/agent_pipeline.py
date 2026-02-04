@@ -3280,11 +3280,14 @@ Remember: You can override the validator if you believe the critique is incorrec
         Stage code blocks to VFS with atomic rollback on failure.
         
         IMPROVED: After each block is applied, validates the file structure using tree-sitter.
-        If the structure is broken, attempts repair with reindent + autopep8.
-        If repair fails, the block is rejected but other blocks continue processing.
+        If the structure is broken:
+        1. Remove all tabs from the code block
+        2. Re-apply the block
+        3. Try to fix indentation using tree-sitter context analysis
+        4. If still broken, reject the block but continue with others
         """
         errors = []
-        applied_backups = []  # List of (file_path, original_change_obj)
+        applied_backups = []  # List of (file_path, original_change_obj, backup_content)
         
         # Lazy import tree-sitter parser
         from app.services.tree_sitter_parser import FaultTolerantParser
@@ -3303,7 +3306,13 @@ Remember: You can override the validator if you believe the critique is incorrec
                 # 2. Read content (from VFS or empty if new)
                 existing_content = self.vfs.read_file(block.file_path) or ""
                 
-                # 3. Apply modification
+                # 3. Pre-process code block: remove all tabs
+                original_block_code = block.code
+                if block.code and '\t' in block.code:
+                    block.code = block.code.replace('\t', '    ')
+                    logger.debug(f"Removed tabs from code block for {block.file_path}")
+                
+                # 4. Apply modification
                 result = self.file_modifier.apply_code_block(existing_content, block)
                 
                 if result.success and result.new_content:
@@ -3314,57 +3323,35 @@ Remember: You can override the validator if you believe the critique is incorrec
                     
                     if ts_parser and block.file_path.endswith('.py'):
                         try:
-                            parse_result = ts_parser.parse(result.new_content)
+                            # Check if tree structure is broken
+                            is_broken, error_details = self._check_tree_structure_broken(
+                                ts_parser, result.new_content, block
+                            )
                             
-                            # Check for critical structural errors
-                            if parse_result.has_errors:
-                                critical_error = False
-                                error_details = []
+                            if is_broken:
+                                structure_valid = False
+                                repair_attempted = True
+                                logger.warning(f"Tree-sitter detected structural errors in {block.file_path}: {error_details[:2]}")
                                 
-                                for error in parse_result.errors[:3]:
-                                    error_str = str(error).lower()
-                                    if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected', 'error']):
-                                        critical_error = True
-                                        error_details.append(str(error))
+                                # === ATTEMPT REPAIR: tree-sitter context-aware fix ===
+                                repaired_content = self._attempt_structure_repair_with_context(
+                                    existing_content, block, ts_parser
+                                )
                                 
-                                # Also check if target class/method is still parseable
-                                if block.target_class:
-                                    if parse_result.get_class(block.target_class) is None:
-                                        critical_error = True
-                                        error_details.append(f"Class '{block.target_class}' no longer parseable")
-                                
-                                if critical_error:
-                                    structure_valid = False
-                                    repair_attempted = True
-                                    logger.warning(f"Tree-sitter detected structural errors in {block.file_path}: {error_details[:2]}")
+                                if repaired_content:
+                                    # Verify repair worked
+                                    is_still_broken, _ = self._check_tree_structure_broken(
+                                        ts_parser, repaired_content, block
+                                    )
                                     
-                                    # === ATTEMPT REPAIR: reindent + autopep8 ===
-                                    repaired_content = self._attempt_structure_repair(result.new_content)
-                                    
-                                    if repaired_content:
-                                        # Verify repair worked
-                                        repair_parse = ts_parser.parse(repaired_content)
-                                        still_broken = False
-                                        
-                                        if repair_parse.has_errors:
-                                            for error in repair_parse.errors[:3]:
-                                                error_str = str(error).lower()
-                                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
-                                                    still_broken = True
-                                                    break
-                                        
-                                        if block.target_class and not still_broken:
-                                            if repair_parse.get_class(block.target_class) is None:
-                                                still_broken = True
-                                        
-                                        if not still_broken:
-                                            logger.info(f"Structure repair succeeded for {block.file_path}")
-                                            final_content = repaired_content
-                                            structure_valid = True
-                                        else:
-                                            logger.warning(f"Structure repair failed for {block.file_path}")
+                                    if not is_still_broken:
+                                        logger.info(f"Structure repair succeeded for {block.file_path}")
+                                        final_content = repaired_content
+                                        structure_valid = True
                                     else:
-                                        logger.warning(f"Structure repair returned None for {block.file_path}")
+                                        logger.warning(f"Structure repair failed for {block.file_path}")
+                                else:
+                                    logger.warning(f"Structure repair returned None for {block.file_path}")
                                         
                         except Exception as e:
                             logger.debug(f"Tree-sitter validation skipped: {e}")
@@ -3380,9 +3367,12 @@ Remember: You can override the validator if you believe the critique is incorrec
                         # Structure broken and repair failed - reject this block
                         from app.agents.feedback_handler import StagingErrorType
                         
+                        # Restore original block code
+                        block.code = original_block_code
+                        
                         error_dict = block.to_dict()
                         error_dict.update({
-                            "error": f"Code block breaks file structure. Repair with reindent+autopep8 failed.",
+                            "error": f"Code block breaks file structure. Tree-sitter detected critical errors that could not be repaired.",
                             "error_type": StagingErrorType.SYNTAX_VALIDATION_FAILED,
                             "code_preview": block.code[:100] if block.code else None,
                             "full_code": block.code,
@@ -3405,6 +3395,9 @@ Remember: You can override the validator if you believe the critique is incorrec
                     logger.info(f"Staged: {block.file_path} ({block.mode})")
                 else:
                     # Apply failed
+                    # Restore original block code
+                    block.code = original_block_code
+                    
                     error_dict = block.to_dict()
                     error_dict.update({
                         "error": result.message,
@@ -3438,88 +3431,271 @@ Remember: You can override the validator if you believe the critique is incorrec
                     
         return errors
     
-    def _attempt_structure_repair(self, content: str) -> Optional[str]:
+    def _attempt_structure_repair_with_context(
+        self, 
+        existing_content: str, 
+        block: 'ParsedCodeBlock',
+        ts_parser: 'FaultTolerantParser'
+    ) -> Optional[str]:
         """
-        Attempts to repair Python file structure using reindent followed by autopep8.
+        Attempts to repair Python file structure using tree-sitter context analysis.
         
         Process:
-        1. Run reindent (Python standard library) via subprocess
-        2. Run autopep8 with all indentation error codes
-        3. Return repaired content or None if repair failed
+        1. Remove all tabs from the code block
+        2. Determine the correct indentation from the target context
+        3. Re-indent the code block to match the context
+        4. Apply the block and validate with tree-sitter
+        5. If still broken, try autopep8 as fallback
+        
+        Args:
+            existing_content: Original file content before the block was applied
+            block: The code block being inserted
+            ts_parser: Tree-sitter parser instance
+            
+        Returns:
+            Repaired content or None if repair failed
         """
         import subprocess
-        import tempfile
-        import os
         
-        if not content or not content.strip():
+        if not block.code or not block.code.strip():
             return None
         
         # Determine Python path
-        python_path = getattr(self, 'project_python_path', None) or 'python'
+        python_path = getattr(self, '_project_python_path', None) or 'python'
         
-        current_content = content
+        # === STEP 1: Remove all tabs from code block ===
+        clean_code = block.code.replace('\t', '    ')
         
-        # === STEP 1: Run reindent ===
-        try:
-            # reindent is a standard library script, run via subprocess
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                f.write(current_content)
-                temp_path = f.name
+        # === STEP 2: Determine target indentation from context ===
+        target_indent = self._determine_target_indent(existing_content, block, ts_parser)
+        
+        # === STEP 3: Re-indent the code block ===
+        reindented_code = self._reindent_code_block(clean_code, target_indent)
+        
+        # === STEP 4: Create a modified block and apply ===
+        from app.services.file_modifier import ParsedCodeBlock
+        
+        modified_block = ParsedCodeBlock(
+            file_path=block.file_path,
+            mode=block.mode,
+            code=reindented_code,
+            target_class=block.target_class,
+            target_method=block.target_method,
+            target_function=block.target_function,
+            insert_after=block.insert_after,
+            insert_before=block.insert_before,
+        )
+        
+        result = self.file_modifier.apply_code_block(existing_content, modified_block)
+        
+        if result.success and result.new_content:
+            # Validate with tree-sitter
+            is_broken, _ = self._check_tree_structure_broken(ts_parser, result.new_content, block)
             
+            if not is_broken:
+                logger.debug("Structure repair via re-indentation succeeded")
+                return result.new_content
+        
+        # === STEP 5: Fallback - try autopep8 on the whole file ===
+        if result.success and result.new_content:
             try:
-                # Run reindent with --nobackup to modify in place
-                result = subprocess.run(
-                    [python_path, '-m', 'reindent', '--nobackup', temp_path],
+                indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
+                
+                autopep8_result = subprocess.run(
+                    [python_path, '-m', 'autopep8', '--select=' + indent_codes, '-'],
+                    input=result.new_content,
                     capture_output=True,
                     text=True,
                     timeout=10
                 )
                 
-                if result.returncode == 0:
-                    with open(temp_path, 'r', encoding='utf-8') as f:
-                        current_content = f.read()
-                    logger.debug("reindent completed successfully")
-                else:
-                    logger.debug(f"reindent failed: {result.stderr}")
-            finally:
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
+                if autopep8_result.returncode == 0 and autopep8_result.stdout:
+                    # Validate the autopep8 result
+                    is_broken, _ = self._check_tree_structure_broken(ts_parser, autopep8_result.stdout, block)
                     
-        except subprocess.TimeoutExpired:
-            logger.debug("reindent timed out")
-        except Exception as e:
-            logger.debug(f"reindent failed: {e}")
+                    if not is_broken:
+                        logger.debug("Structure repair via autopep8 succeeded")
+                        return autopep8_result.stdout
+                        
+            except subprocess.TimeoutExpired:
+                logger.debug("autopep8 timed out during structure repair")
+            except Exception as e:
+                logger.debug(f"autopep8 failed during structure repair: {e}")
         
-        # === STEP 2: Run autopep8 with all indentation codes ===
+        return None
+    
+    def _check_tree_structure_broken(
+        self, 
+        ts_parser: 'FaultTolerantParser', 
+        content: str, 
+        block: 'ParsedCodeBlock'
+    ) -> tuple[bool, list]:
+        """
+        Check if the tree structure is broken in a way that would prevent
+        subsequent code blocks from being inserted.
+        
+        Checks:
+        1. Tree-sitter reports critical errors (ERROR nodes)
+        2. Target class is no longer parseable
+        3. Target method/function is no longer parseable
+        4. Methods inside target class have errors
+        
+        Returns:
+            (is_broken, error_details)
+        """
+        error_details = []
+        
         try:
-            # E1xx = indentation errors, E2xx = whitespace, E3xx = blank lines
-            # W1xx = indentation warnings, W2xx = whitespace warnings
-            # Focus on indentation: E101, E111, E112, E113, E114, E115, E116, E117, E121-E131, W191
-            indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
-            
-            result = subprocess.run(
-                [python_path, '-m', 'autopep8', '--select=' + indent_codes, '-'],
-                input=current_content,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.returncode == 0 and result.stdout:
-                current_content = result.stdout
-                logger.debug("autopep8 indentation fix completed successfully")
-            else:
-                logger.debug(f"autopep8 failed: {result.stderr}")
-                
-        except subprocess.TimeoutExpired:
-            logger.debug("autopep8 timed out")
+            parse_result = ts_parser.parse(content)
         except Exception as e:
-            logger.debug(f"autopep8 failed: {e}")
+            return True, [f"Parse failed: {e}"]
         
-        # Return repaired content (may be same as input if repairs failed)
-        return current_content if current_content != content else current_content
+        # Check 1: Critical ERROR nodes in the tree
+        if parse_result.has_errors:
+            for error in parse_result.errors[:5]:
+                error_str = str(error)
+                error_details.append(error_str)
+        
+        # Check 2: Target class is still parseable
+        if block.target_class:
+            target_cls = parse_result.get_class(block.target_class)
+            if target_cls is None:
+                error_details.append(f"Target class '{block.target_class}' not found or broken")
+                return True, error_details
+        
+        # Check 3: Target method/function is still parseable
+        if block.target_method:
+            if block.target_class:
+                target_cls = parse_result.get_class(block.target_class)
+                if target_cls:
+                    method = parse_result.get_method(block.target_class, block.target_method)
+                    if method is None:
+                        error_details.append(f"Target method '{block.target_method}' not found in class")
+                        return True, error_details
+            else:
+                func = parse_result.get_function(block.target_method)
+                if func is None:
+                    error_details.append(f"Target function '{block.target_method}' not found")
+                    return True, error_details
+        
+        elif block.target_function:
+            func = parse_result.get_function(block.target_function)
+            if func is None:
+                error_details.append(f"Target function '{block.target_function}' not found")
+                return True, error_details
+        
+        # Check 4: If we have critical errors, it's broken
+        if error_details and parse_result.has_errors:
+            return True, error_details
+        
+        return False, error_details
+    
+    def _determine_target_indent(
+        self, 
+        existing_content: str, 
+        block: 'ParsedCodeBlock',
+        ts_parser: 'FaultTolerantParser'
+    ) -> int:
+        """
+        Determine the correct indentation level for the code block
+        based on its target context.
+        
+        Args:
+            existing_content: Original file content
+            block: Code block with target information
+            ts_parser: Tree-sitter parser
+            
+        Returns:
+            Number of spaces for indentation (0, 4, 8, 12, etc.)
+        """
+        import re
+        
+        # Default: module level (0 spaces)
+        target_indent = 0
+        
+        try:
+            parse_result = ts_parser.parse(existing_content)
+        except Exception:
+            return target_indent
+        
+        # If targeting a class method
+        if block.target_class and block.target_method:
+            # Methods inside classes are indented 8 spaces (4 for class, 4 for method body)
+            target_indent = 8
+        
+        # If targeting a class
+        elif block.target_class:
+            # Class body is indented 4 spaces
+            target_indent = 4
+        
+        # If targeting a function
+        elif block.target_method or block.target_function:
+            # Function body is indented 4 spaces
+            target_indent = 4
+        
+        # Try to detect actual indentation from existing code
+        if existing_content:
+            lines = existing_content.split('\n')
+            
+            # Look for indented lines to detect the pattern
+            for line in lines:
+                if line and not line[0].isspace():
+                    continue
+                if line.strip():
+                    # Count leading spaces
+                    spaces = len(line) - len(line.lstrip(' '))
+                    if spaces > 0 and spaces % 4 == 0:
+                        # Found a properly indented line
+                        if block.target_class and block.target_method:
+                            # Look for method inside class
+                            if 'def ' in line:
+                                target_indent = spaces + 4  # Method body
+                                break
+                        elif block.target_class:
+                            # Look for class body
+                            if not line.strip().startswith('def '):
+                                target_indent = spaces
+                                break
+        
+        logger.debug(f"Determined target indent: {target_indent} spaces for {block.target_class or block.target_method or block.target_function}")
+        return target_indent
+    
+    def _reindent_code_block(self, code: str, target_indent: int) -> str:
+        """
+        Re-indent a code block to match the target indentation level.
+        
+        Args:
+            code: Code block to re-indent
+            target_indent: Target indentation in spaces
+            
+        Returns:
+            Re-indented code
+        """
+        lines = code.split('\n')
+        reindented_lines = []
+        
+        # Detect current indentation of the first non-empty line
+        current_indent = 0
+        for line in lines:
+            if line.strip():
+                current_indent = len(line) - len(line.lstrip(' '))
+                break
+        
+        # Calculate difference
+        indent_diff = target_indent - current_indent
+        
+        # Re-indent all lines
+        for line in lines:
+            if not line.strip():
+                # Empty line - keep as is
+                reindented_lines.append(line)
+            else:
+                # Non-empty line - adjust indentation
+                current_spaces = len(line) - len(line.lstrip(' '))
+                new_spaces = max(0, current_spaces + indent_diff)
+                reindented_lines.append(' ' * new_spaces + line.lstrip(' '))
+        
+        return '\n'.join(reindented_lines)
     
     # ========================================================================
     # INTERNAL: VALIDATION
