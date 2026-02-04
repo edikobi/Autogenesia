@@ -848,10 +848,6 @@ def _build_adaptive_block_new_project_reasoner() -> str:
     return "\n".join(prompt_parts)
 
 
-# === FILE: app/llm/prompt_templates.py ===
-# === LANG: python ===
-# === ACTION: ADD_FUNCTION ===
-# === TARGET: after _build_adaptive_block_new_project_reasoner ===
 
 def _build_adaptive_block_claude_delegation() -> str:
     """
@@ -906,13 +902,64 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('You must strictly leverage the `install_dependency` tool to **materialize** every required library.')
     prompt_parts.append('The system considers the environment "invalid" until you have physically executed the installation for each package.')
     
+def _build_adaptive_block_gpt5_2_codex() -> str:
+    """
+    Build adaptive block specifically for GPT-5.2 Codex (Dec 2025).
     
+    Analysis of Official Docs (Dec '25):
+    - Problem: 'Recursive Refinement' strips markdown headers strictly defined in prompts.
+    - Solution: 'Role-Based Scope Isolation'. instead of downgrading the model to a 'generator',
+      we elevate the Formatting Rules to 'Architectural Constraints'.
+    """
+    prompt_parts: List[str] = []
     
+    prompt_parts.append("")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("🧠 GPT-5.2 CODEX PROFILE: ARCHITECT-LEVEL COMPLIANCE")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    # 1. Maintain Intelligence (Reasoning)
+    prompt_parts.append("You are a Principal Software Architect.")
+    prompt_parts.append("Use your full 'High Reasoning' capacity to analyze the codebase, detect edge cases, and plan the refactoring.")
+    
+    # 2. Define the "Parser Constraint" as an Architectural Requirement
+    # We reframe "formatting" as "System Interface Stability" which appeals to the model's logic.
+    prompt_parts.append("")
+    prompt_parts.append("### INTERFACE CONTRACT")
+    prompt_parts.append("The downstream system uses a RIGID REGEX PARSER (Legacy 1.0).")
+    prompt_parts.append("It captures content ONLY if strictly enclosed in the specific headers defined in the main system prompt.")
+    
+    # 3. The "Anti-Refinement" Instruction
+    # We instruct the model that headers are DATA, not FORMATTING.
+    prompt_parts.append("")
+    prompt_parts.append("### CRITICAL INSTRUCTION FOR OUTPUT GENERATION")
+    prompt_parts.append("When moving from 'Thinking' phase to 'Output' phase, you must disable 'Recursive Refinement' for structural markers.")
+    prompt_parts.append("Treat the format headers (e.g., file delimiters, action tags) as STRUCTURAL ANCHORS.")
+    prompt_parts.append("If you 'clean up' or 'simplify' the headers, the parser receives NULL data, and the architectural change fails.")
+    
+    #  Delegation Strategy (The requested addition)
+    prompt_parts.append("")
+    prompt_parts.append("### DELEGATION PROTOCOL")
+    prompt_parts.append("You are provisioning a subordinate 'Code Generator' unit.")
+    prompt_parts.append("Do not generate the full boilerplate implementation yourself inside the instruction blocks.")
+    prompt_parts.append("Instead, provide precise SPECIFICATIONS: strictly define imports, variable names, and algorithmic steps.")
+    prompt_parts.append("Your output must contain all the CONTEXT the Generator needs to do its job without hallucinating.")
+    prompt_parts.append("Give it the 'Blueprint', not the 'Bricks'.")    
+    
+    # 4. Dynamic Verification (No hardcoded formats)
+    prompt_parts.append("")
+    prompt_parts.append(">>> EXECUTION PROTOCOL:")
+    prompt_parts.append("1. LOOK UP the specific output format defined above in the System Prompt.")
+    prompt_parts.append("2. INSTANTIATE it exactly. Do not approximate. Do not optimize.")
+    prompt_parts.append("3. Your intelligence applies to the CODE content, not the WRAPPER syntax.")
+
     return "\n".join(prompt_parts)
 
 
 # Pre-build the Claude delegation block
 _ADAPTIVE_BLOCK_CLAUDE_DELEGATION = _build_adaptive_block_claude_delegation()
+
+_ADAPTIVE_BLOCK_GPT5_2_CODEX = _build_adaptive_block_gpt5_2_codex()
 
 # Pre-build adaptive blocks for efficiency
 _ADAPTIVE_BLOCK_ASK_DEEP_THINKER = _build_adaptive_block_ask_deep_thinker()
@@ -945,6 +992,11 @@ def _get_adaptive_block_ask(model_id: str) -> str:
     elif cognitive_type == "executor":
         return _ADAPTIVE_BLOCK_EXECUTOR
     
+    # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
+    # GPT-5.2 Codex needs special handling for recursive refinement issues
+    if model_id == Config.MODEL_GPT_5_2_Codex:
+        return _ADAPTIVE_BLOCK_GPT5_2_CODEX
+
     # для остальных
     return ""
 
@@ -968,6 +1020,11 @@ def _get_adaptive_block_new_project(model_id: str) -> str:
         return _ADAPTIVE_BLOCK_NEW_PROJECT_DEEP_THINKER
     elif cognitive_type == "reasoner":
         return _ADAPTIVE_BLOCK_NEW_PROJECT_REASONER
+    
+    # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
+    # GPT-5.2 Codex needs special handling for recursive refinement issues
+    if model_id == Config.MODEL_GPT_5_2_Codex:
+        return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # executor and general - no modifications
     return ""
@@ -1000,6 +1057,11 @@ def _get_adaptive_block_ask_agent(model_id: str) -> str:
         base_block = _ADAPTIVE_BLOCK_EXECUTOR
     else:
         base_block = ""
+    
+    # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
+    # GPT-5.2 Codex needs special handling for recursive refinement issues
+    if model_id == Config.MODEL_GPT_5_2_Codex:
+        return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
     if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5):
@@ -1036,6 +1098,11 @@ def _get_adaptive_block_new_project_agent(model_id: str) -> str:
         base_block = _ADAPTIVE_BLOCK_NEW_PROJECT_REASONER
     else:
         base_block = ""
+    
+    # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
+    # GPT-5.2 Codex needs special handling for recursive refinement issues
+    if model_id == Config.MODEL_GPT_5_2_Codex:
+        return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
     if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5):
@@ -3934,6 +4001,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("(Or write 'None' if no new imports)")
     prompt_parts.append("")
     prompt_parts.append("**Changes:**")
+    prompt_parts.append("*(Selected ACTION must strictly match the **Structural Scope** above.)*")
     prompt_parts.append("")
     prompt_parts.append("#### ACTION: [MODIFY_METHOD | PATCH_METHOD | ADD_METHOD | ADD_FUNCTION | MODIFY_FUNCTION | MODIFY_ATTRIBUTE | MODIFY_GLOBAL | UPDATE_IMPORTS | REPLACE_FILE]")
     prompt_parts.append("**Target:** `ClassName.method_name` or `function_name` or `ClassName`")
@@ -4855,10 +4923,10 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("- For multi-file changes: create SEPARATE CODE_BLOCK for each file")  # NEW
     prompt_parts.append("- Each CODE_BLOCK is applied to a file automatically")
     prompt_parts.append("- NO explanations, NO comments outside code, JUST CODE_BLOCKS")
+    
     # Про адптацию инструкции в части вставки кода
     prompt_parts.append("")
     prompt_parts.append("🛠️ INSTRUCTION ADAPTATION PROTOCOL:")
-    prompt_parts.append("Precision in selecting targets and their descriptors ensures successful code integration. Review each parameter's definition to match the task requirements accurately.")
     prompt_parts.append("You are authorized to interpret and normalize the Orchestrator's technical commands.")
     prompt_parts.append("Prioritize structural location over terminology: map nested targets to container-specific Modes and root targets to global Modes.")
     prompt_parts.append("If an Action Type or parameter appears non-standard, automatically map it to the correct valid system operation.")
@@ -4866,7 +4934,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("Focus on executing the intended logic by ensuring the output format matches system requirements, while strictly preserving the requested code logic.")
     prompt_parts.append("")
     
-    
+
     
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
@@ -4890,6 +4958,8 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("=" * 60)
     prompt_parts.append("MODE OPTIONS")
     prompt_parts.append("=" * 60)
+    prompt_parts.append("")
+    prompt_parts.append("As an expert programmer, ensure every CODE_BLOCK you generate is syntactically perfect and ready for direct integration. The technical correctness of your output — including precise indentation, bracket matching, and valid syntax — is the foundation of your role.")
     prompt_parts.append("")
     prompt_parts.append("| MODE | When to use | Required fields |")
     prompt_parts.append("|------|-------------|-----------------|")

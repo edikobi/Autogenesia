@@ -135,6 +135,8 @@ class ModifyInstruction:
     replace_pattern: Optional[str] = None   # Паттерн для поиска и замены
     preserve_imports: bool = True           # Сохранять существующие импорты
     auto_format: bool = True                # Автоформатирование отступов
+    skip_normalization: bool = False        # Пропустить нормализацию отступов (для auto-correct)
+
 
 
 
@@ -262,6 +264,9 @@ class FileModifier:
     
     DEFAULT_INDENT = 4
     
+    # Temporary storage for inserted code block info (for SyntaxChecker)
+    # Format: {"start_line": int, "end_line": int, "code": str, "target_indent": int}
+    _last_inserted_block: Optional[Dict[str, Any]] = None
 
     # ========================================================================
     # MODE MAPPING: CODE_BLOCK MODE → ModifyMode
@@ -454,6 +459,12 @@ class FileModifier:
         """
         Attempts to auto-correct common staging errors (e.g. Function vs Method confusion).
         Only triggers if the original modification failed with a 'not found' or 'required' error.
+        
+        CRITICAL FIX: When switching modes, we use the ORIGINAL code without any normalization.
+        This prevents indentation corruption. SyntaxChecker will fix any issues later.
+        
+        IMPROVED: Now checks BOTH target_function AND target_method fields to find the actual target,
+        since AI often confuses which field to use.
         """
         msg = failed_result.message.lower()
         
@@ -472,15 +483,12 @@ class FileModifier:
             logger.warning(f"Auto-correct parse failed: {e}")
             return None
 
-        # 2. CRITICAL FIX: Prepare code for mode switching
-        # Fixes "first line stripped" issue and normalizes to zero-based indent
-        cleaned_code = self._prepare_code_for_mode_switch(instruction.code)
-
         # Helper to simplify instruction creation
+        # CRITICAL: Always use original code WITHOUT normalization to prevent indent corruption
         def create_correction(new_mode: ModifyMode, **kwargs) -> ModifyInstruction:
             return ModifyInstruction(
                 mode=new_mode,
-                code=cleaned_code,  # Use repaired code
+                code=instruction.code,
                 target_class=kwargs.get('target_class', instruction.target_class),
                 target_method=kwargs.get('target_method', instruction.target_method),
                 target_function=kwargs.get('target_function', instruction.target_function),
@@ -489,46 +497,122 @@ class FileModifier:
                 insert_before=kwargs.get('insert_before', instruction.insert_before),
                 replace_pattern=kwargs.get('replace_pattern', instruction.replace_pattern),
                 preserve_imports=instruction.preserve_imports,
-                auto_format=instruction.auto_format
+                auto_format=instruction.auto_format,
+                skip_normalization=True
             )
 
-        # === SCENARIO 1: REPLACE_METHOD -> REPLACE_FUNCTION ===
-        if instruction.mode == ModifyMode.REPLACE_METHOD:
-            target_name = instruction.target_method
-            if target_name and parse_result.get_function(target_name):
-                logger.info(f"Auto-correction: '{target_name}' is a function. Switching to REPLACE_FUNCTION.")
-                new_instruction = create_correction(
-                    ModifyMode.REPLACE_FUNCTION,
-                    target_function=target_name,
-                    target_method=None,
-                    target_class=None
-                )
-                return self._replace_function(existing_content, new_instruction)
+        # Helper to find target name from any available field
+        def get_target_name() -> Optional[str]:
+            """Get target name from any available field."""
+            return instruction.target_function or instruction.target_method or instruction.target_attribute
 
-        # === SCENARIO 2: REPLACE_FUNCTION -> REPLACE_METHOD ===
-        elif instruction.mode == ModifyMode.REPLACE_FUNCTION:
-            # Try both fields
-            target_name = instruction.target_function or instruction.target_method
-            if target_name:
-                # Find which class has this method
-                candidates = []
-                for cls in parse_result.classes:
-                    for method in cls.methods:
-                        if method.name == target_name:
-                            candidates.append(cls.name)
+        # Helper to find if target is a global function
+        def find_as_function(name: str) -> bool:
+            """Check if name exists as a global function."""
+            return parse_result.get_function(name) is not None
+
+        # Helper to find if target is a method (returns class name if unique)
+        def find_as_method(name: str) -> Optional[str]:
+            """Check if name exists as a method. Returns class name if unique, None otherwise."""
+            candidates = []
+            for cls in parse_result.classes:
+                for method in cls.methods:
+                    if method.name == name:
+                        candidates.append(cls.name)
+            return candidates[0] if len(candidates) == 1 else None
+
+        # === SCENARIO 0: Universal Target Resolution ===
+        # AI often uses wrong mode but specifies correct target in some field
+        # Try to find the target and switch to correct mode
+        target_name = get_target_name()
+        
+        if target_name:
+            # Check if it's a global function
+            if find_as_function(target_name):
+                # Target is a function - determine correct mode
+                if instruction.mode in (ModifyMode.REPLACE_METHOD, ModifyMode.REPLACE_FUNCTION):
+                    logger.info(f"Auto-correction: '{target_name}' is a function. Switching to REPLACE_FUNCTION.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_FUNCTION,
+                        target_function=target_name,
+                        target_method=None,
+                        target_class=None
+                    )
+                    return self._replace_function(existing_content, new_instruction)
                 
-                if len(candidates) == 1:
-                    class_name = candidates[0]
+                elif instruction.mode in (ModifyMode.REPLACE_IN_METHOD, ModifyMode.REPLACE_IN_FUNCTION):
+                    logger.info(f"Auto-correction: '{target_name}' is a function. Switching to REPLACE_IN_FUNCTION.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_IN_FUNCTION,
+                        target_function=target_name,
+                        target_method=None,
+                        target_class=None
+                    )
+                    return self._replace_in_function(existing_content, new_instruction)
+                
+                elif instruction.mode in (ModifyMode.PATCH_METHOD, ModifyMode.INSERT_IN_FUNCTION):
+                    logger.info(f"Auto-correction: '{target_name}' is a function. Using PATCH_METHOD(class=None).")
+                    new_instruction = create_correction(
+                        ModifyMode.PATCH_METHOD,
+                        target_method=target_name,
+                        target_class=None
+                    )
+                    return self._patch_method(existing_content, new_instruction)
+                
+                elif instruction.mode == ModifyMode.ADD_METHOD:
+                    logger.info(f"Auto-correction: '{target_name}' exists as function. Switching to ADD_FUNCTION.")
+                    new_instruction = create_correction(
+                        ModifyMode.ADD_FUNCTION,
+                        target_function=target_name,
+                        target_method=None,
+                        target_class=None
+                    )
+                    return self._add_function(existing_content, new_instruction)
+            
+            # Check if it's a method
+            class_name = find_as_method(target_name)
+            if class_name:
+                if instruction.mode in (ModifyMode.REPLACE_FUNCTION, ModifyMode.REPLACE_METHOD):
                     logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Switching to REPLACE_METHOD.")
                     new_instruction = create_correction(
                         ModifyMode.REPLACE_METHOD,
                         target_class=class_name,
-                        target_method=target_name
+                        target_method=target_name,
+                        target_function=None
                     )
                     return self._replace_method(existing_content, new_instruction)
+                
+                elif instruction.mode in (ModifyMode.REPLACE_IN_FUNCTION, ModifyMode.REPLACE_IN_METHOD):
+                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Switching to REPLACE_IN_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.REPLACE_IN_METHOD,
+                        target_class=class_name,
+                        target_method=target_name,
+                        target_function=None
+                    )
+                    return self._replace_in_method(existing_content, new_instruction)
+                
+                elif instruction.mode in (ModifyMode.PATCH_METHOD, ModifyMode.INSERT_IN_FUNCTION):
+                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Using PATCH_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.PATCH_METHOD,
+                        target_class=class_name,
+                        target_method=target_name
+                    )
+                    return self._patch_method(existing_content, new_instruction)
+                
+                elif instruction.mode == ModifyMode.ADD_FUNCTION:
+                    logger.info(f"Auto-correction: Target class '{class_name}' found. Switching to ADD_METHOD.")
+                    new_instruction = create_correction(
+                        ModifyMode.ADD_METHOD,
+                        target_class=class_name,
+                        target_method=target_name,
+                        target_function=None
+                    )
+                    return self._add_method(existing_content, new_instruction)
 
         # === SCENARIO 3: REPLACE_IN_CLASS -> REPLACE_METHOD ===
-        elif instruction.mode == ModifyMode.REPLACE_IN_CLASS:
+        if instruction.mode == ModifyMode.REPLACE_IN_CLASS:
             target_class = instruction.target_class
             target_attribute = instruction.target_attribute
             if target_class and target_attribute:
@@ -542,103 +626,6 @@ class FileModifier:
                     )
                     return self._replace_method(existing_content, new_instruction)
 
-        # === SCENARIO 4: REPLACE_IN_FUNCTION (Fix fields OR Switch to Method) ===
-        elif instruction.mode == ModifyMode.REPLACE_IN_FUNCTION:
-            target_name = instruction.target_function or instruction.target_method
-            if target_name:
-                # A) Is it a global function? (Fix missing field)
-                if parse_result.get_function(target_name):
-                    logger.info(f"Auto-correction: '{target_name}' is a global function. Retrying REPLACE_IN_FUNCTION with correct fields.")
-                    new_instruction = create_correction(
-                        ModifyMode.REPLACE_IN_FUNCTION,
-                        target_function=target_name
-                    )
-                    return self._replace_in_function(existing_content, new_instruction)
-                
-                # B) Is it a method? (Switch mode)
-                candidates = []
-                for cls in parse_result.classes:
-                    for method in cls.methods:
-                        if method.name == target_name:
-                            candidates.append(cls.name)
-                
-                if len(candidates) == 1:
-                    class_name = candidates[0]
-                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Switching to REPLACE_IN_METHOD.")
-                    new_instruction = create_correction(
-                        ModifyMode.REPLACE_IN_METHOD,
-                        target_class=class_name,
-                        target_method=target_name
-                    )
-                    return self._replace_in_method(existing_content, new_instruction)
-
-        # === SCENARIO 5: REPLACE_IN_METHOD (Fix fields OR Switch to Function) ===
-        elif instruction.mode == ModifyMode.REPLACE_IN_METHOD:
-            target_name = instruction.target_method or instruction.target_function
-            if target_name:
-                # A) Is it a global function? (Switch mode)
-                if parse_result.get_function(target_name):
-                    logger.info(f"Auto-correction: '{target_name}' is a global function. Switching to REPLACE_IN_FUNCTION.")
-                    new_instruction = create_correction(
-                        ModifyMode.REPLACE_IN_FUNCTION,
-                        target_function=target_name,
-                        target_method=None,
-                        target_class=None
-                    )
-                    return self._replace_in_function(existing_content, new_instruction)
-
-                # B) Is it a method? (Fix missing class/fields)
-                candidates = []
-                for cls in parse_result.classes:
-                    for method in cls.methods:
-                        if method.name == target_name:
-                            candidates.append(cls.name)
-                
-                if len(candidates) == 1:
-                    class_name = candidates[0]
-                    # Only correct if class was missing or wrong
-                    if instruction.target_class != class_name:
-                        logger.info(f"Auto-correction: Found '{target_name}' in '{class_name}'. Retrying REPLACE_IN_METHOD.")
-                        new_instruction = create_correction(
-                            ModifyMode.REPLACE_IN_METHOD,
-                            target_class=class_name,
-                            target_method=target_name
-                        )
-                        return self._replace_in_method(existing_content, new_instruction)
-
-        # === SCENARIO 6: PATCH_METHOD / INSERT_IN_FUNCTION (Universal Fix) ===
-        elif instruction.mode in (ModifyMode.PATCH_METHOD, ModifyMode.INSERT_IN_FUNCTION):
-            target_name = instruction.target_method or instruction.target_function
-            if target_name:
-                # A) Is it a global function?
-                if parse_result.get_function(target_name):
-                    # For INSERT_IN_FUNCTION, just ensure fields are right
-                    # For PATCH_METHOD, ensure target_class is None
-                    logger.info(f"Auto-correction: '{target_name}' is a global function. Using PATCH_METHOD(class=None).")
-                    new_instruction = create_correction(
-                        ModifyMode.PATCH_METHOD,
-                        target_method=target_name,
-                        target_class=None
-                    )
-                    return self._patch_method(existing_content, new_instruction)
-                
-                # B) Is it a method?
-                candidates = []
-                for cls in parse_result.classes:
-                    for method in cls.methods:
-                        if method.name == target_name:
-                            candidates.append(cls.name)
-                
-                if len(candidates) == 1:
-                    class_name = candidates[0]
-                    logger.info(f"Auto-correction: '{target_name}' is a method in '{class_name}'. Using PATCH_METHOD.")
-                    new_instruction = create_correction(
-                        ModifyMode.PATCH_METHOD,
-                        target_class=class_name,
-                        target_method=target_name
-                    )
-                    return self._patch_method(existing_content, new_instruction)
-
         return None
     
     
@@ -650,6 +637,9 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Применяет модификацию и стейджит результат в VFS.
+        
+        IMPROVED: Validates syntax before staging to prevent cascading failures.
+        If applied change breaks file syntax, attempts to fix with autopep8 first.
         
         Args:
             vfs: VirtualFileSystem instance
@@ -668,6 +658,95 @@ class FileModifier:
         # Применяем модификацию
         result = self.apply(existing_content, instruction)
         
+        # === SYNTAX VALIDATION BEFORE STAGING ===
+        if result.success and result.new_content:
+            ts_parser = _get_tree_sitter_parser()
+            if ts_parser:
+                try:
+                    parse_result = ts_parser.parse(result.new_content)
+                    
+                    if parse_result.has_errors:
+                        # Check for critical errors
+                        critical_error = False
+                        error_details = []
+                        
+                        for error in parse_result.errors[:3]:
+                            error_str = str(error).lower()
+                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                critical_error = True
+                                error_details.append(str(error))
+                        
+                        # Check target class if specified
+                        if instruction.target_class:
+                            class_info = parse_result.get_class(instruction.target_class)
+                            if class_info is None:
+                                critical_error = True
+                                error_details.append(f"Class '{instruction.target_class}' no longer parseable")
+                        
+                        if critical_error:
+                            # Attempt repair with autopep8
+                            logger.info(f"Syntax error detected in {file_path}, attempting autopep8 repair...")
+                            
+                            repaired_content = None
+                            try:
+                                from app.services.syntax_checker import SyntaxChecker
+                                checker = SyntaxChecker(
+                                    use_black=False,
+                                    use_autopep8=True,
+                                    project_python_path=self.project_python_path
+                                )
+                                fix_result = checker.check_python(result.new_content, auto_fix=True)
+                                
+                                if fix_result.was_auto_fixed and fix_result.fixed_content:
+                                    fixed_parse = ts_parser.parse(fix_result.fixed_content)
+                                    
+                                    still_critical = False
+                                    if fixed_parse.has_errors:
+                                        for error in fixed_parse.errors[:3]:
+                                            error_str = str(error).lower()
+                                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                still_critical = True
+                                                break
+                                    
+                                    if instruction.target_class and not still_critical:
+                                        if fixed_parse.get_class(instruction.target_class) is None:
+                                            still_critical = True
+                                    
+                                    if not still_critical:
+                                        logger.info(f"Autopep8 repair succeeded for {file_path}")
+                                        repaired_content = fix_result.fixed_content
+                                        result.new_content = repaired_content
+                                        result.changes_made.append("Auto-repaired syntax with autopep8")
+                                    else:
+                                        logger.warning(f"Autopep8 repair did not resolve critical errors in {file_path}")
+                            except ImportError:
+                                logger.debug("SyntaxChecker not available for repair attempt")
+                            except Exception as e:
+                                logger.warning(f"Autopep8 repair failed: {e}")
+                            
+                            # If repair failed, reject the change
+                            if repaired_content is None:
+                                from app.agents.feedback_handler import StagingErrorType
+                                
+                                logger.warning(
+                                    f"Syntax validation failed for {file_path}: "
+                                    f"Applied change breaks file structure. Errors: {error_details}"
+                                )
+                                result.success = False
+                                result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                                result.message = (
+                                    f"Syntax validation failed: applied change breaks file structure. "
+                                    f"Autopep8 repair was attempted but failed. "
+                                    f"This would cause cascading failures for subsequent blocks. "
+                                    f"Errors: {'; '.join(error_details[:2])}"
+                                )
+                                result.new_content = existing_content  # Revert to original
+                                return result
+                                
+                except Exception as e:
+                    # Don't block on parser errors, just log
+                    logger.debug(f"Syntax validation skipped due to parser error: {e}")
+        
         # Если успешно — стейджим
         if result.success:
             # Используем ChangeType enum, не строку!
@@ -675,7 +754,7 @@ class FileModifier:
             vfs.stage_change(file_path, result.new_content, change_type)
             logger.info(f"Staged modification to {file_path}")
         
-        return result    
+        return result
     
     # ========================================================================
     # CODE_BLOCK APPLICATION (Agent Mode)
@@ -753,6 +832,10 @@ class FileModifier:
         """
         Применяет CODE_BLOCK и стейджит результат в VFS.
         
+        IMPROVED: Validates syntax before staging to prevent cascading failures.
+        If applied change breaks file syntax (classes/methods become unparseable),
+        attempts to fix with autopep8 first. If fix fails, the change is rejected.
+        
         Args:
             vfs: VirtualFileSystem instance
             block: Распарсенный CODE_BLOCK
@@ -769,6 +852,104 @@ class FileModifier:
         # Применяем модификацию
         result = self.apply_code_block(existing_content, block)
         
+        # === SYNTAX VALIDATION BEFORE STAGING ===
+        # Prevents cascading failures when one block breaks file structure
+        if result.success and result.new_content:
+            ts_parser = _get_tree_sitter_parser()
+            if ts_parser:
+                try:
+                    # Parse the modified content
+                    parse_result = ts_parser.parse(result.new_content)
+                    
+                    # Check for critical structural errors
+                    if parse_result.has_errors:
+                        # Determine if errors are critical (affect class/method discovery)
+                        critical_error = False
+                        error_details = []
+                        
+                        for error in parse_result.errors[:3]:
+                            error_str = str(error).lower()
+                            # Check if error affects structural elements
+                            if any(keyword in error_str for keyword in ['class', 'def', 'indent', 'expected']):
+                                critical_error = True
+                                error_details.append(str(error))
+                        
+                        # Also check if we can still find the target class/method
+                        if block.target_class:
+                            class_info = parse_result.get_class(block.target_class)
+                            if class_info is None:
+                                critical_error = True
+                                error_details.append(f"Class '{block.target_class}' no longer parseable after modification")
+                        
+                        if critical_error:
+                            # === ATTEMPT REPAIR WITH AUTOPEP8 ===
+                            logger.info(f"Syntax error detected in {block.file_path}, attempting autopep8 repair...")
+                            
+                            repaired_content = None
+                            try:
+                                from app.services.syntax_checker import SyntaxChecker
+                                checker = SyntaxChecker(
+                                    use_black=False, 
+                                    use_autopep8=True,
+                                    project_python_path=self.project_python_path
+                                )
+                                fix_result = checker.check_python(result.new_content, auto_fix=True)
+                                
+                                if fix_result.was_auto_fixed and fix_result.fixed_content:
+                                    # Verify the fix actually resolved the issue
+                                    fixed_parse = ts_parser.parse(fix_result.fixed_content)
+                                    
+                                    # Check if critical errors are gone
+                                    still_critical = False
+                                    if fixed_parse.has_errors:
+                                        for error in fixed_parse.errors[:3]:
+                                            error_str = str(error).lower()
+                                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                still_critical = True
+                                                break
+                                    
+                                    # Check if target class is now parseable
+                                    if block.target_class and not still_critical:
+                                        fixed_class_info = fixed_parse.get_class(block.target_class)
+                                        if fixed_class_info is None:
+                                            still_critical = True
+                                    
+                                    if not still_critical:
+                                        # Repair succeeded!
+                                        logger.info(f"Autopep8 repair succeeded for {block.file_path}")
+                                        repaired_content = fix_result.fixed_content
+                                        result.new_content = repaired_content
+                                        result.changes_made.append("Auto-repaired syntax with autopep8")
+                                    else:
+                                        logger.warning(f"Autopep8 repair did not resolve critical errors in {block.file_path}")
+                            except ImportError:
+                                logger.debug("SyntaxChecker not available for repair attempt")
+                            except Exception as e:
+                                logger.warning(f"Autopep8 repair failed: {e}")
+                            
+                            # If repair failed, reject the change
+                            if repaired_content is None:
+                                from app.agents.feedback_handler import StagingErrorType
+                                
+                                logger.warning(
+                                    f"Syntax validation failed for {block.file_path}: "
+                                    f"Applied change breaks file structure. Errors: {error_details}"
+                                )
+                                result.success = False
+                                result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                                result.message = (
+                                    f"Syntax validation failed: applied change breaks file structure. "
+                                    f"Autopep8 repair was attempted but failed. "
+                                    f"This would cause cascading failures for subsequent blocks. "
+                                    f"Errors: {'; '.join(error_details[:2])}"
+                                )
+                                result.new_content = existing_content  # Revert to original
+                                return result
+                                
+                except Exception as e:
+                    # Don't block on parser errors, just log
+                    logger.debug(f"Syntax validation skipped due to parser error: {e}")
+        
         # Если успешно — стейджим
         if result.success:
             # Используем ChangeType enum, не строку!
@@ -776,7 +957,47 @@ class FileModifier:
             vfs.stage_change(block.file_path, result.new_content, change_type)
             logger.info(f"Staged CODE_BLOCK modification to {block.file_path}")
         
-        return result    
+        return result
+    
+    def validate_vfs_state(
+        self, 
+        vfs: 'VirtualFileSystem', 
+        file_path: str
+    ) -> Tuple[bool, List[str]]:
+        """
+        Validates that a file in VFS is still parseable after modifications.
+        
+        Use this to check VFS state between block applications to detect
+        if a previous block broke the file structure.
+        
+        Args:
+            vfs: VirtualFileSystem instance
+            file_path: Path to file to validate
+            
+        Returns:
+            Tuple of (is_valid, list_of_error_messages)
+        """
+        content = vfs.read_file(file_path)
+        
+        if not content or not content.strip():
+            return (True, [])
+        
+        ts_parser = _get_tree_sitter_parser()
+        if not ts_parser:
+            return (True, [])
+        
+        try:
+            parse_result = ts_parser.parse(content)
+            
+            if parse_result.has_errors:
+                errors = [str(e) for e in parse_result.errors[:5]]
+                return (False, errors)
+            
+            return (True, [])
+            
+        except Exception as e:
+            logger.debug(f"VFS state validation failed: {e}")
+            return (True, [])  # Don't block on parser errors
     
     # ========================================================================
     # MODIFICATION MODES
@@ -1027,11 +1248,11 @@ class FileModifier:
         method_start = method_info.span.start_line - 1
         method_end = method_info.span.end_line
         
-        # Определяем отступ
+        # Determine indent
         method_indent = method_info.indent
         
-        # === Анализируем и нормализуем код с правильным отступом ===
-        formatted_code = self._analyze_and_normalize_indent(code, method_indent)
+        # === CONDITIONAL RE-INDENTATION ===
+        formatted_code = self._reindent_if_needed(code.expandtabs(4).rstrip(), method_indent)
         
         old_lines_count = method_end - method_start
         
@@ -1097,8 +1318,8 @@ class FileModifier:
         func_end = func_info.span.end_line
         func_indent = func_info.indent
         
-        # === Анализируем и нормализуем код с правильным отступом ===
-        formatted_code = self._analyze_and_normalize_indent(code, func_indent)
+        # === REMOVE NORMALIZATION: Simply expand tabs and strip trailing whitespace ===
+        formatted_code = code.expandtabs(4).rstrip()
         
         old_lines_count = func_end - func_start
         
@@ -1336,6 +1557,46 @@ class FileModifier:
                 message=f"Error replacing import: {e}",
             )
     
+    
+    def _reindent_if_needed(self, code: str, target_indent: int) -> str:
+        """Checks if code starts with 0 indent. If so, shifts it to target_indent. Otherwise returns as is."""
+        lines = code.splitlines(keepends=True)
+        
+        if not lines:
+            return code
+        
+        # Find the first non-empty line
+        first_non_empty_idx = None
+        for i, line in enumerate(lines):
+            if line.strip():
+                first_non_empty_idx = i
+                break
+        
+        if first_non_empty_idx is None:
+            # All lines are empty
+            return code
+        
+        first_line = lines[first_non_empty_idx]
+        current_indent = len(first_line) - len(first_line.lstrip())
+        
+        # If indentation is 0, shift ALL lines by target_indent spaces
+        if current_indent == 0:
+            result_lines = []
+            indent_str = ' ' * target_indent
+            
+            for line in lines:
+                if line.strip():
+                    # Prepend target_indent spaces
+                    result_lines.append(indent_str + line)
+                else:
+                    # Keep empty lines as is
+                    result_lines.append(line)
+            
+            return ''.join(result_lines)
+        
+        # If indentation > 0, return code exactly as is
+        return code
+    
     def _patch_method(
         self,
         existing_content: str,
@@ -1428,8 +1689,7 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                # FIX 1: Use _normalize_code_for_insertion instead of _normalize_and_indent_code
-                formatted_code = self._normalize_code_for_insertion(code, body_indent)
+                formatted_code = code.expandtabs(4).rstrip()
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -1570,8 +1830,11 @@ class FileModifier:
             # No context line (e.g. empty method or default pos), use method body base indent
             body_indent = body_base_indent
         
-        # FIX 3: Use _normalize_code_for_insertion instead of _normalize_and_indent_code
-        formatted_code = self._normalize_code_for_insertion(code, body_indent)
+        # FIX 3: CRITICAL FIX: ALWAYS skip normalization for "insert inside" modes
+        # The code should be inserted AS-IS with its original indentation.
+        # SyntaxChecker will fix any indentation issues during validation.
+        # This prevents the "First Line Stripped" problem from corrupting code.
+        formatted_code = code.expandtabs(4).rstrip()
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -1587,6 +1850,14 @@ class FileModifier:
         insert_content = prefix + formatted_code + '\n'
         lines.insert(absolute_insert_line, insert_content)
         new_content = ''.join(lines)
+        
+        # Store inserted block info for SyntaxChecker
+        FileModifier._last_inserted_block = {
+            "start_line": absolute_insert_line,
+            "end_line": absolute_insert_line + len(formatted_code.splitlines()),
+            "code": formatted_code,
+            "target_indent": body_indent
+        }
         
         new_content = self._validate_and_fix_syntax(new_content)
         
@@ -1916,8 +2187,13 @@ class FileModifier:
                     insert_line = method_start
                     break
         
-        # Форматируем код с правильным отступом
-        formatted_code = self._normalize_code_for_insertion(code, body_indent)
+        # CRITICAL FIX: Skip normalization for "insert in class" mode
+        # Insert code AS-IS to prevent indentation corruption
+        formatted_code = code.expandtabs(4).rstrip()
+        # Add proper indentation only if code has no leading whitespace
+        if formatted_code and not formatted_code[0].isspace():
+            formatted_code = ' ' * body_indent + formatted_code
+        
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
         
@@ -2020,9 +2296,13 @@ class FileModifier:
                 message=f"Pattern '{replace_pattern}' not found in class '{target_class}'",
             )
         
-        # Заменяем строку
-        old_line = lines[target_line_idx]
-        formatted_code = self._normalize_code_for_insertion(code, body_indent)
+        # CRITICAL FIX: Skip normalization for "replace in class" mode
+        # Insert code AS-IS to prevent indentation corruption
+        formatted_code = code.expandtabs(4).rstrip()
+        # Add proper indentation only if code has no leading whitespace
+        if formatted_code and not formatted_code[0].isspace():
+            formatted_code = ' ' * body_indent + formatted_code
+        
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
         
@@ -2056,12 +2336,23 @@ class FileModifier:
         """
         Finds a multi-line pattern within a range of source lines. 
         Robust to whitespace and quote differences.
+        
+        Uses multiple strategies:
+        1. Single-line substring match
+        2. Multi-line exact match (normalized)
+        3. Multi-line fuzzy match (substring per line)
+        4. Joined pattern search (pattern as single string in joined source)
         """
         def normalize(s: str) -> str:
             # Replace non-breaking spaces and unify quotes
             s = s.replace('\xa0', ' ').replace('"', "'")
             # Collapse whitespace
             return ' '.join(s.split())
+        
+        def normalize_aggressive(s: str) -> str:
+            # Even more aggressive: remove ALL whitespace for comparison
+            s = s.replace('\xa0', '').replace('"', "'").replace("'", '')
+            return ''.join(s.split())
 
         # 1. Prepare pattern
         pattern_lines = [normalize(line) for line in pattern.splitlines() if line.strip()]
@@ -2072,28 +2363,68 @@ class FileModifier:
         # 2. Case 1: Single-line pattern
         if len(pattern_lines) == 1:
             target = pattern_lines[0]
+            target_aggressive = normalize_aggressive(pattern)
+            
             for i in range(start_idx, end_idx):
                 if i < len(source_lines):
-                    # Check if normalized pattern is in normalized source line
-                    if target in normalize(source_lines[i]):
+                    source_norm = normalize(source_lines[i])
+                    # Try substring match first
+                    if target in source_norm:
+                        return (i, i + 1)
+                    # Try aggressive match (ignoring all whitespace)
+                    source_aggressive = normalize_aggressive(source_lines[i])
+                    if target_aggressive in source_aggressive:
                         return (i, i + 1)
             return (None, None)
         
-        # 3. Case 2: Multi-line pattern
+        # 3. Case 2: Multi-line pattern - try exact match first
         for i in range(start_idx, end_idx - len(pattern_lines) + 1):
-            # Check if slice matches
             match = True
             for j, p_line in enumerate(pattern_lines):
                 if i + j >= len(source_lines):
                     match = False
                     break
                 s_line = normalize(source_lines[i + j])
-                if s_line != p_line:  # Exact match required for multi-line blocks structure
+                if s_line != p_line:
                     match = False
                     break
             
             if match:
                 return (i, i + len(pattern_lines))
+        
+        # 4. Case 3: Multi-line fuzzy match (substring per line)
+        for i in range(start_idx, end_idx - len(pattern_lines) + 1):
+            match = True
+            for j, p_line in enumerate(pattern_lines):
+                if i + j >= len(source_lines):
+                    match = False
+                    break
+                s_line = normalize(source_lines[i + j])
+                # Use substring match instead of exact match
+                if p_line not in s_line and s_line not in p_line:
+                    match = False
+                    break
+            
+            if match:
+                return (i, i + len(pattern_lines))
+        
+        # 5. Case 4: Joined pattern search
+        # Join pattern lines into single string and search in joined source
+        pattern_joined = ' '.join(pattern_lines)
+        pattern_joined_aggressive = normalize_aggressive(pattern)
+        
+        for i in range(start_idx, end_idx):
+            # Try joining a window of source lines
+            for window_size in range(1, min(len(pattern_lines) + 2, end_idx - i + 1)):
+                if i + window_size > len(source_lines):
+                    break
+                source_window = ' '.join(normalize(source_lines[i + k]) for k in range(window_size))
+                if pattern_joined in source_window:
+                    return (i, i + window_size)
+                # Try aggressive match
+                source_window_aggressive = ''.join(normalize_aggressive(source_lines[i + k]) for k in range(window_size))
+                if pattern_joined_aggressive in source_window_aggressive:
+                    return (i, i + window_size)
         
         return (None, None)
     
@@ -2160,6 +2491,23 @@ class FileModifier:
         # Используем _find_multiline_match для поиска паттерна
         match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
         
+        # Fallback: search for comment pattern with exact unique match
+        if match_start is None and replace_pattern.strip().startswith('#'):
+            comment_pattern = replace_pattern.strip()
+            matches = []
+            for i in range(method_start, method_end):
+                if i < len(lines):
+                    line_stripped = lines[i].strip()
+                    # Exact match: the stripped line must equal the comment pattern exactly
+                    if line_stripped == comment_pattern:
+                        matches.append(i)
+            
+            # Only use if exactly one unique match found
+            if len(matches) == 1:
+                match_start = matches[0]
+                match_end = matches[0] + 1
+                logger.debug(f"Found unique comment anchor '{comment_pattern}' at line {match_start + 1}")
+        
         # Check if match_start is None
         if match_start is None:
             target_name = f"{target_class}.{target_method}" if target_class else target_method
@@ -2173,8 +2521,10 @@ class FileModifier:
         old_line = lines[match_start]
         line_indent = len(old_line) - len(old_line.lstrip())
         
-        # Normalize new code
-        formatted_code = self._normalize_code_for_insertion(code, line_indent)
+        # CRITICAL FIX: ALWAYS skip normalization for "replace inside" modes
+        # The code should be inserted AS-IS with its original indentation.
+        # SyntaxChecker will fix any indentation issues during validation.
+        formatted_code = code.expandtabs(4).rstrip()
         
         # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):
@@ -2189,6 +2539,14 @@ class FileModifier:
             new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         
         new_content = ''.join(new_lines)
+        
+        # Store inserted block info for SyntaxChecker
+        FileModifier._last_inserted_block = {
+            "start_line": match_start,
+            "end_line": match_start + len(formatted_code.splitlines()),
+            "code": formatted_code,
+            "target_indent": line_indent
+        }
         
         return ModifyResult(
             success=True,
@@ -2226,7 +2584,8 @@ class FileModifier:
             insert_before=instruction.insert_before,
             replace_pattern=instruction.replace_pattern,
             preserve_imports=instruction.preserve_imports,
-            auto_format=instruction.auto_format
+            auto_format=instruction.auto_format,
+            skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
         )
         
         return self._patch_method(existing_content, patch_instruction)
@@ -2258,7 +2617,8 @@ class FileModifier:
             target_class=None,              # Класса нет
             replace_pattern=instruction.replace_pattern,
             preserve_imports=instruction.preserve_imports,
-            auto_format=instruction.auto_format
+            auto_format=instruction.auto_format,
+            skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
         )
 
         return self._replace_in_method(existing_content, replace_instruction)
@@ -2826,7 +3186,8 @@ class FileModifier:
 
     def _validate_and_fix_syntax(self, content: str) -> str:
         """
-        Проверяет синтаксис через Tree-sitter.
+        Проверяет синтаксис через Tree-sitter и пытается исправить.
+        Передаёт информацию о вставленном блоке в SyntaxChecker.
         """
         ts_parser = _get_tree_sitter_parser()
         if not ts_parser:
@@ -2834,6 +3195,8 @@ class FileModifier:
             
         result = ts_parser.parse(content)
         if not result.has_errors:
+            # Clear inserted block info on success
+            FileModifier._last_inserted_block = None
             return content
             
         # Код невалиден — пробуем исправить
@@ -2849,7 +3212,14 @@ class FileModifier:
                 project_python_path=self.project_python_path
             )
             
+            # Pass inserted block info to checker
+            if FileModifier._last_inserted_block:
+                checker.set_inserted_block_info(FileModifier._last_inserted_block)
+            
             fix_result = checker.check_python(content, auto_fix=True)
+            
+            # Clear inserted block info after use
+            FileModifier._last_inserted_block = None
             
             if fix_result.was_auto_fixed and fix_result.fixed_content:
                 # Проверяем что исправление валидно
@@ -2864,6 +3234,8 @@ class FileModifier:
         except Exception as e:
             logger.warning(f"Auto-fix failed: {e}")
         
+        # Clear inserted block info on failure
+        FileModifier._last_inserted_block = None
         return content
 
     def _is_declaration_line(self, stripped_line: str) -> bool:

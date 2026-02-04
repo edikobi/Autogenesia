@@ -104,6 +104,14 @@ def _build_feedback_handling_block() -> str:
     parts.append("  • Your new instruction must be COMPLETE")
     parts.append("  • Include ALL details: file paths, signatures, logic")
     parts.append("  • Code Generator starts FRESH — no memory of previous attempt")
+   # добавил
+    parts.append("│                                                            │")
+    parts.append("│ For SYNTAX ERRORS (indentation, brackets, colons):          │")
+    parts.append("│ In your new instruction, explicitly ADD:                    │")
+    parts.append("│ **Syntactic Correctness:** Ensure the generated code has    │")
+    parts.append("│ perfect indentation, matching brackets, and valid Python    │")
+    parts.append("│ syntax before submission.                                   │")
+    parts.append("└" + "─" * 58 + "┘")
     parts.append("")
     
 # === RESOLUTION CONTINUITY ===

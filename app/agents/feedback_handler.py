@@ -54,6 +54,9 @@ class StagingErrorType(Enum):
     INVALID_MODE = "invalid_mode"
     PARSER_UNAVAILABLE = "parser_unavailable"
     
+    # Syntax validation errors
+    SYNTAX_VALIDATION_FAILED = "syntax_validation_failed"
+    
     INVALID_CODE_FORMAT = "invalid_code_format"
 
     # Generic fallback
@@ -117,13 +120,18 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "solution": "1. Use REPLACE_FILE mode to replace entire file content. 2. This is a system issue, not instruction issue.",
             "mode_hint": "Use REPLACE_FILE as fallback",
         },
+        StagingErrorType.SYNTAX_VALIDATION_FAILED: {
+            "description": "The applied code change breaks the file's syntax structure, making classes/methods unparseable.",
+            "cause": "Common causes: 1) Wrong indentation level (Python is indent-sensitive). 2) Incomplete code block (missing closing brackets, quotes, or colons). 3) Previous code block in the same file already broke syntax, causing cascading failures. 4) Code was inserted at wrong position breaking existing structure.",
+            "solution": "1. CHECK INDENTATION: Ensure code uses correct indentation (4 spaces for Python). Method bodies must be indented relative to class. 2. CHECK COMPLETENESS: Verify all brackets (), [], {} are balanced. Check all strings are properly closed. 3. CHECK PREVIOUS BLOCKS: If multiple blocks target same file, earlier block may have broken syntax. Fix that block first. 4. USE read_file TOOL: Read the current file content to see exact structure before modification. 5. SIMPLIFY: If complex insertion fails, try REPLACE_METHOD or REPLACE_CLASS to replace entire unit.",
+            "mode_hint": "Check indentation (4 spaces), ensure code is complete, consider REPLACE_METHOD instead of INSERT",
+        },
         StagingErrorType.INVALID_CODE_FORMAT: {
             "description": "Code block for ADD_NEW_FUNCTION must start with 'def' or 'async def'.",
             "cause": "Code doesn't start with function definition or has syntax error.",
             "solution": "1. Ensure code starts with 'def function_name():' or 'async def function_name():'. 2. Check for syntax errors. 3. Provide complete function definition.",
             "mode_hint": "ADD_NEW_FUNCTION requires a complete function definition",
         },
-                
         StagingErrorType.UNKNOWN: {
             "description": "An unexpected staging error occurred.",
             "cause": "Unknown cause.",
