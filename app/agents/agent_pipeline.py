@@ -3278,15 +3278,27 @@ Remember: You can override the validator if you believe the critique is incorrec
     async def _stage_code_blocks(self, code_blocks: List[ParsedCodeBlock]) -> List[Dict[str, Any]]:
         """
         Stage code blocks to VFS with atomic rollback on failure.
+        
+        IMPROVED: After each block is applied, validates the file structure using tree-sitter.
+        If the structure is broken, attempts repair with reindent + autopep8.
+        If repair fails, the block is rejected but other blocks continue processing.
         """
         errors = []
         applied_backups = []  # List of (file_path, original_change_obj)
+        
+        # Lazy import tree-sitter parser
+        from app.services.tree_sitter_parser import FaultTolerantParser
+        try:
+            ts_parser = FaultTolerantParser()
+        except Exception:
+            ts_parser = None
         
         for block in code_blocks:
             try:
                 # 1. Backup state (store the PendingChange object or None)
                 current_change = self.vfs.get_change(block.file_path)
-                applied_backups.append((block.file_path, current_change))
+                backup_content = self.vfs.read_file(block.file_path)
+                applied_backups.append((block.file_path, current_change, backup_content))
                 
                 # 2. Read content (from VFS or empty if new)
                 existing_content = self.vfs.read_file(block.file_path) or ""
@@ -3294,24 +3306,115 @@ Remember: You can override the validator if you believe the critique is incorrec
                 # 3. Apply modification
                 result = self.file_modifier.apply_code_block(existing_content, block)
                 
-                if result.success:
-                    # Stage the change
-                    self.vfs.stage_change(block.file_path, result.new_content)
+                if result.success and result.new_content:
+                    # === TREE-SITTER VALIDATION AFTER APPLY ===
+                    structure_valid = True
+                    repair_attempted = False
+                    final_content = result.new_content
+                    
+                    if ts_parser and block.file_path.endswith('.py'):
+                        try:
+                            parse_result = ts_parser.parse(result.new_content)
+                            
+                            # Check for critical structural errors
+                            if parse_result.has_errors:
+                                critical_error = False
+                                error_details = []
+                                
+                                for error in parse_result.errors[:3]:
+                                    error_str = str(error).lower()
+                                    if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected', 'error']):
+                                        critical_error = True
+                                        error_details.append(str(error))
+                                
+                                # Also check if target class/method is still parseable
+                                if block.target_class:
+                                    if parse_result.get_class(block.target_class) is None:
+                                        critical_error = True
+                                        error_details.append(f"Class '{block.target_class}' no longer parseable")
+                                
+                                if critical_error:
+                                    structure_valid = False
+                                    repair_attempted = True
+                                    logger.warning(f"Tree-sitter detected structural errors in {block.file_path}: {error_details[:2]}")
+                                    
+                                    # === ATTEMPT REPAIR: reindent + autopep8 ===
+                                    repaired_content = self._attempt_structure_repair(result.new_content)
+                                    
+                                    if repaired_content:
+                                        # Verify repair worked
+                                        repair_parse = ts_parser.parse(repaired_content)
+                                        still_broken = False
+                                        
+                                        if repair_parse.has_errors:
+                                            for error in repair_parse.errors[:3]:
+                                                error_str = str(error).lower()
+                                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                    still_broken = True
+                                                    break
+                                        
+                                        if block.target_class and not still_broken:
+                                            if repair_parse.get_class(block.target_class) is None:
+                                                still_broken = True
+                                        
+                                        if not still_broken:
+                                            logger.info(f"Structure repair succeeded for {block.file_path}")
+                                            final_content = repaired_content
+                                            structure_valid = True
+                                        else:
+                                            logger.warning(f"Structure repair failed for {block.file_path}")
+                                    else:
+                                        logger.warning(f"Structure repair returned None for {block.file_path}")
+                                        
+                        except Exception as e:
+                            logger.debug(f"Tree-sitter validation skipped: {e}")
+                    
+                    if structure_valid:
+                        # Stage the change
+                        self.vfs.stage_change(block.file_path, final_content)
+                        if repair_attempted:
+                            logger.info(f"Staged (after repair): {block.file_path} ({block.mode})")
+                        else:
+                            logger.info(f"Staged: {block.file_path} ({block.mode})")
+                    else:
+                        # Structure broken and repair failed - reject this block
+                        from app.agents.feedback_handler import StagingErrorType
+                        
+                        error_dict = block.to_dict()
+                        error_dict.update({
+                            "error": f"Code block breaks file structure. Repair with reindent+autopep8 failed.",
+                            "error_type": StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                            "code_preview": block.code[:100] if block.code else None,
+                            "full_code": block.code,
+                        })
+                        errors.append(error_dict)
+                        
+                        # Restore backup for this file
+                        if backup_content is not None:
+                            self.vfs.stage_change(block.file_path, backup_content)
+                        else:
+                            self.vfs.unstage(block.file_path)
+                        
+                        logger.warning(f"Rejected block for {block.file_path}: structure validation failed")
+                        # Continue to next block - don't stop processing
+                        continue
+                        
+                elif result.success:
+                    # Success but no new_content (edge case)
+                    self.vfs.stage_change(block.file_path, result.new_content or existing_content)
                     logger.info(f"Staged: {block.file_path} ({block.mode})")
                 else:
-                    # Create error dict with ALL available info from block using to_dict()
-                    # This ensures target_attribute, replace_pattern, and full code are included
+                    # Apply failed
                     error_dict = block.to_dict()
                     error_dict.update({
                         "error": result.message,
                         "error_type": getattr(result, "error_type", None),
                         "code_preview": block.code[:100] if block.code else None,
-                        "full_code": block.code,  # Alias for clarity
+                        "full_code": block.code,
                     })
                     
                     errors.append(error_dict)
                     
-                    # Log with logger.warning including ALL details
                     logger.warning(
                         f"Failed to apply block to {block.file_path}: {result.message} | "
                         f"mode={block.mode}, target_class={block.target_class}, "
@@ -3319,38 +3422,104 @@ Remember: You can override the validator if you believe the critique is incorrec
                     )
                     
             except Exception as e:
-                # In the except block, also include block details using to_dict()
                 error_dict = block.to_dict()
                 error_dict.update({
                     "error": str(e),
                     "error_type": None,
                     "code_preview": block.code[:100] if block.code else None,
-                    "full_code": block.code,  # Alias for clarity
+                    "full_code": block.code,
                 })
                 
                 errors.append(error_dict)
                 logger.error(f"Error staging {block.file_path}: {e}")
         
-        # 4. Rollback if any errors occurred
-        if errors:
-            logger.info(f"Staging failed with {len(errors)} errors. Rolling back {len(applied_backups)} file operations.")
-            
-            for path, original_change in reversed(applied_backups):
-                # Restore previous state
-                if original_change:
-                    # Restore previous pending change
-                    # stage_change preserves original_content if file is already staged,
-                    # so we just need to restore the new_content and change_type
-                    self.vfs.stage_change(
-                        path, 
-                        original_change.new_content, 
-                        original_change.change_type
-                    )
-                else:
-                    # File was not staged before this batch -> unstage it
-                    self.vfs.unstage(path)
+        # Note: We no longer do full rollback on errors - each block is handled independently
+        # This allows successful blocks to be staged even if some fail
                     
         return errors
+    
+    def _attempt_structure_repair(self, content: str) -> Optional[str]:
+        """
+        Attempts to repair Python file structure using reindent followed by autopep8.
+        
+        Process:
+        1. Run reindent (Python standard library) via subprocess
+        2. Run autopep8 with all indentation error codes
+        3. Return repaired content or None if repair failed
+        """
+        import subprocess
+        import tempfile
+        import os
+        
+        if not content or not content.strip():
+            return None
+        
+        # Determine Python path
+        python_path = getattr(self, 'project_python_path', None) or 'python'
+        
+        current_content = content
+        
+        # === STEP 1: Run reindent ===
+        try:
+            # reindent is a standard library script, run via subprocess
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+                f.write(current_content)
+                temp_path = f.name
+            
+            try:
+                # Run reindent with --nobackup to modify in place
+                result = subprocess.run(
+                    [python_path, '-m', 'reindent', '--nobackup', temp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0:
+                    with open(temp_path, 'r', encoding='utf-8') as f:
+                        current_content = f.read()
+                    logger.debug("reindent completed successfully")
+                else:
+                    logger.debug(f"reindent failed: {result.stderr}")
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                    
+        except subprocess.TimeoutExpired:
+            logger.debug("reindent timed out")
+        except Exception as e:
+            logger.debug(f"reindent failed: {e}")
+        
+        # === STEP 2: Run autopep8 with all indentation codes ===
+        try:
+            # E1xx = indentation errors, E2xx = whitespace, E3xx = blank lines
+            # W1xx = indentation warnings, W2xx = whitespace warnings
+            # Focus on indentation: E101, E111, E112, E113, E114, E115, E116, E117, E121-E131, W191
+            indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
+            
+            result = subprocess.run(
+                [python_path, '-m', 'autopep8', '--select=' + indent_codes, '-'],
+                input=current_content,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                current_content = result.stdout
+                logger.debug("autopep8 indentation fix completed successfully")
+            else:
+                logger.debug(f"autopep8 failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            logger.debug("autopep8 timed out")
+        except Exception as e:
+            logger.debug(f"autopep8 failed: {e}")
+        
+        # Return repaired content (may be same as input if repairs failed)
+        return current_content if current_content != content else current_content
     
     # ========================================================================
     # INTERNAL: VALIDATION

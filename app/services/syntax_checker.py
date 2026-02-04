@@ -1335,7 +1335,14 @@ class SyntaxChecker:
         return ''.join(new_lines)
     
     def _run_autopep8_indent_only(self, code: str) -> Optional[str]:
-        """Run autopep8 with conservative indent-only fixes."""
+        """
+        Run autopep8 with comprehensive indent-only fixes.
+        
+        Includes ALL indentation-related error codes:
+        - E1xx: Indentation errors
+        - E121-E131: Continuation line indentation
+        - W191: Indentation contains tabs
+        """
         import subprocess
         
         # Build base args based on project_python_path
@@ -1344,11 +1351,32 @@ class SyntaxChecker:
         else:
             base_args = ['autopep8', '--max-line-length', str(self.max_line_length)]
         
-        # Conservative indent-only fixes (E1xx = indentation, W1xx = indentation warnings)
+        # Comprehensive indentation error codes
+        indent_codes = (
+            'E101,'  # indentation contains mixed spaces and tabs
+            'E111,'  # indentation is not a multiple of four
+            'E112,'  # expected an indented block
+            'E113,'  # unexpected indentation
+            'E114,'  # indentation is not a multiple of four (comment)
+            'E115,'  # expected an indented block (comment)
+            'E116,'  # unexpected indentation (comment)
+            'E117,'  # over-indented
+            'E121,'  # continuation line under-indented for hanging indent
+            'E122,'  # continuation line missing indentation or outdented
+            'E123,'  # closing bracket does not match indentation of opening bracket\'s line
+            'E124,'  # closing bracket does not match visual indentation
+            'E125,'  # continuation line with same indent as next logical line
+            'E126,'  # continuation line over-indented for hanging indent
+            'E127,'  # continuation line over-indented for visual indent
+            'E128,'  # continuation line under-indented for visual indent
+            'E129,'  # visually indented line with same indent as next logical line
+            'E131,'  # continuation line unaligned for hanging indent
+            'W191'   # indentation contains tabs
+        )
+        
         try:
-            args = base_args + ['--select=E1,W1', '-']
             result = subprocess.run(
-                args,
+                base_args + ['--select=' + indent_codes, '-'],
                 input=code,
                 capture_output=True,
                 text=True,
@@ -1356,17 +1384,18 @@ class SyntaxChecker:
             )
             
             if result.returncode == 0 and result.stdout:
+                logger.debug(f"autopep8 indent-only fix applied successfully ({len(result.stdout)} chars)")
                 return result.stdout
             else:
                 if result.stderr:
-                    logger.debug(f"autopep8 indent-only returned non-zero: {result.stderr}")
+                    logger.debug(f"autopep8 indent-only fix failed: {result.stderr}")
                 return None
                 
         except subprocess.TimeoutExpired:
-            logger.warning("autopep8 indent-only timed out")
+            logger.debug("autopep8 indent-only fix timed out")
             return None
         except Exception as e:
-            logger.debug(f"autopep8 indent-only failed: {e}")
+            logger.debug(f"autopep8 indent-only fix error: {e}")
             return None
     
     
