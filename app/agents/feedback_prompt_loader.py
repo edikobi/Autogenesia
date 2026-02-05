@@ -111,6 +111,11 @@ def _build_feedback_handling_block() -> str:
     parts.append("│ **Syntactic Correctness:** Ensure the generated code has    │")
     parts.append("│ perfect indentation, matching brackets, and valid Python    │")
     parts.append("│ syntax before submission.                                   │")
+    parts.append("│                                                            │")
+    parts.append("│ For MISSING IMPORTS (e.g., 'some_module.py' Module 'module'  │")
+    parts.append("│ not found): First, verify the needed package exists. If      │")
+    parts.append("│ missing, use the install_dependency tool to add it, then     │")
+    parts.append("│ retry.                                                        │")
     parts.append("└" + "─" * 58 + "┘")
     parts.append("")
     

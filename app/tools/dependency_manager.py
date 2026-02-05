@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Set, Tuple
+import ast
 from enum import Enum
 from importlib.metadata import packages_distributions
 
@@ -726,6 +727,225 @@ class DependencyManager:
             skipped=skipped,
             results=results,
         )
+
+    def scan_and_install_all_dependencies(
+        self,
+        directory: Optional[Path] = None,
+        recursive: bool = True,
+    ) -> BulkInstallResult:
+        """Scans all Python files in directory, extracts imports via AST, and installs missing packages. Called after any validation error to ensure all dependencies are available."""
+        import ast
+        from typing import Set
+        
+        # 1. Set scan_dir
+        scan_dir = directory if directory else self.project_root
+        
+        # 2. Create empty set for all imports
+        all_imports: Set[str] = set()
+        
+        # 3. Define file pattern
+        pattern = "**/*.py" if recursive else "*.py"
+        
+        # 4. Iterate over all Python files
+        for file_path in scan_dir.glob(pattern):
+            # Skip hidden directories and common exclusions
+            path_parts = file_path.parts
+            skip = False
+            for part in path_parts:
+                if part.startswith('.') or part in ('__pycache__', 'venv', '.venv', 'node_modules', 'build', 'dist'):
+                    skip = True
+                    break
+            
+            if skip:
+                continue
+            
+            # Read file content with error handling
+            try:
+                content = file_path.read_text(encoding='utf-8')
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(f"Failed to read {file_path}: {e}")
+                continue
+            
+            # Parse with AST
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                logger.debug(f"Skipped {file_path}: syntax error")
+                continue
+            
+            # Walk AST nodes
+            for node in ast.walk(tree):
+                # Handle ast.Import nodes
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        # Add top-level module name
+                        module_name = alias.name.split('.')[0]
+                        all_imports.add(module_name)
+                
+                # Handle ast.ImportFrom nodes
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level == 0 and node.module:
+                        # Add top-level module name
+                        module_name = node.module.split('.')[0]
+                        all_imports.add(module_name)
+        
+        # 5. Create set for missing modules
+        missing_modules: Set[str] = set()
+        
+        # 6. For each import, check if it's missing
+        for import_name in all_imports:
+            # Skip stdlib
+            if self.is_stdlib(import_name):
+                continue
+            
+            # Skip blocked
+            if self.is_blocked(import_name):
+                continue
+            
+            # Resolve package name
+            package_name = self.resolve_package_name(import_name)
+            
+            # Skip if already installed
+            if self.is_installed(package_name):
+                continue
+            
+            # Add to missing
+            missing_modules.add(import_name)
+        
+        # 7. If no missing modules, return empty result
+        if not missing_modules:
+            return BulkInstallResult(total=0, successful=0, failed=0, skipped=0)
+        
+        # 8. Log info
+        logger.info(f"Auto-installing {len(missing_modules)} missing packages from project scan: {missing_modules}")
+        
+        # 9. Initialize results
+        results: List[InstallationResult] = []
+        successful = 0
+        failed = 0
+        skipped = 0
+        
+        # 10. For each missing module, install
+        for module in missing_modules:
+            result = self.install_from_import(module)
+            results.append(result)
+            
+            if result.status == InstallResult.SUCCESS:
+                successful += 1
+            elif result.status == InstallResult.FAILED:
+                failed += 1
+            else:
+                skipped += 1
+        
+        # 11. Return result
+        return BulkInstallResult(
+            total=len(missing_modules),
+            successful=successful,
+            failed=failed,
+            skipped=skipped,
+            results=results
+        )
+
+    def install_from_requirements(self, requirements_path: Optional[Path] = None) -> BulkInstallResult:
+        """
+        Reads requirements.txt and installs any missing packages before validation.
+        
+        Args:
+            requirements_path: Path to requirements file. Defaults to project_root/requirements.txt
+            
+        Returns:
+            BulkInstallResult with installation statistics
+        """
+        if requirements_path is None:
+            requirements_path = self.project_root / "requirements.txt"
+        
+        if not requirements_path.exists():
+            logger.debug(f"No requirements.txt found at {requirements_path}")
+            return BulkInstallResult(total=0, successful=0, failed=0, skipped=0)
+        
+        try:
+            content = requirements_path.read_text(encoding='utf-8')
+        except (FileNotFoundError, UnicodeDecodeError) as e:
+            logger.warning(f"Failed to read requirements.txt: {e}")
+            return BulkInstallResult(total=0, successful=0, failed=0, skipped=0)
+        
+        # Parse requirements
+        packages_to_check: List[str] = []
+        for line in content.splitlines():
+            line = line.strip()
+            
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+            
+            # Skip editable installs and URLs
+            if line.startswith('-e') or line.startswith('git+') or line.startswith('http'):
+                continue
+            
+            # Extract package name from various formats:
+            # package==1.0.0, package>=1.0, package[extra], package
+            package_name = line
+            
+            # Remove version specifiers
+            for sep in ['==', '>=', '<=', '!=', '~=', '<', '>']:
+                if sep in package_name:
+                    package_name = package_name.split(sep)[0]
+                    break
+            
+            # Remove extras like [dev], [test]
+            if '[' in package_name:
+                package_name = package_name.split('[')[0]
+            
+            package_name = package_name.strip()
+            
+            if package_name and not self.is_stdlib(package_name):
+                packages_to_check.append(package_name)
+        
+        if not packages_to_check:
+            logger.debug("No packages to install from requirements.txt")
+            return BulkInstallResult(total=0, successful=0, failed=0, skipped=0)
+        
+        # Check which packages are missing
+        missing_packages: List[str] = []
+        for pkg in packages_to_check:
+            # Resolve import name to pip name
+            pip_name = self.resolve_package_name(pkg)
+            if not self.is_installed(pip_name) and not self.is_installed(pkg):
+                missing_packages.append(pkg)
+        
+        if not missing_packages:
+            logger.info(f"All {len(packages_to_check)} packages from requirements.txt are already installed")
+            return BulkInstallResult(total=len(packages_to_check), successful=0, failed=0, skipped=len(packages_to_check))
+        
+        logger.info(f"Installing {len(missing_packages)} missing packages from requirements.txt: {missing_packages}")
+        
+        # Install missing packages
+        results: List[InstallationResult] = []
+        successful = 0
+        failed = 0
+        skipped = 0
+        
+        for pkg in missing_packages:
+            result = self.install_from_import(pkg)
+            results.append(result)
+            
+            if result.status == InstallResult.SUCCESS:
+                successful += 1
+                logger.info(f"✅ Installed from requirements.txt: {pkg}")
+            elif result.status == InstallResult.FAILED:
+                failed += 1
+                logger.warning(f"❌ Failed to install from requirements.txt: {pkg} - {result.message}")
+            else:
+                skipped += 1
+        
+        return BulkInstallResult(
+            total=len(missing_packages),
+            successful=successful,
+            failed=failed,
+            skipped=skipped,
+            results=results,
+        )
+
 
 # ============================================================================
 # TOOL FUNCTIONS (для вызова из ToolExecutor)

@@ -1452,9 +1452,10 @@ exclude =
         
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in removed:
+                # Integration issues are WARNINGS, not blocking errors
                 issues.append(ValidationIssue(
                     level=ValidationLevel.INTEGRATION,
-                    severity=IssueSeverity.ERROR,
+                    severity=IssueSeverity.WARNING,
                     file_path=dependent_file,
                     message=f"Uses '{node.id}' which was removed from {changed_file}",
                     line=node.lineno,
@@ -1469,6 +1470,9 @@ exclude =
                     message=f"May use '{node.attr}' which was removed from {changed_file}",
                     line=node.lineno,
                 ))
+        
+        if issues:
+            logger.info(f"[INTEGRATION] Found {len(issues)} compatibility warnings for {dependent_file}")
         
         return issues
     

@@ -1171,6 +1171,32 @@ class AgentPipeline:
                     
                     continue
                 
+# ==============================================================
+                # STEP 3.5: PRE-INSTALL REQUIREMENTS.TXT DEPENDENCIES
+                # ==============================================================
+                try:
+                    req_install_result = self.dependency_manager.install_from_requirements()
+                    if req_install_result.successful > 0:
+                        self._notify_stage(
+                            "DEPENDENCY",
+                            f"✅ Установлено {req_install_result.successful} пакетов из requirements.txt",
+                            {
+                                "source": "requirements.txt",
+                                "installed": req_install_result.successful,
+                                "failed": req_install_result.failed,
+                                "skipped": req_install_result.skipped,
+                            }
+                        )
+                        logger.info(f"Pre-installed {req_install_result.successful} packages from requirements.txt")
+                    elif req_install_result.failed > 0:
+                        self._notify_stage(
+                            "DEPENDENCY",
+                            f"⚠️ Не удалось установить {req_install_result.failed} пакетов из requirements.txt",
+                            {"failed": req_install_result.failed}
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to pre-install from requirements.txt: {e}")
+                
                 # ==============================================================
                 # STEP 4: TECHNICAL VALIDATION (without tests/runtime)
                 # ==============================================================
@@ -1240,6 +1266,47 @@ class AgentPipeline:
                     "error_count": validation_result.error_count,
                     "warning_count": validation_result.warning_count,
                 })
+                
+                # ============================================================
+                # STEP 4.1: Auto-install missing dependencies (after ANY error)
+                # ============================================================
+                if validation_result.error_count > 0:
+                    self._notify_stage(
+                        "DEPENDENCY", 
+                        "Сканирование проекта на недостающие зависимости...", 
+                        None
+                    )
+                    
+                    try:
+                        # Scan ALL project files and install missing dependencies
+                        install_result = self.dependency_manager.scan_and_install_all_dependencies()
+                        
+                        if install_result and install_result.successful > 0:
+                            self._notify_stage(
+                                "DEPENDENCY", 
+                                f"✅ Установлено {install_result.successful} пакетов", 
+                                {"installed": install_result.successful, "failed": install_result.failed}
+                            )
+                            # Re-validate after installation
+                            validation_result = await self._run_validation(include_tests=False)
+                            if self._on_validation:
+                                self._on_validation(validation_result.to_dict())
+                            result.validation_result = validation_result.to_dict()
+                            
+                            # Update notification with new results
+                            self._notify_stage("VALIDATION", "Результаты после установки зависимостей", {
+                                "success": validation_result.success,
+                                "error_count": validation_result.error_count,
+                                "warning_count": validation_result.warning_count,
+                            })
+                        elif install_result and install_result.failed > 0:
+                            self._notify_stage(
+                                "DEPENDENCY", 
+                                f"⚠️ Не удалось установить {install_result.failed} пакетов", 
+                                {"failed": install_result.failed}
+                            )
+                    except Exception as e:
+                        logger.error(f"Dependency scan failed: {e}")
                 
                 # ==============================================================
                 # STEP 4.5: CHECK FOR BLOCKING ERRORS
@@ -1719,7 +1786,6 @@ class AgentPipeline:
             trace.complete(success=False, status="error", duration_ms=result.duration_ms)
             
         return result
-    
         
     async def _validation_loop(
         self,
@@ -1857,18 +1923,34 @@ class AgentPipeline:
                 ]
                 
                 if import_issues:
-                    self._notify_stage("DEPENDENCY", f"Установка {len(import_issues)} зависимостей...", None)
-                    import_issues_dict = [issue.to_dict() for issue in import_issues]
+                    self._notify_stage(
+                        "DEPENDENCY", 
+                        f"Обнаружено {len(import_issues)} проблем с импортами. Сканирование проекта...", 
+                        None
+                    )
                     
                     try:
-                        install_result = self.dependency_manager.install_missing_from_validation(import_issues_dict)
+                        # Scan ALL project files and install missing dependencies
+                        install_result = self.dependency_manager.scan_and_install_all_dependencies()
+                        
                         if install_result and install_result.successful > 0:
-                            # Re-validate
+                            self._notify_stage(
+                                "DEPENDENCY", 
+                                f"✅ Установлено {install_result.successful} пакетов", 
+                                {"installed": install_result.successful, "failed": install_result.failed}
+                            )
+                            # Re-validate after installation
                             validation_result = await self._run_validation(include_tests=False)
                             if self._on_validation:
                                 self._on_validation(validation_result.to_dict())
+                        elif install_result and install_result.failed > 0:
+                            self._notify_stage(
+                                "DEPENDENCY", 
+                                f"⚠️ Не удалось установить {install_result.failed} пакетов", 
+                                {"failed": install_result.failed}
+                            )
                     except Exception as e:
-                        logger.error(f"Dependency install failed: {e}")
+                        logger.error(f"Dependency scan and install failed: {e}")
             
             # ============================================================
             # STEP C.2: Handle blocking validation errors
@@ -2384,6 +2466,32 @@ Please analyze this feedback and provide a revised instruction.""",
                 self.feedback_loop.feedback_handler.clear_feedback()
                 
                 continue
+            
+# ==============================================================
+                # STEP 3.5: PRE-INSTALL REQUIREMENTS.TXT DEPENDENCIES
+                # ==============================================================
+                try:
+                    req_install_result = self.dependency_manager.install_from_requirements()
+                    if req_install_result.successful > 0:
+                        self._notify_stage(
+                            "DEPENDENCY",
+                            f"✅ Установлено {req_install_result.successful} пакетов из requirements.txt",
+                            {
+                                "source": "requirements.txt",
+                                "installed": req_install_result.successful,
+                                "failed": req_install_result.failed,
+                                "skipped": req_install_result.skipped,
+                            }
+                        )
+                        logger.info(f"Pre-installed {req_install_result.successful} packages from requirements.txt")
+                    elif req_install_result.failed > 0:
+                        self._notify_stage(
+                            "DEPENDENCY",
+                            f"⚠️ Не удалось установить {req_install_result.failed} пакетов из requirements.txt",
+                            {"failed": req_install_result.failed}
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to pre-install from requirements.txt: {e}")
             
             # ==============================================================
             # STEP 4: TECHNICAL VALIDATION (without tests/runtime)

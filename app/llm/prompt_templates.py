@@ -902,6 +902,9 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('You must strictly leverage the `install_dependency` tool to **materialize** every required library.')
     prompt_parts.append('The system considers the environment "invalid" until you have physically executed the installation for each package.')
     
+    return "\n".join(prompt_parts)
+
+    
 def _build_adaptive_block_gpt5_2_codex() -> str:
     """
     Build adaptive block specifically for GPT-5.2 Codex (Dec 2025).

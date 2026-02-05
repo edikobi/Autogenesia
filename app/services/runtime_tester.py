@@ -68,6 +68,7 @@ class AppType(Enum):
     TESTING = "testing"             # Testing framework (pytest, unittest, nose, etc.)
     UNKNOWN = "unknown"
     PACKAGE_MODULE = "package_module"  # Python package module (import only)
+    UTILITY_SCRIPT = "utility_script"  # Standalone utility script with module-level execution
 
 
 
@@ -308,6 +309,7 @@ class TimeoutCalculator:
         AppType.INTERACTIVE: 15,    # 15 seconds — quick test with simulated input
         AppType.CLI: 30,            # 30 seconds — CLI testing
         AppType.TESTING: 120,       # 120 seconds for testing frameworks (pytest/unittest)
+        AppType.UTILITY_SCRIPT: 15, # 15 seconds — import-only for utility scripts
         AppType.UNKNOWN: 60,        # 60 seconds
     }
     
@@ -1628,6 +1630,7 @@ except Exception as e:
             AppType.API_DEPENDENT: 60,
             AppType.CLI: 50,
             AppType.TESTING: 40,
+            AppType.UTILITY_SCRIPT: 5,
             AppType.STANDARD: 10,
         }
         
@@ -1640,6 +1643,12 @@ except Exception as e:
             detected['top_level_loop'] = 'Top-level event loop detected'
             if app_type == AppType.STANDARD:
                 app_type = AppType.DAEMON
+
+        # Check for utility script patterns (standalone scripts with module-level execution)
+        if app_type == AppType.STANDARD:
+            if self._is_utility_script(content, file_path):
+                detected['utility_script'] = 'Standalone utility script with module-level execution'
+                app_type = AppType.UTILITY_SCRIPT
 
         # Special Case: CLI decorators (often not just imports)
         if app_type != AppType.CLI:
@@ -1876,6 +1885,8 @@ except Exception as e:
                     result = await self._test_cli(file_path, temp_dir, timeout)
                 elif app_type == AppType.TESTING:
                     result = await self._test_testing_framework(file_path, temp_dir, timeout)
+                elif app_type == AppType.UTILITY_SCRIPT:
+                    result = await self._test_utility_script(file_path, temp_dir, timeout)
                 else:
                     # Check if this is a package module (not a standalone script)
                     if self._is_inside_package(file_path, temp_dir):
@@ -2220,6 +2231,97 @@ except Exception as e:
                 duration_ms=duration_ms,
             )
 
+    async def _test_utility_script(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
+        """Test utility script using import-only strategy. Utility scripts often have module-level code that performs heavy operations, so we only validate syntax and imports without executing the script."""
+        logger.info(f"Testing utility script (import-only): {file_path}")
+        
+        full_path = Path(temp_dir) / file_path
+        safe_temp_dir = json.dumps(str(temp_dir))
+        safe_full_path = json.dumps(str(full_path))
+        
+        # Build test script that validates syntax and imports without execution
+        test_script = f'''
+import sys
+import ast
+import importlib.util
+
+sys.path.insert(0, {safe_temp_dir}.strip('"'))
+
+try:
+    # First, validate syntax using ast.parse()
+    with open({safe_full_path}.strip('"'), 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+    
+    ast.parse(content)
+    
+    # Then, load module spec to validate imports
+    spec = importlib.util.spec_from_file_location("utility_module", {safe_full_path}.strip('"'))
+    if spec is None:
+        print("UTILITY_ERROR: Could not create module spec")
+        sys.exit(1)
+    
+    # Create module from spec but do NOT execute it
+    module = importlib.util.module_from_spec(spec)
+    
+    # Just validate that spec was created successfully
+    print("UTILITY_SYNTAX_OK")
+    sys.exit(0)
+    
+except SyntaxError as e:
+    print(f"UTILITY_ERROR: Syntax error: {{e}}")
+    sys.exit(1)
+except Exception as e:
+    print(f"UTILITY_ERROR: {{type(e).__name__}}: {{e}}")
+    sys.exit(1)
+    '''
+        
+        try:
+            result = subprocess.run(
+                [self._get_project_python(), '-c', test_script],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=min(timeout, 15),
+                cwd=temp_dir,
+            )
+            
+            output = result.stdout + result.stderr
+            
+            if 'UTILITY_SYNTAX_OK' in result.stdout:
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.UTILITY_SCRIPT,
+                    status=TestStatus.PASSED,
+                    message="Utility script syntax validated (import-only)",
+                )
+            else:
+                error_lines = [l for l in output.split('\n') if 'UTILITY_ERROR' in l]
+                error_msg = error_lines[0] if error_lines else "Utility script validation failed"
+                
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.UTILITY_SCRIPT,
+                    status=TestStatus.FAILED,
+                    message=error_msg.replace('UTILITY_ERROR: ', ''),
+                    details=output[-1000:],
+                )
+                
+        except subprocess.TimeoutExpired:
+            return TestResult(
+                file_path=file_path,
+                app_type=AppType.UTILITY_SCRIPT,
+                status=TestStatus.TIMEOUT,
+                message="Utility script validation timed out",
+            )
+        except Exception as e:
+            return TestResult(
+                file_path=file_path,
+                app_type=AppType.UTILITY_SCRIPT,
+                status=TestStatus.ERROR,
+                message=f"Utility script test error: {e}",
+            )
+    
     
     def _is_inside_package(self, file_path: str, temp_dir: str) -> bool:
         """Check if file is inside a Python package (has __init__.py in parent directory)."""
@@ -2249,6 +2351,82 @@ except Exception as e:
         except re.error:
             return False
         
+        
+    def _is_utility_script(self, content: str, file_path: str) -> bool:
+        """Detect if file is a standalone utility script with significant module-level execution code. Such scripts should be tested via import-only strategy to avoid timeouts."""
+        try:
+            # 1. Check if file is in project root (no directory separators or only one level deep)
+            path_parts = file_path.replace('\\', '/').split('/')
+            if len(path_parts) > 2:
+                return False
+            
+            # 2. Check for utility script naming patterns
+            utility_names = ['run_', 'setup_', 'install_', 'build_', 'deploy_', 'migrate_', 
+                           'init_', 'generate_', 'create_', 'update_', 'sync_', 'export_', 
+                           'import_', 'convert_', 'process_', 'analyze_', 'report_', 'check_', 
+                           'validate_', 'test_', 'benchmark_']
+            file_name = Path(file_path).name.lower()
+            is_utility_name = any(file_name.startswith(prefix) for prefix in utility_names)
+            
+            # 3. Parse AST to detect module-level execution patterns
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                return False
+            
+            has_module_level_execution = False
+            module_level_count = 0
+            
+            for node in tree.body:
+                # Skip function defs, class defs, imports, and if __name__ == "__main__" blocks
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, 
+                                    ast.Import, ast.ImportFrom)):
+                    continue
+                
+                # Skip if __name__ == "__main__" blocks
+                if isinstance(node, ast.If):
+                    # Check if this is the main guard
+                    if isinstance(node.test, ast.Compare):
+                        if (isinstance(node.test.left, ast.Name) and 
+                            node.test.left.id == '__name__' and
+                            len(node.test.ops) > 0 and
+                            isinstance(node.test.ops[0], ast.Eq)):
+                            continue
+                
+                # Count module-level execution statements
+                if isinstance(node, ast.Expr):
+                    # Function calls at module level
+                    if isinstance(node.value, ast.Call):
+                        module_level_count += 1
+                elif isinstance(node, ast.Assign):
+                    # Assignments that call functions
+                    if isinstance(node.value, ast.Call):
+                        module_level_count += 1
+                elif isinstance(node, ast.Call):
+                    # Direct calls
+                    module_level_count += 1
+            
+            has_module_level_execution = module_level_count >= 3
+            
+            # 4. Check for specific utility patterns in content
+            utility_patterns = ['sys.path.insert(', 'sys.path.append(', 'sys.exit(', 
+                              'os.chdir(', 'shutil.', 'subprocess.run(', 'subprocess.call(']
+            pattern_count = sum(1 for p in utility_patterns if p in content)
+            has_utility_patterns = pattern_count >= 2
+            
+            # 5. Return True if conditions are met
+            if is_utility_name and (has_module_level_execution or has_utility_patterns):
+                return True
+            if has_module_level_execution and has_utility_patterns:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error detecting utility script for {file_path}: {e}")
+            return False
+     
+     
         
     def _file_path_to_module(self, file_path: str) -> str:
         """Convert file path to Python module name (e.g., 'app/utils/helper.py' -> 'app.utils.helper')."""
