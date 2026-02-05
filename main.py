@@ -3706,6 +3706,7 @@ async def handle_ask_mode(query: str):
                     project_dir=state.project_dir or ".",
                     index=project_index,
                     project_map=project_map,
+                    is_new_project=state.is_new_project,
                 )
             else:
                 orchestrator_result = await orchestrate(

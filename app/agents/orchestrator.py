@@ -29,7 +29,9 @@ from app.llm.api_client import call_llm_with_tools, call_llm
 # Prompts (centralized)
 from app.llm.prompt_templates import (
     format_orchestrator_prompt_ask,
+    format_orchestrator_prompt_ask_agent,
     format_orchestrator_prompt_new_project,
+    format_orchestrator_prompt_new_project_agent,
     MAX_WEB_SEARCH_CALLS,
 )
 
@@ -1632,6 +1634,7 @@ async def orchestrate_agent(
     index: Dict[str, Any],
     project_map: str = "",
     tool_executor: Optional[Callable] = None,
+    is_new_project: bool = False,
 ) -> OrchestratorResult:
     """
     Agent Mode orchestration with automatic context compression.
@@ -1642,11 +1645,21 @@ async def orchestrate_agent(
     3. Claude cache optimization (preserved from base orchestrate)
     4. Batch file token limit for Opus 4.5 and DeepSeek Reasoner
     5. NEW: Chunks passed as separate message, removed after first tool call
+    6. NEW: is_new_project parameter to use correct prompt formatter based on project type
     
     Use this function for Agent Mode. For Ask Mode, use orchestrate() directly.
     
     Args:
-        Same as orchestrate()
+        user_query: User's question
+        selected_chunks: Chunks from Pre-filter
+        compact_index: Compact index string
+        history: Conversation history (already processed by HistoryManager)
+        orchestrator_model: Model to use (from Router) - ALSO USED FOR ADAPTIVE BLOCKS!
+        project_dir: Path to project root
+        index: Full project index (for search_code tool)
+        project_map: Project map string with file descriptions
+        tool_executor: Optional custom tool executor function
+        is_new_project: Whether this is a new project (no existing code)
         
     Returns:
         OrchestratorResult with analysis, instruction, and tool calls
@@ -1668,15 +1681,24 @@ async def orchestrate_agent(
     chunks_context = _format_chunks_for_context(selected_chunks)
     
     # NOTE: selected_chunks NOT used in system prompt anymore
-    prompts = format_orchestrator_prompt_ask(
-        user_query=user_query,
-        selected_chunks="",  # DEPRECATED - chunks passed as separate message
-        compact_index=compact_index,
-        project_map=project_map,
-        remaining_web_searches=tool_usage.get_remaining_web_searches(),
-        orchestrator_model_id=orchestrator_model,
-        conversation_summary=conversation_summary
-    )
+    # Choose prompt based on project type
+    if is_new_project:
+        prompts = format_orchestrator_prompt_new_project_agent(
+            user_query=user_query,
+            remaining_web_searches=tool_usage.get_remaining_web_searches(),
+            orchestrator_model_id=orchestrator_model,
+            conversation_summary=conversation_summary,
+        )
+    else:
+        prompts = format_orchestrator_prompt_ask_agent(
+            user_query=user_query,
+            selected_chunks="",  # DEPRECATED - chunks passed as separate message
+            compact_index=compact_index,
+            project_map=project_map,
+            remaining_web_searches=tool_usage.get_remaining_web_searches(),
+            orchestrator_model_id=orchestrator_model,
+            conversation_summary=conversation_summary
+        )
     
     messages = [{"role": "system", "content": prompts["system"]}]
     messages.extend(history)
@@ -1885,15 +1907,23 @@ async def orchestrate_agent(
                 })
             
             # Update system prompt with remaining searches
-            updated_prompts = format_orchestrator_prompt_ask(
-                user_query=user_query,
-                selected_chunks="",  # DEPRECATED
-                compact_index=compact_index,
-                project_map=project_map,
-                remaining_web_searches=tool_usage.get_remaining_web_searches(),
-                orchestrator_model_id=orchestrator_model,
-                conversation_summary=conversation_summary
-            )
+            if is_new_project:
+                updated_prompts = format_orchestrator_prompt_new_project_agent(
+                    user_query=user_query,
+                    remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                    orchestrator_model_id=orchestrator_model,
+                    conversation_summary=conversation_summary,
+                )
+            else:
+                updated_prompts = format_orchestrator_prompt_ask_agent(
+                    user_query=user_query,
+                    selected_chunks="",  # DEPRECATED
+                    compact_index=compact_index,
+                    project_map=project_map,
+                    remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                    orchestrator_model_id=orchestrator_model,
+                    conversation_summary=conversation_summary
+                )
             messages[0]["content"] = updated_prompts["system"]
             
         except Exception as e:
