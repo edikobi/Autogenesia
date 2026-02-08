@@ -49,7 +49,7 @@ MAX_WEB_SEARCH_CALLS = 3  # Maximum web_search calls per session
 # Exact model IDs from config/settings.py for reference:
 # - Claude Opus 4.5:    "anthropic/claude-opus-4.5"
 # - Claude Sonnet 4.5:  "anthropic/claude-sonnet-4.5"
-# - GPT-5.1 Codex Max:  "openai/gpt-5.2-codex"
+# - GPT-5.2 Codex Max:  "openai/gpt-5.2-codex"
 # - Gemini 3.0 Pro:     "google/gemini-3-pro-preview"
 # - Gemini 2.0 Flash:   "google/gemini-2.0-flash-001"
 # - DeepSeek Reasoner:  "deepseek-reasoner"
@@ -65,7 +65,6 @@ MODEL_COGNITIVE_TYPES: Dict[str, str] = {
     
     # Executor - ориентированы на выполнение задач
     # Стандартные промпты работают хорошо, дополнения не нужны
-    Config.MODEL_GPT_5_2_Codex: "executor", # "openai/gpt-5.2-codex"
     Config.MODEL_GEMINI_3_PRO: "executor", # "google/gemini-3-pro-preview"
     
     # Reasoner - модели с цепочкой рассуждений
@@ -113,7 +112,7 @@ def get_model_cognitive_type(model_id: str) -> str:
             return "executor"
     
     # === GPT FAMILY → executor ===
-    # Matches: gpt-5.1-codex-max, openai/gpt-5.2-codex, etc.
+    # Matches: gpt-5.1-codex-max, openai/gpt-5.2-codex, etc. (надо удалить нах)
     if "gpt" in model_lower:
         # GPT-5.x and Codex models are executors
         if "5" in model_lower or "codex" in model_lower:
@@ -4015,18 +4014,21 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("• Position: end of class / after imports / etc.")
     prompt_parts.append("**Marker:** `def existing_method(` (unique string to find location)")
     prompt_parts.append("")
-    prompt_parts.append("**Current signature:** (for MODIFY only)")
-    prompt_parts.append("`def method_name(self, param: str) -> bool`")
     prompt_parts.append("")
-    prompt_parts.append("**New signature:** (if changed, otherwise 'Unchanged')")
-    prompt_parts.append("`def method_name(self, param: str, new_param: int = 0) -> bool`")
+    prompt_parts.append("**ARCHITECTURAL RESPONSIBILITIES:**")
+    prompt_parts.append("- Define system architecture and component interfaces")
+    prompt_parts.append("- Specify integration points and data contracts between files")
+    prompt_parts.append("- Ensure consistency across the codebase through clear technical specifications")
     prompt_parts.append("")
-    prompt_parts.append("**Implementation Strategy:**")
-    prompt_parts.append("0. [Confirm target location: inside `Class` or at `Module Level`]") # добавил, так как ИИ заебал путать методы и функции
-    prompt_parts.append("1. [Step-by-step logic description]")
-    prompt_parts.append("2. [Mention specific variable names/types to use]")
-    prompt_parts.append("3. [Describe external function calls with signatures]")
-    prompt_parts.append("Avoid \"The Human Compiler\" trap: Provide logic and contracts, not the full implementation body.")
+
+    prompt_parts.append("**Technical Specification:**")
+    prompt_parts.append("- Confirm target location: [Class Body | Method Body | Module Level] (as specified in Structural Scope)")
+    prompt_parts.append("- Define architectural approach and component relationships")
+    prompt_parts.append("- Specify public API elements - class names, method signatures, critical variables for cross-file consistency")
+    prompt_parts.append("- Describe data flow and integration points with existing codebase")
+    prompt_parts.append("")
+    
+
     prompt_parts.append("")
     prompt_parts.append("**Error handling:**")
     prompt_parts.append("• Catch: [ExceptionType]")
@@ -4045,7 +4047,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("The pipeline relies on exact string matching with this specific list to function.")
     prompt_parts.append("")
     prompt_parts.append("• **MODIFY_METHOD** — Operations on logic nested within a defined Structure or Class.")
-    prompt_parts.append(" Code Generator: writes new implementation based on your strategy")
+    prompt_parts.append("Code Generator: implements complete method based on architectural specification")
     prompt_parts.append("  Use when: changing logic significantly, refactoring method")
     prompt_parts.append("")
     prompt_parts.append("• **PATCH_METHOD** — Insert lines INSIDE existing method")
