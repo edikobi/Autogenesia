@@ -4022,12 +4022,20 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
 
     prompt_parts.append("**Technical Specification:**")
+   # добавил это, чтобы Оркестратор давал нормальные инструкции, а не писал код сам
+    prompt_parts.append("")
+    prompt_parts.append("**Context Bridging Guide:**")
+    prompt_parts.append("For cross-file dependencies: specify exact import paths, class/function names, and their expected interfaces.")
+    prompt_parts.append("For intra-file references: provide precise location markers and structural relationships.")
+    prompt_parts.append("For external contracts: define input/output types, expected behaviors, and error handling patterns.")
+    prompt_parts.append("This information forms the architectural bridge between your system-wide knowledge and the Code Generator's implementation focus.")
+    prompt_parts.append("")
+    
     prompt_parts.append("- Confirm target location: [Class Body | Method Body | Module Level] (as specified in Structural Scope)")
     prompt_parts.append("- Define architectural approach and component relationships")
     prompt_parts.append("- Specify public API elements - class names, method signatures, critical variables for cross-file consistency")
     prompt_parts.append("- Describe data flow and integration points with existing codebase")
     prompt_parts.append("")
-    
 
     prompt_parts.append("")
     prompt_parts.append("**Error handling:**")
@@ -4239,7 +4247,8 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     prompt_parts.append('🎯 STRATEGIC EXECUTION PRINCIPLES')
     prompt_parts.append('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
     prompt_parts.append('')
-    prompt_parts.append('CRITICAL: Your primary goal is CONTEXTUAL INTEGRITY.')
+    prompt_parts.append('CRITICAL: Your primary responsibility is providing COMPREHENSIVE CONTEXT for seamless code integration.')
+    prompt_parts.append('Bridge the "context gap" by supplying all necessary specifications for the Code Generator to produce code that fits perfectly into the existing architecture.')    
     prompt_parts.append('Your instruction must contain all necessary information for the Generator to write valid code without needing to see the rest of the project.')
     prompt_parts.append('')
     prompt_parts.append('DECISION-MAKING FRAMEWORK:')
@@ -4631,10 +4640,10 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('  [... focused content ...]')
     prompt_parts.append('~~~')
     prompt_parts.append('')
-    prompt_parts.append('WHEN FIXING YOUR OWN FILE:')
-    prompt_parts.append('• Use `MODE: REPLACE_FILE` — complete rewrite')
-    prompt_parts.append('• Do NOT assume previous content is usable')
-    prompt_parts.append('• Provide FULL new content')
+    prompt_parts.append('WHEN SPECIFYING A NEW FILE:')
+    prompt_parts.append('• Use `MODE: REPLACE_FILE` — specify complete file structure')
+    prompt_parts.append('• Provide comprehensive technical specifications')
+    prompt_parts.append('• Define all required components and their relationships')
     prompt_parts.append('')    
     
     
@@ -4856,7 +4865,7 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('')
     prompt_parts.append('**File Instructions:**')
     prompt_parts.append('[Use ### FILE: blocks for each file, with CREATE operation]')
-    prompt_parts.append('💡 *Reminder: Always provide the COMPLETE file content to ensure the project is fully functional.*')
+    prompt_parts.append('💡 *Reminder: Focus on architectural specifications, not code implementation. Provide clear technical requirements for each file.*')
     prompt_parts.append('')
       
     
