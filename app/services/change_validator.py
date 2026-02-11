@@ -583,6 +583,127 @@ class ChangeValidator:
         
         return imports
     
+    def _count_parent_calls(self, node: ast.AST) -> int:
+        """Counts the number of .parent attribute accesses in an AST node chain."""
+        count = 0
+        while isinstance(node, ast.Attribute):
+            if node.attr == 'parent':
+                count += 1
+            node = node.value
+        return count
+    
+    def _extract_sys_path_additions(self, content: str, source_file: str) -> List[str]:
+        """Extracts paths added via sys.path.insert() or sys.path.append() patterns. Returns list of relative paths that would be added to sys.path."""
+        paths = []
+        
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return paths
+        
+        try:
+            for node in ast.walk(tree):
+                # Look for ast.Expr nodes containing ast.Call
+                if not isinstance(node, ast.Expr):
+                    continue
+                
+                if not isinstance(node.value, ast.Call):
+                    continue
+                
+                call = node.value
+                
+                # Check if this is a call to sys.path.insert() or sys.path.append()
+                if not isinstance(call.func, ast.Attribute):
+                    continue
+                
+                attr = call.func
+                if attr.attr not in ('insert', 'append'):
+                    continue
+                
+                # Check if the value is sys.path
+                if not isinstance(attr.value, ast.Attribute):
+                    continue
+                
+                if attr.value.attr != 'path':
+                    continue
+                
+                if not isinstance(attr.value.value, ast.Name):
+                    continue
+                
+                if attr.value.value.id != 'sys':
+                    continue
+                
+                # Now we have a sys.path.insert() or sys.path.append() call
+                # Extract the path argument
+                
+                # For insert: sys.path.insert(0, path_arg)
+                # For append: sys.path.append(path_arg)
+                
+                if attr.attr == 'insert' and len(call.args) >= 2:
+                    path_arg = call.args[1]
+                elif attr.attr == 'append' and len(call.args) >= 1:
+                    path_arg = call.args[0]
+                else:
+                    continue
+                
+                # Try to extract the path from the argument
+                extracted_path = self._extract_path_from_call(path_arg, source_file)
+                if extracted_path:
+                    paths.append(extracted_path)
+        
+        except Exception as e:
+            logger.warning(f"Error extracting sys.path additions from {source_file}: {e}")
+            return []
+        
+        return paths
+    
+    
+    def _extract_path_from_call(self, node: ast.AST, source_file: str) -> Optional[str]:
+        """Extracts a path from an AST node representing a path expression."""
+        # Handle str(Path(__file__).parent) or str(Path(__file__).parent.parent)
+        if isinstance(node, ast.Call):
+            # Check if it's str(...)
+            if isinstance(node.func, ast.Name) and node.func.id == 'str':
+                if len(node.args) >= 1:
+                    return self._extract_path_from_call(node.args[0], source_file)
+        
+        # Handle Path(__file__).parent or Path(__file__).parent.parent
+        if isinstance(node, ast.Attribute):
+            if node.attr == 'parent':
+                # Count how many .parent calls we have
+                parent_count = self._count_parent_calls(node)
+                
+                # Get the base (should be Path(__file__))
+                base = node
+                for _ in range(parent_count):
+                    if isinstance(base, ast.Attribute):
+                        base = base.value
+                
+                # Check if base is Path(__file__)
+                if isinstance(base, ast.Call):
+                    if isinstance(base.func, ast.Name) and base.func.id == 'Path':
+                        if len(base.args) >= 1:
+                            arg = base.args[0]
+                            if isinstance(arg, ast.Name) and arg.id == '__file__':
+                                # We have Path(__file__).parent[.parent...]
+                                source_path = Path(source_file)
+                                
+                                # Go up parent_count levels
+                                result_path = source_path.parent
+                                for _ in range(parent_count - 1):
+                                    result_path = result_path.parent
+                                
+                                # Convert to relative path from project root
+                                try:
+                                    rel_path = result_path.relative_to(self.vfs.project_root)
+                                    # Return as string with forward slashes
+                                    return str(rel_path).replace('\\', '/')
+                                except ValueError:
+                                    # Path is outside project root
+                                    return None
+        
+        return None
+    
     def _validate_import(
         self,
         imp: Dict[str, Any],
@@ -677,6 +798,18 @@ class ChangeValidator:
         # 3. pip packages
         if self.config.check_pip_packages and self._is_pip_package(top_level):
             return True, None
+        
+        # 4. NEW: Check sys.path additions
+        if source_content:
+            added_paths = self._extract_sys_path_additions(source_content, source_file)
+            for added_path in added_paths:
+                # Build full module path by prepending added path
+                full_module = f"{added_path}.{module}".replace('/', '.')
+                
+                # Check if this combined path exists as a project module
+                if self._is_project_module(full_module):
+                    logger.debug(f"Import '{module}' resolved via sys.path addition '{added_path}'")
+                    return True, None
         
         return False, f"Module '{module}' not found"
     

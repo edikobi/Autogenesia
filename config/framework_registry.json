@@ -133,7 +133,9 @@
     "questionary": "Questionary prompts",
     "inquirer": "Inquirer prompts",
     "bullet": "Bullet prompts",
-    "simple_term_menu": "Simple terminal menu"
+    "simple_term_menu": "Simple terminal menu",
+    "rich.prompt": "Rich interactive prompts (Prompt.ask, Confirm.ask)",
+    "InquirerPy": "InquirerPy interactive prompts"
   },
   
   "testing": {

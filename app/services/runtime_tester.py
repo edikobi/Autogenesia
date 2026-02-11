@@ -424,15 +424,20 @@ class FrameworkDetector:
                     except re.error as e:
                         self.logger.warning(f"Invalid regex pattern '{pattern_str}' for {framework_key}: {e}")
                 
-                # Store framework pattern
+                # Store framework pattern with ORIGINAL case key
                 self.framework_patterns[framework_key] = (app_type, description, compiled_patterns, weight)
-                self.import_to_framework[framework_key] = framework_key
+                
+                # CRITICAL FIX: Store LOWERCASE key in import_to_framework
+                # because _extract_imports_ast returns lowercase module names
+                framework_key_lower = framework_key.lower()
+                self.import_to_framework[framework_key_lower] = framework_key
                 
                 # Add dotted variants (e.g., 'aiohttp.web' → 'aiohttp')
                 if '.' in framework_key:
                     base = framework_key.split('.')[0]
-                    if base not in self.import_to_framework:
-                        self.import_to_framework[base] = framework_key
+                    base_lower = base.lower()
+                    if base_lower not in self.import_to_framework:
+                        self.import_to_framework[base_lower] = framework_key
         
         self.logger.debug(
             f"Loaded {len(self.framework_patterns)} frameworks with {total_patterns} usage patterns"
@@ -538,7 +543,8 @@ class FrameworkDetector:
         detected, app_type = self._detect_single_file(content, file_path)
         
         # Define strong types that should stop recursion
-        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI}
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI, AppType.INTERACTIVE}
+
         
         # If we found a strong type, return immediately
         if app_type in STRONG_TYPES:
@@ -549,7 +555,7 @@ class FrameworkDetector:
             return detected, app_type
         
         # Extract local imports
-        local_imports = self._extract_local_imports(content)
+        local_imports = self._extract_local_imports(content, file_path)
         
         # Recursively check each local import
         for module_name in local_imports:
@@ -594,8 +600,16 @@ class FrameworkDetector:
         return detected, app_type
     
     
-    def _extract_local_imports(self, content: str) -> Set[str]:
-        """Extract local project imports from Python source, excluding stdlib and pip packages."""
+    def _extract_local_imports(self, content: str, context_file_path: Optional[str] = None) -> Set[str]:
+        """Extract local project imports from Python source, excluding stdlib and pip packages.
+        
+        Args:
+            content: Python source code
+            context_file_path: Path to the file being analyzed (for resolving relative imports)
+        
+        Returns:
+            Set of module names that should be resolved to local files
+        """
         local_imports: Set[str] = set()
         
         # Get stdlib modules
@@ -605,6 +619,15 @@ class FrameworkDetector:
             tree = ast.parse(content)
         except SyntaxError:
             return local_imports
+        
+        # Calculate context directory for relative imports
+        context_dir_parts: List[str] = []
+        if context_file_path:
+            # Normalize path and get directory parts
+            normalized = context_file_path.replace('\\', '/')
+            if '/' in normalized:
+                dir_path = '/'.join(normalized.split('/')[:-1])  # Remove filename
+                context_dir_parts = [p for p in dir_path.split('/') if p]
         
         try:
             for node in ast.walk(tree):
@@ -616,12 +639,34 @@ class FrameworkDetector:
                 
                 elif isinstance(node, ast.ImportFrom):
                     if node.level > 0:
-                        # Relative import
-                        if node.module:
-                            local_imports.add(node.module)
-                        for alias in node.names:
-                            if alias.name and alias.name != '*':
-                                local_imports.add(alias.name)
+                        # Relative import - resolve to absolute path
+                        # node.level indicates how many directories to go up
+                        # e.g., level=1 means current package, level=2 means parent package
+                        
+                        if context_dir_parts:
+                            # Calculate base directory after going up 'level' directories
+                            # level=1: stay in current dir, level=2: go up one, etc.
+                            levels_up = node.level - 1
+                            if levels_up < len(context_dir_parts):
+                                base_parts = context_dir_parts[:len(context_dir_parts) - levels_up] if levels_up > 0 else context_dir_parts
+                                
+                                if node.module:
+                                    # from .submodule import X -> package.submodule
+                                    full_module = '.'.join(base_parts + [node.module])
+                                    local_imports.add(full_module)
+                                else:
+                                    # from . import X -> look for X in current package
+                                    for alias in node.names:
+                                        if alias.name and alias.name != '*':
+                                            full_module = '.'.join(base_parts + [alias.name])
+                                            local_imports.add(full_module)
+                        else:
+                            # No context - add as-is (fallback)
+                            if node.module:
+                                local_imports.add(node.module)
+                            for alias in node.names:
+                                if alias.name and alias.name != '*':
+                                    local_imports.add(alias.name)
                     else:
                         # Absolute import
                         if node.module:
@@ -665,16 +710,25 @@ class FrameworkDetector:
             return None
         
         rel_path = module_name.replace('.', '/')
+        
+        # Build search roots list
         search_roots = []
         
-        if context_file_path:
-            parent_dir = str(Path(context_file_path).parent).replace('\\', '/')
-            if parent_dir == '.':
-                parent_dir = ''
-            search_roots.append(parent_dir)
-        
+        # 1. Add source roots first (includes '' for project root)
         search_roots.extend(self.source_roots)
         
+        # 2. Add context directory for relative imports
+        if context_file_path:
+            # Normalize context path
+            context_path = context_file_path.replace('\\', '/')
+            if '/' in context_path:
+                parent_dir = str(Path(context_path).parent).replace('\\', '/')
+                if parent_dir == '.':
+                    parent_dir = ''
+                if parent_dir and parent_dir not in search_roots:
+                    search_roots.append(parent_dir)
+        
+        # Deduplicate
         unique_roots = []
         seen = set()
         for r in search_roots:
@@ -687,6 +741,9 @@ class FrameworkDetector:
                 base_path = f"{root}/{rel_path}"
             else:
                 base_path = rel_path
+            
+            # CRITICAL: Normalize to POSIX paths for VFS
+            base_path = base_path.replace('\\', '/')
             
             candidates = [f"{base_path}.py", f"{base_path}/__init__.py"]
             for candidate in candidates:
@@ -1300,6 +1357,8 @@ class RuntimeTester:
             'wx': {'DISPLAY': ':99'},
             'turtle': {'DISPLAY': ':99'},
             'dearpygui': {'DISPLAY': ''},
+            'flet': {'FLET_HEADLESS': 'true', 'FLET_FORCE_WEB_VIEW': 'true', 'DISPLAY': ''},
+
         }
         
         TUI_HEADLESS_CONFIG = {
@@ -1324,28 +1383,89 @@ class RuntimeTester:
     
     
     def _detect_gui_framework(self, file_path: str, temp_dir: str) -> Optional[str]:
-        """Detects which GUI/TUI framework is used in the file by analyzing imports."""
+        """Detects which GUI/TUI framework is used in the file or its imports by analyzing imports.
+        
+        Recursively checks imported project modules to find GUI frameworks that may be
+        imported indirectly (e.g., main.py imports gui.main_window which imports PyQt5).
+        """
+        gui_frameworks = {'pygame', 'pyqt5', 'pyqt6', 'pyside2', 'pyside6', 'kivy', 'arcade', 
+                        'pyglet', 'tkinter', 'customtkinter', 'wx', 'turtle', 'dearpygui', 'pyqtgraph', 'flet'}
+        tui_frameworks = {'curses', 'textual', 'rich', 'blessed', 'urwid', 'prompt_toolkit', 
+                        'npyscreen', 'asciimatics'}
+        
+        all_frameworks = gui_frameworks | tui_frameworks
+        visited_files = set()
+        
+        def scan_file_for_framework(rel_path: str) -> Optional[str]:
+            """Scan a single file for GUI framework imports."""
+            if rel_path in visited_files:
+                return None
+            visited_files.add(rel_path)
+            
+            try:
+                full_path = Path(temp_dir) / rel_path
+                if not full_path.exists() or not full_path.is_file():
+                    return None
+                
+                content = full_path.read_text(encoding='utf-8', errors='replace')
+                imports = self._extract_imports_ast(content)
+                
+                # Check for direct framework imports
+                for imp in imports:
+                    imp_lower = imp.lower()
+                    if imp_lower in all_frameworks:
+                        return imp_lower
+                
+                # Check imported project modules recursively
+                for imp in imports:
+                    # Skip standard library and third-party modules
+                    if imp.lower() in all_frameworks:
+                        continue
+                    
+                    # Try to find this import as a project module
+                    possible_paths = [
+                        f"{imp.replace('.', '/')}.py",
+                        f"{imp.replace('.', '/')}/__init__.py",
+                    ]
+                    
+                    for possible_path in possible_paths:
+                        candidate = Path(temp_dir) / possible_path
+                        if candidate.exists():
+                            result = scan_file_for_framework(possible_path)
+                            if result:
+                                return result
+                
+                return None
+            except Exception as e:
+                logger.debug(f"Error scanning {rel_path} for GUI framework: {e}")
+                return None
+        
+        # First, try to detect from the main file
+        result = scan_file_for_framework(file_path)
+        if result:
+            return result
+        
+        # Fallback: scan all Python files in temp_dir for any GUI framework
         try:
-            full_path = Path(temp_dir) / file_path
-            content = full_path.read_text(encoding='utf-8', errors='replace')
-            
-            imports = self._extract_imports_ast(content)
-            
-            gui_frameworks = ['pygame', 'pyqt5', 'pyqt6', 'pyside2', 'pyside6', 'kivy', 'arcade', 
-                            'pyglet', 'tkinter', 'customtkinter', 'wx', 'turtle', 'dearpygui', 'pyqtgraph']
-            tui_frameworks = ['curses', 'textual', 'rich', 'blessed', 'urwid', 'prompt_toolkit', 
-                            'npyscreen', 'asciimatics']
-            
-            all_frameworks = gui_frameworks + tui_frameworks
-            
-            for imp in imports:
-                if imp in all_frameworks:
-                    return imp
-            
-            return None
+            for py_file in Path(temp_dir).rglob('*.py'):
+                rel_path = str(py_file.relative_to(temp_dir))
+                if rel_path in visited_files:
+                    continue
+                
+                try:
+                    content = py_file.read_text(encoding='utf-8', errors='replace')
+                    imports = self._extract_imports_ast(content)
+                    
+                    for imp in imports:
+                        imp_lower = imp.lower()
+                        if imp_lower in all_frameworks:
+                            return imp_lower
+                except Exception:
+                    continue
         except Exception as e:
-            logger.debug(f"Error detecting GUI framework for {file_path}: {e}")
-            return None
+            logger.debug(f"Error in fallback GUI framework scan: {e}")
+        
+        return None
     
     
     async def _test_with_mock_fallback(self, file_path: str, temp_dir: str, app_type: AppType, framework: Optional[str], timeout: int) -> TestResult:
@@ -1629,6 +1749,7 @@ except Exception as e:
             AppType.DAEMON: 65,
             AppType.API_DEPENDENT: 60,
             AppType.CLI: 50,
+            AppType.INTERACTIVE: 55,  # Higher than CLI, lower than DAEMON
             AppType.TESTING: 40,
             AppType.UTILITY_SCRIPT: 5,
             AppType.STANDARD: 10,
@@ -1657,22 +1778,97 @@ except Exception as e:
                 detected['cli_pattern'] = 'CLI decorator detected'
                 app_type = AppType.CLI
         
+        # NEW: Detect interactive input patterns (Prompt.ask, input(), etc.)
+        # These patterns indicate the app waits for user input and will hang during testing
+        if app_type in (AppType.STANDARD, AppType.TUI, AppType.CLI):
+            interactive_patterns = [
+                r'Prompt\.ask\s*\(',           # rich.prompt.Prompt.ask()
+                r'Confirm\.ask\s*\(',          # rich.prompt.Confirm.ask()
+                r'IntPrompt\.ask\s*\(',        # rich.prompt.IntPrompt.ask()
+                r'FloatPrompt\.ask\s*\(',      # rich.prompt.FloatPrompt.ask()
+                r'prompt_toolkit\.prompt\s*\(', # prompt_toolkit.prompt()
+                r'questionary\.\w+\s*\(',      # questionary.select(), questionary.text(), etc.
+                r'inquirer\.\w+\s*\(',         # inquirer.prompt(), inquirer.text(), etc.
+                r'PyInquirer\.\w+\s*\(',       # PyInquirer
+            ]
+            
+            # Check for input() in main guard or at module level (not in function definitions)
+            has_main_guard_input = bool(re.search(
+                r'if\s+__name__\s*==\s*["\']__main__["\']\s*:.*?input\s*\(',
+                content, re.DOTALL
+            ))
+            
+            for pattern in interactive_patterns:
+                if re.search(pattern, content):
+                    detected['interactive_input'] = f'Interactive input pattern detected: {pattern}'
+                    app_type = AppType.INTERACTIVE
+                    break
+            
+            # Also check for input() in main block
+            if app_type != AppType.INTERACTIVE and has_main_guard_input:
+                detected['interactive_input'] = 'input() call detected in __main__ block'
+                app_type = AppType.INTERACTIVE
+        
         # Ensure we don't downgrade from higher priority types
         current_priority = framework_priority.get(app_type, 0)
         
         # Double-check import-based detection as fallback
         imports = self._extract_imports_ast(content)
         for module in imports:
-            if module in self._framework_patterns:
-                pattern_app_type, description = self._framework_patterns[module]
-                pattern_priority = framework_priority.get(pattern_app_type, 0)
-                if pattern_priority > current_priority:
-                    app_type = pattern_app_type
-                    current_priority = pattern_priority
+            # Check all frameworks to see if their name is part of the import
+            # This handles case mismatch (PyQt5 vs pyqt5) and partial matches
+            # e.g. "PyQt5" in "pyqt5.qtwidgets" or "wx" in "wxpython"
+            for fw_name, (fw_type, fw_desc) in self._framework_patterns.items():
+                if fw_name.lower() in module:
+                    pattern_priority = framework_priority.get(fw_type, 0)
+                    if pattern_priority > current_priority:
+                        detected[fw_name] = f"Detected via import: {module}"
+                        app_type = fw_type
+                        current_priority = pattern_priority
+                        # Continue checking to find highest priority match
         
         return detected, app_type
 
 
+
+    def _detect_interactive_patterns(self, content: str) -> bool:
+        """
+        Check if file contains interactive input patterns that would cause it to hang during testing.
+        
+        Detects:
+        - rich.prompt patterns (Prompt.ask, Confirm.ask, IntPrompt.ask)
+        - prompt_toolkit patterns
+        - questionary/inquirer patterns
+        - input() calls in main block
+        
+        Returns:
+            True if interactive patterns detected, False otherwise
+        """
+        interactive_patterns = [
+            r'Prompt\.ask\s*\(',
+            r'Confirm\.ask\s*\(',
+            r'IntPrompt\.ask\s*\(',
+            r'FloatPrompt\.ask\s*\(',
+            r'prompt_toolkit\.prompt\s*\(',
+            r'questionary\.\w+\s*\(',
+            r'inquirer\.\w+\s*\(',
+        ]
+        
+        for pattern in interactive_patterns:
+            try:
+                if re.search(pattern, content):
+                    return True
+            except re.error:
+                continue
+        
+        # Check for input() in main guard
+        try:
+            if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']\s*:.*?input\s*\(', content, re.DOTALL):
+                return True
+        except re.error:
+            pass
+        
+        return False
 
 
     def _detect_transitive_frameworks(self, file_path: str, analysis: ProjectAnalysis) -> AppType:
@@ -1686,7 +1882,7 @@ except Exception as e:
         """
         own_type = self._get_file_app_type(file_path, analysis)
         
-        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI}
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI, AppType.INTERACTIVE}
         
         if own_type in STRONG_TYPES:
             return own_type
@@ -1765,7 +1961,7 @@ except Exception as e:
 
     def _deep_scan_entry_point_frameworks(self, file_path: str) -> AppType:
         """Performs deep recursive scan of all imports from an entry point file to detect long-running frameworks. Unlike _detect_recursive which has depth limit, this scans ALL reachable files."""
-        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON}
+        STRONG_TYPES = {AppType.GUI, AppType.WEB_APP, AppType.TUI, AppType.DAEMON, AppType.CLI, AppType.INTERACTIVE}
         
         visited: Set[str] = set()
         to_visit: List[str] = [file_path]
@@ -1801,7 +1997,7 @@ except Exception as e:
                         logger.info(f"Entry point {file_path} inherits {app_type.value} from {current_path}")
                         break
                     
-                    local_imports = self.framework_detector._extract_local_imports(content)
+                    local_imports = self.framework_detector._extract_local_imports(content, current_path)
                     
                     for module_name in local_imports:
                         resolved_path = self.framework_detector._resolve_import_to_file(module_name, current_path)
@@ -1927,8 +2123,9 @@ except Exception as e:
         """
         Test standard Python script execution.
         
-        Runs the script using runpy.run_path() with proper sys.path configuration.
-        Handles SystemExit and exceptions gracefully.
+        For files inside packages (with relative imports), uses runpy.run_module to execute as __main__
+        while preserving package context.
+        For standalone files, uses runpy.run_path.
         """
         logger.info(f"Testing standard Python script: {file_path}")
         
@@ -1943,11 +2140,11 @@ except Exception as e:
                 duration_ms=0,
             )
         
-        # Build pythonpath_parts (project roots to prepend to sys.path)
-        pythonpath_parts = []
+        # Check if file is inside a package
+        is_package_module = self._is_inside_package(file_path, temp_dir)
         
-        # Add temp_dir as primary root
-        pythonpath_parts.append(temp_dir)
+        # Build pythonpath_parts (project roots to prepend to sys.path)
+        pythonpath_parts = [temp_dir]
         
         # Add src/ if it exists
         src_dir = Path(temp_dir) / 'src'
@@ -1959,30 +2156,62 @@ except Exception as e:
         if app_dir.exists():
             pythonpath_parts.append(str(app_dir))
         
-        # Escape path for Python string
-        safe_full_path = str(full_path).replace('\\', '\\\\').replace('"', '\\"')
-        
-        # Build command to run with proper sys.path configuration
-        # FIX: Do NOT clear sys.path, just prepend project roots to ensure priority
-        # Clearing sys.path removes standard library paths on some systems
-        command_script = f"""
+        if is_package_module:
+            # Convert file path to module name for proper import
+            # e.g., "court_parser/storage/database.py" -> "court_parser.storage.database"
+            module_name = file_path.replace('\\', '/').replace('/', '.').replace('.py', '')
+            # Remove __init__ suffix if present
+            if module_name.endswith('.__init__'):
+                module_name = module_name[:-9]
+            
+            # Use runpy.run_module to execute the module as __main__ within the package context
+            command_script = f"""
 import sys
-import os
 import runpy
 import traceback
 
 # Prepend project roots to sys.path
 project_roots = {json.dumps(pythonpath_parts)}
-for root in reversed(project_roots):  # Add in reverse to maintain priority (first item ends up first)
+for root in reversed(project_roots):
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+module_name = {json.dumps(module_name)}
+
+try:
+    # run_module executes the module as __main__, supporting relative imports
+    runpy.run_module(module_name, run_name='__main__', alter_sys=True)
+    print("RUNTIME_SUCCESS: Execution completed")
+except SystemExit as e:
+    if e.code != 0 and e.code is not None:
+        print(f"RUNTIME_SYSTEM_EXIT: Script exited with code {{e.code}}")
+        sys.exit(e.code)
+    else:
+        print("RUNTIME_SUCCESS: Script exited normally")
+except Exception as e:
+    print(f"RUNTIME_ERROR: {{type(e).__name__}}: {{e}}")
+    traceback.print_exc()
+    sys.exit(1)
+    """
+        else:
+            # Standalone file - use runpy.run_path
+            safe_full_path = str(full_path).replace('\\', '\\\\').replace('"', '\\"')
+            
+            command_script = f"""
+import sys
+import runpy
+import traceback
+
+# Prepend project roots to sys.path
+project_roots = {json.dumps(pythonpath_parts)}
+for root in reversed(project_roots):
     if root not in sys.path:
         sys.path.insert(0, root)
 
 try:
-    # Run the script
     runpy.run_path(r"{safe_full_path}", run_name='__main__')
     print("RUNTIME_SUCCESS: Execution completed")
 except SystemExit as e:
-    # Script called sys.exit() - check if it's an error
     if e.code != 0 and e.code is not None:
         print(f"RUNTIME_SYSTEM_EXIT: Script exited with code {{e.code}}")
         sys.exit(e.code)
@@ -2324,18 +2553,36 @@ except Exception as e:
     
     
     def _is_inside_package(self, file_path: str, temp_dir: str) -> bool:
-        """Check if file is inside a Python package (has __init__.py in parent directory)."""
+        """
+        Check if file is inside a Python package.
+        Returns True if:
+        1. File contains relative imports (from . import ...) - STRONG SIGNAL
+        2. OR File is in a directory with __init__.py (recursive check)
+        """
         try:
             full_path = Path(temp_dir) / file_path
-            parent_dir = full_path.parent
             
-            # Check if parent directory has __init__.py
-            if (parent_dir / "__init__.py").exists():
-                return True
+            # 1. Strong signal: Check content for relative imports
+            try:
+                content = full_path.read_text(encoding='utf-8', errors='replace')
+                # Look for 'from .' or 'from ..' at start of line (allowing for whitespace)
+                if re.search(r'^\s*from\s+(\.|\.\.)', content, re.MULTILINE):
+                    return True
+            except Exception:
+                pass
+
+            # 2. Structure signal: Check for __init__.py in ancestry
+            root_path = Path(temp_dir).resolve()
+            current_dir = full_path.parent.resolve()
             
-            # Also check grandparent for nested packages
-            if (parent_dir.parent / "__init__.py").exists():
-                return True
+            while current_dir != root_path and str(current_dir).startswith(str(root_path)):
+                if (current_dir / "__init__.py").exists():
+                    return True
+                
+                parent = current_dir.parent
+                if parent == current_dir:
+                    break
+                current_dir = parent
             
             return False
         except Exception:
@@ -2362,9 +2609,9 @@ except Exception as e:
             
             # 2. Check for utility script naming patterns
             utility_names = ['run_', 'setup_', 'install_', 'build_', 'deploy_', 'migrate_', 
-                           'init_', 'generate_', 'create_', 'update_', 'sync_', 'export_', 
-                           'import_', 'convert_', 'process_', 'analyze_', 'report_', 'check_', 
-                           'validate_', 'test_', 'benchmark_']
+                        'init_', 'generate_', 'create_', 'update_', 'sync_', 'export_', 
+                        'import_', 'convert_', 'process_', 'analyze_', 'report_', 'check_', 
+                        'validate_', 'test_', 'benchmark_', 'debug_']
             file_name = Path(file_path).name.lower()
             is_utility_name = any(file_name.startswith(prefix) for prefix in utility_names)
             
@@ -2410,7 +2657,7 @@ except Exception as e:
             
             # 4. Check for specific utility patterns in content
             utility_patterns = ['sys.path.insert(', 'sys.path.append(', 'sys.exit(', 
-                              'os.chdir(', 'shutil.', 'subprocess.run(', 'subprocess.call(']
+                            'os.chdir(', 'shutil.', 'subprocess.run(', 'subprocess.call(']
             pattern_count = sum(1 for p in utility_patterns if p in content)
             has_utility_patterns = pattern_count >= 2
             
@@ -2470,8 +2717,80 @@ except Exception as e:
     # ========================================================================
     
     async def _test_gui(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
-        """Test GUI application using standalone script execution in headless mode."""
+        """Test GUI application using direct execution first, then headless mode as fallback.
+        
+        Strategy:
+        1. For entry-point files, try direct execution first to catch import errors
+        2. If import error detected - return FAILED immediately
+        3. If timeout (app started successfully) - continue with headless/mock validation
+        4. If success - return PASSED
+        """
         try:
+            # Step 1: For entry-point files, try direct execution first
+            if self._is_entry_point(file_path):
+                full_path = Path(temp_dir) / file_path
+                
+                # Prepare environment
+                env = os.environ.copy()
+                env['PYTHONPATH'] = temp_dir
+                
+                # Try direct execution with short timeout (enough to catch import errors)
+                try:
+                    result = subprocess.run(
+                        [self._get_project_python(), str(full_path)],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=5,  # Short timeout - just enough for imports
+                        cwd=temp_dir,
+                        env=env,
+                    )
+                    
+                    stderr = result.stderr
+                    
+                    # Check for import errors - these are critical failures
+                    if 'ModuleNotFoundError' in stderr:
+                        match = re.search(r"No module named '([^']+)'", stderr)
+                        module_name = match.group(1) if match else "unknown"
+                        return TestResult(
+                            file_path=file_path,
+                            app_type=AppType.GUI,
+                            status=TestStatus.FAILED,
+                            message=f"Entry point import error: No module named '{module_name}'",
+                            details=stderr[-2000:],
+                        )
+                    
+                    if 'ImportError' in stderr:
+                        error_lines = [line for line in stderr.split('\n') if 'ImportError' in line]
+                        error_msg = error_lines[0] if error_lines else "ImportError occurred"
+                        return TestResult(
+                            file_path=file_path,
+                            app_type=AppType.GUI,
+                            status=TestStatus.FAILED,
+                            message=f"Entry point import error: {error_msg}",
+                            details=stderr[-2000:],
+                        )
+                    
+                    # If exited with code 0 and no import errors - success
+                    if result.returncode == 0:
+                        return TestResult(
+                            file_path=file_path,
+                            app_type=AppType.GUI,
+                            status=TestStatus.PASSED,
+                            message="GUI application executed successfully",
+                            details=result.stdout[-1000:] if result.stdout else "",
+                        )
+                        
+                    # Non-zero exit but no import errors - continue to headless test
+                    # (might be missing display, etc.)
+                    
+                except subprocess.TimeoutExpired:
+                    # Timeout means app started and is running (waiting for events)
+                    # This is actually a success for GUI apps - continue to validate structure
+                    logger.debug(f"GUI entry point {file_path} started successfully (timeout = app running)")
+            
+            # Step 2: Headless test (original logic)
             framework = self._detect_gui_framework(file_path, temp_dir)
             headless_env = self._get_headless_env_for_framework(framework or 'pygame', AppType.GUI)
             
@@ -2527,7 +2846,7 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     sys.exit(1)
-    """
+        """
             
             headless_timeout = min(timeout, 15)
             code, stdout, stderr = await self._run_generated_script(temp_dir, test_content, headless_timeout)
@@ -2550,6 +2869,16 @@ except Exception as e:
                 logger.debug(f"GUI headless test timed out for {file_path}, falling back to mock import")
                 return await self._test_with_mock_fallback(file_path, temp_dir, AppType.GUI, framework, 30)
             else:
+                # Check if headless test also caught import errors
+                if 'ModuleNotFoundError' in output or 'ImportError' in output:
+                    return TestResult(
+                        file_path=file_path,
+                        app_type=AppType.GUI,
+                        status=TestStatus.FAILED,
+                        message="GUI import failed: module not found",
+                        details=output[-2000:]
+                    )
+                
                 return TestResult(
                     file_path=file_path,
                     app_type=AppType.GUI,
@@ -2626,12 +2955,11 @@ except Exception as e:
     
     
     async def _test_tui(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
-        """Test TUI application using standalone script execution with mocked terminal."""
+        """Test TUI application using proper module import for packages."""
         try:
             framework = self._detect_gui_framework(file_path, temp_dir)
             headless_env = self._get_headless_env_for_framework(framework or 'curses', AppType.TUI)
             
-            safe_file_path = json.dumps(file_path)
             safe_temp_dir = json.dumps(str(temp_dir))
             
             # Build environment setup code
@@ -2644,13 +2972,56 @@ except Exception as e:
             curses_mock = ""
             if framework and framework.lower() == 'curses':
                 curses_mock = """
-    # Mock curses module before import
-    from unittest.mock import MagicMock
-    sys.modules['curses'] = MagicMock()
+# Mock curses module before import
+from unittest.mock import MagicMock
+sys.modules['curses'] = MagicMock()
     """
             
-            # Generate standard Python script (not pytest)
-            test_content = f"""
+            # Check if file is inside a package
+            is_package_module = self._is_inside_package(file_path, temp_dir)
+            
+            if is_package_module:
+                # Convert file path to module name for proper import
+                # e.g., "court_parser/cli/app.py" -> "court_parser.cli.app"
+                module_name = file_path.replace('\\', '/').replace('/', '.').replace('.py', '')
+                # Remove __init__ suffix if present
+                if module_name.endswith('.__init__'):
+                    module_name = module_name[:-9]
+                
+                safe_module_name = json.dumps(module_name)
+                
+                test_content = f"""
+import os
+import sys
+
+# Setup headless environment
+{env_setup_code}
+
+{curses_mock}
+
+# Add temp_dir to path FIRST
+sys.path.insert(0, {safe_temp_dir}.strip('"'))
+
+module_name = {safe_module_name}.strip('"')
+
+try:
+    # Use __import__ for proper package resolution
+    __import__(module_name)
+    print("TUI_TEST_PASSED")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"ERROR: {{type(e).__name__}}: {{e}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+    """
+            else:
+                # Standalone file - use spec_from_file_location
+                full_path = Path(temp_dir) / file_path
+                safe_full_path = json.dumps(str(full_path))
+                
+                test_content = f"""
 import os
 import sys
 import importlib.util
@@ -2663,7 +3034,7 @@ import importlib.util
 # Add temp_dir to path
 sys.path.insert(0, {safe_temp_dir}.strip('"'))
 
-file_path = {safe_file_path}.strip('"')
+file_path = {safe_full_path}.strip('"')
 
 try:
     # Import the module using importlib
@@ -2724,23 +3095,52 @@ except Exception as e:
     async def _test_sqlite(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
         """
         Test SQLite operations with temp database.
-        
-        Strategy:
-        1. Monkey-patch sqlite3.connect to redirect to temp DB
-        2. Import module without executing __main__
-        3. Verify tables were created or classes instantiated
+        Supports both standalone scripts and package modules.
         """
         full_path = Path(temp_dir) / file_path
         safe_temp_dir = json.dumps(str(temp_dir))
         safe_full_path = json.dumps(str(full_path))
         
+        is_package = self._is_inside_package(file_path, temp_dir)
+        
+        # Prepare import code based on type
+        # CRITICAL: All lines must have exactly 4 spaces to match try block indentation
+        if is_package:
+            module_name = file_path.replace('\\', '/').replace('/', '.').replace('.py', '')
+            if module_name.endswith('.__init__'):
+                module_name = module_name[:-9]
+            
+            # Each line has exactly 4 spaces indentation
+            import_code = (
+                f"    # Import as package module\n"
+                f"    import importlib\n"
+                f"    __import__('{module_name}')\n"
+                f"    module = sys.modules['{module_name}']"
+            )
+        else:
+            # Each line has exactly 4 spaces indentation
+            import_code = (
+            f"    # Import as standalone file\n"
+            f"    import importlib.util\n"
+            f"    spec = importlib.util.spec_from_file_location('test_module', {safe_full_path}.strip('\"'))\n"
+            f"    module = importlib.util.module_from_spec(spec)\n"
+            f"    spec.loader.exec_module(module)"
+            )
+
         test_script = f'''
 import sys
 import os
 import sqlite3
 import tempfile
+import traceback
 
+# Setup paths
 sys.path.insert(0, {safe_temp_dir}.strip('"'))
+# Add src/app to path if they exist
+if os.path.exists(os.path.join({safe_temp_dir}.strip('"'), 'src')):
+    sys.path.insert(0, os.path.join({safe_temp_dir}.strip('"'), 'src'))
+if os.path.exists(os.path.join({safe_temp_dir}.strip('"'), 'app')):
+    sys.path.insert(0, os.path.join({safe_temp_dir}.strip('"'), 'app'))
 
 # Create unique temp database
 db_path = os.path.join(tempfile.gettempdir(), f'test_{{os.getpid()}}_{{id(object())}}.db')
@@ -2755,35 +3155,25 @@ def patched_connect(database, *args, **kwargs):
 
 sqlite3.connect = patched_connect
 
-import importlib.util
-
 try:
-    # Load module WITHOUT executing __main__ block
-    spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+{import_code}
     
     print("SQL_IMPORT_SUCCESS: Module imported successfully")
     
     # Try to find and instantiate database-related classes
     db_class_names = ['Database', 'DB', 'Manager', 'Storage', 'Repository', 
-                    'CurrencyManager', 'DataManager', 'DBManager', 'Store']
-    found_class = None
-    instance = None
+                    'CurrencyManager', 'DataManager', 'DBManager', 'Store', 'DatabaseManager']
     
     for name in dir(module):
         obj = getattr(module, name)
         if isinstance(obj, type) and not name.startswith('_'):
-            # Check if class name suggests database functionality
             if any(db_name.lower() in name.lower() for db_name in db_class_names):
-                found_class = name
                 try:
-                    # Try to instantiate (this often creates tables)
+                    # Try to instantiate
                     instance = obj()
                     print(f"SQL_INIT_SUCCESS: Instantiated {{name}}")
                     break
                 except TypeError as e:
-                    # Constructor requires arguments - that's OK, import worked
                     print(f"SQL_CLASS_FOUND: {{name}} (requires args: {{e}})")
                     break
                 except Exception as e:
@@ -2792,18 +3182,18 @@ try:
     # Check if database was created
     if os.path.exists(db_path):
         conn = original_connect(db_path)
-        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        tables = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        
-        if tables:
-            print(f"SQL_TABLES: Created {{len(tables)}} table(s): {{', '.join(tables)}}")
+        try:
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = [row[0] for row in cursor.fetchall()]
+            if tables:
+                print(f"SQL_TABLES: Created {{len(tables)}} table(s): {{', '.join(tables)}}")
+        finally:
+            conn.close()
     
     sys.exit(0)
     
 except Exception as e:
     print(f"SQL_ERROR: {{type(e).__name__}}: {{e}}")
-    import traceback
     traceback.print_exc()
     sys.exit(1)
     
@@ -2814,56 +3204,30 @@ finally:
     except:
         pass
     '''
-        
+        # Execute subprocess
         try:
             result = subprocess.run(
                 [self._get_project_python(), '-c', test_script],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=timeout,
-                cwd=temp_dir,
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=timeout, cwd=temp_dir,
             )
             
             output = result.stdout + result.stderr
             
             if 'SQL_IMPORT_SUCCESS' in result.stdout or 'SQL_INIT_SUCCESS' in result.stdout:
-                # Extract success message
-                success_lines = [l for l in result.stdout.split('\n') if 'SQL_IMPORT_SUCCESS' in l or 'SQL_INIT_SUCCESS' in l]
-                msg = success_lines[0] if success_lines else "SQL module imported successfully"
-                
-                # Append table info if found
+                msg = "SQL module imported successfully"
                 if 'SQL_TABLES' in result.stdout:
                     table_info = [l for l in result.stdout.split('\n') if 'SQL_TABLES' in l][0]
                     msg += f" ({table_info})"
                 
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.SQL_SQLITE,
-                    status=TestStatus.PASSED,
-                    message=msg,
-                    details=result.stdout,
-                )
+                return TestResult(file_path=file_path, app_type=AppType.SQL_SQLITE, status=TestStatus.PASSED, message=msg, details=result.stdout)
             else:
                 error_lines = [l for l in output.split('\n') if 'SQL_ERROR' in l]
-                error_msg = error_lines[0] if error_lines else "SQL execution failed"
-                
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.SQL_SQLITE,
-                    status=TestStatus.FAILED,
-                    message=error_msg.replace('SQL_ERROR: ', ''),
-                    details=output[-1000:],
-                )
+                error_msg = error_lines[0].replace('SQL_ERROR: ', '') if error_lines else "SQL execution failed"
+                return TestResult(file_path=file_path, app_type=AppType.SQL_SQLITE, status=TestStatus.FAILED, message=error_msg, details=output[-1000:])
                 
         except subprocess.TimeoutExpired:
-            return TestResult(
-                file_path=file_path,
-                app_type=AppType.SQL_SQLITE,
-                status=TestStatus.TIMEOUT,
-                message=f"SQLite operations timed out after {timeout}s",
-            )
+            return TestResult(file_path=file_path, app_type=AppType.SQL_SQLITE, status=TestStatus.TIMEOUT, message=f"SQLite operations timed out after {timeout}s")
 
 
     
@@ -3033,12 +3397,7 @@ except Exception as e:
     async def _test_api_dependent(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
         """
         Test API-dependent code.
-        
-        Strategy:
-        1. Check network availability
-        2. If available: run with short timeout
-        3. If not: import-only validation
-        4. Network errors are warnings, not failures
+        Supports both standalone scripts and package modules.
         """
         has_network = await self._check_network()
         
@@ -3050,88 +3409,71 @@ except Exception as e:
                 suggestion="Ensure network connectivity for full API testing",
             )
         
-        # Full test with network
         full_path = Path(temp_dir) / file_path
         safe_temp_dir = json.dumps(str(temp_dir))
         safe_full_path = json.dumps(str(full_path))
         
+        is_package = self._is_inside_package(file_path, temp_dir)
+        
+        if is_package:
+            module_name = file_path.replace('\\', '/').replace('/', '.').replace('.py', '')
+            if module_name.endswith('.__init__'):
+                module_name = module_name[:-9]
+            
+            run_code = f"runpy.run_module('{module_name}', run_name='__main__', alter_sys=True)"
+        else:
+            run_code = f"runpy.run_path({safe_full_path}.strip('\"'), run_name='__main__')"
+        
         test_script = f'''
 import sys
 import socket
+import runpy
+import os
+import traceback
 
 sys.path.insert(0, {safe_temp_dir}.strip('"'))
+if os.path.exists(os.path.join({safe_temp_dir}.strip('"'), 'src')):
+    sys.path.insert(0, os.path.join({safe_temp_dir}.strip('"'), 'src'))
 
 # Set short timeout for all network operations
 socket.setdefaulttimeout(15)
 
 try:
-    import runpy
-    runpy.run_path({safe_full_path}.strip('"'), run_name='__main__')
+    {run_code}
     print("API_SUCCESS")
     sys.exit(0)
     
 except (ConnectionError, TimeoutError, socket.timeout, OSError) as e:
-    # Network errors are not failures — could be external service issue
     print(f"API_NETWORK_WARNING: {{type(e).__name__}}: {{e}}")
-    sys.exit(0)  # Exit 0 — this is a warning, not error
+    sys.exit(0)
     
 except Exception as e:
     print(f"API_ERROR: {{type(e).__name__}}: {{e}}")
-    import traceback
     traceback.print_exc()
     sys.exit(1)
-    '''
+        '''
         
         try:
             result = subprocess.run(
                 [self._get_project_python(), '-c', test_script],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=timeout,
-                cwd=temp_dir,
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=timeout, cwd=temp_dir,
             )
             
             output = result.stdout + result.stderr
             
             if 'API_SUCCESS' in result.stdout:
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.API_DEPENDENT,
-                    status=TestStatus.PASSED,
-                    message="API-dependent code executed successfully",
-                )
+                return TestResult(file_path=file_path, app_type=AppType.API_DEPENDENT, status=TestStatus.PASSED, message="API-dependent code executed successfully")
             elif 'API_NETWORK_WARNING' in result.stdout:
-                # Network error — passed with warning
                 warning_line = [l for l in result.stdout.split('\n') if 'API_NETWORK_WARNING' in l][0]
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.API_DEPENDENT,
-                    status=TestStatus.PASSED,
-                    message=f"Code validated (network issue: {warning_line.split(': ', 1)[-1]})",
-                    details="Network-dependent operations could not complete, but code structure is valid",
-                )
+                return TestResult(file_path=file_path, app_type=AppType.API_DEPENDENT, status=TestStatus.PASSED, message=f"Code validated (network issue: {warning_line.split(': ', 1)[-1]})", details="Network-dependent operations could not complete, but code structure is valid")
             else:
                 error_lines = [l for l in output.split('\n') if 'API_ERROR' in l]
-                error_msg = error_lines[0] if error_lines else "API execution failed"
-                
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.API_DEPENDENT,
-                    status=TestStatus.FAILED,
-                    message=error_msg.replace('API_ERROR: ', ''),
-                    details=output[-1000:],
-                )
+                error_msg = error_lines[0].replace('API_ERROR: ', '') if error_lines else "API execution failed"
+                return TestResult(file_path=file_path, app_type=AppType.API_DEPENDENT, status=TestStatus.FAILED, message=error_msg, details=output[-1000:])
                 
         except subprocess.TimeoutExpired:
-            return TestResult(
-                file_path=file_path,
-                app_type=AppType.API_DEPENDENT,
-                status=TestStatus.TIMEOUT,
-                message=f"API operations timed out after {timeout}s",
-                suggestion="Check for blocking network calls or unresponsive endpoints",
-            )
+            return TestResult(file_path=file_path, app_type=AppType.API_DEPENDENT, status=TestStatus.TIMEOUT, message=f"API operations timed out after {timeout}s", suggestion="Check for blocking network calls")
     
     
     
@@ -3645,12 +3987,44 @@ except Exception as e:
         Perform import-only validation.
         
         Loads module without executing __main__, catching import errors.
+        Properly handles packages with relative imports.
         """
         full_path = Path(temp_dir) / file_path
         safe_temp_dir = json.dumps(str(temp_dir))
-        safe_full_path = json.dumps(str(full_path))
         
-        test_script = f'''
+        # Check if file is inside a package
+        is_package_module = self._is_inside_package(file_path, temp_dir)
+        
+        if is_package_module:
+            # Convert file path to module name for proper import
+            # e.g., "court_parser/cli/app.py" -> "court_parser.cli.app"
+            module_name = file_path.replace('\\', '/').replace('/', '.').replace('.py', '')
+            # Remove __init__ suffix if present
+            if module_name.endswith('.__init__'):
+                module_name = module_name[:-9]
+            
+            safe_module_name = json.dumps(module_name)
+            
+            test_script = f'''
+import sys
+sys.path.insert(0, {safe_temp_dir}.strip('"'))
+
+try:
+    # Use __import__ for proper package resolution with relative imports
+    __import__({safe_module_name}.strip('"'))
+    print("IMPORT_SUCCESS")
+    sys.exit(0)
+except Exception as e:
+    print(f"IMPORT_ERROR: {{type(e).__name__}}: {{e}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+    '''
+        else:
+            # Standalone file - use spec_from_file_location
+            safe_full_path = json.dumps(str(full_path))
+            
+            test_script = f'''
 import sys
 sys.path.insert(0, {safe_temp_dir}.strip('"'))
 
@@ -3664,6 +4038,8 @@ try:
     sys.exit(0)
 except Exception as e:
     print(f"IMPORT_ERROR: {{type(e).__name__}}: {{e}}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
     '''
         
