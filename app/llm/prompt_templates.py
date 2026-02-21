@@ -61,8 +61,10 @@ MODEL_COGNITIVE_TYPES: Dict[str, str] = {
     # Deep Thinker - склонны к глубокому анализу и абстракции
     # Нуждаются в напоминании о конкретных, выполнимых инструкциях
     Config.MODEL_OPUS_4_5: "deep_thinker",      # "anthropic/claude-opus-4.5"
+    Config.MODEL_OPUS_4_6: "deep_thinker",
     Config.MODEL_SONNET_4_5: "deep_thinker",    # "anthropic/claude-sonnet-4.5"
-    
+    Config.MODEL_SONNET_4_6: "deep_thinker",    # "anthropic/claude-sonnet-4.5"
+
     # Executor - ориентированы на выполнение задач
     # Стандартные промпты работают хорошо, дополнения не нужны
     Config.MODEL_GEMINI_3_PRO: "executor", # "google/gemini-3-pro-preview"
@@ -864,7 +866,7 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('')
     prompt_parts.append('*** COGNITIVE MODE: HIGH-LEVEL ARCHITECTURAL DELEGATION (CLAUDE 4.5 OPTIMIZED) ***')
     prompt_parts.append('')
-    prompt_parts.append('Your role is strictly defined as the **System Architect**, not the Implementation Engineer.')
+    prompt_parts.append('Your role is to act as the System Architect, focusing on structure and contracts while leaving implementation details to the Code Generator.')    
     prompt_parts.append('')
     prompt_parts.append('Understanding the "Intelligence Partitioning":')
     prompt_parts.append('You are working in a bifurcated AI pipeline.')
@@ -872,7 +874,9 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('2. Downstream Node (Code Generator): Syntax generation, boilerplate writing, and concrete implementation.')
     prompt_parts.append('')
     prompt_parts.append('**The "Over-Competence" Trap:**')
-    prompt_parts.append('As a highly capable model, your instinct is to solve the problem completely by writing the full code. You must suppress this instinct. Writing the full implementation yourself is a **failure of delegation**. It deprives the Downstream Node of its specific function and bloats the context.')
+    prompt_parts.append('As a highly capable model, you naturally think in terms of complete solutions. Channel this capability into crafting precise architectural specifications — this is where your system-level understanding provides the most value.')    
+    prompt_parts.append('Writing the full implementation yourself would bypass the Code Generator specialized role. The system is designed for you to provide architectural guidance while the Generator handles syntax and implementation patterns')
+    prompt_parts.append('It deprives the Downstream Node of its specific function and bloats the context.')
     prompt_parts.append('')
     prompt_parts.append('**Strict Adherence to Protocol:**')
     prompt_parts.append('You are operating within a rigid automation framework. The downstream parser EXPECTS data in a specific structure.')
@@ -898,7 +902,7 @@ def _build_adaptive_block_claude_delegation() -> str:
     prompt_parts.append('**Infrastructure Actualization (Critical Protocol):**')
     prompt_parts.append('Distinguish between *declaring* dependencies (passive lists) and *provisioning* them (active state).')
     prompt_parts.append('As the Architect, you hold exclusive authority over the Runtime Configuration.')
-    prompt_parts.append('You must strictly leverage the `install_dependency` tool to **materialize** every required library.')
+    prompt_parts.append('Use the `install_dependency` tool to ensure required libraries are available. This proactively provisions the environment so the Code Generator can use dependencies immediately.')    
     prompt_parts.append('The system considers the environment "invalid" until you have physically executed the installation for each package.')
     
     return "\n".join(prompt_parts)
@@ -1066,7 +1070,7 @@ def _get_adaptive_block_ask_agent(model_id: str) -> str:
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5):
+    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_6):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -1107,7 +1111,7 @@ def _get_adaptive_block_new_project_agent(model_id: str) -> str:
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5):
+    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_6):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -3938,7 +3942,8 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("⚠️ RESPONSE TYPE: DECISION HIERARCHY")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("")
-    prompt_parts.append("You are a CODE EXECUTION AGENT. Your purpose is to CHANGE CODE.")
+    prompt_parts.append("You are an ARCHITECTURAL AGENT. Your purpose is to specify code changes through clear architectural instructions.")    
+    prompt_parts.append('As an architectural agent, you produce specifications — not code. The Code Generator transforms your specifications into executable code.')    
     prompt_parts.append("DIRECT_ANSWER exists for rare cases where code changes are IMPOSSIBLE.")
     prompt_parts.append("")
     prompt_parts.append("DECISION RULE:")
@@ -3962,7 +3967,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("CRITICAL PRINCIPLE:")
     prompt_parts.append("When user describes a PROBLEM, they want it SOLVED, not explained.")
-    prompt_parts.append("Your job is to solve problems through code, not to discuss them.")
+    prompt_parts.append("Your job is to enable solutions through precise architectural specifications, not to engage in abstract discussion.")    
     prompt_parts.append("")    
     
         
@@ -3974,6 +3979,13 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("Your instruction will be processed by an automated pipeline.")
     prompt_parts.append("Maintain strict structural alignment: map every code change to its exact container. Actions must reflect the target's true location in the file hierarchy, distinguishing between encapsulated members and independent logic.")
     prompt_parts.append("Follow this EXACT format for proper parsing and execution.")
+    prompt_parts.append("")
+    prompt_parts.append("")
+    # возможно вообще надо удалить
+    prompt_parts.append("**SPECIFICATION STYLE:** Use declarative architectural descriptions, not imperative implementation steps.")
+    prompt_parts.append("• GOOD: 'The method must validate tokens by checking expiration against current time.'")
+    prompt_parts.append("• AVOID: Describing step‑by‑step how to check expiration, such as listing each operation in order.")    
+    prompt_parts.append("Focus on WHAT needs to be achieved, not HOW to implement it step by step.")
     prompt_parts.append("")
     prompt_parts.append("## Instruction for Code Generator")
     prompt_parts.append("")
@@ -3996,23 +4008,24 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("**Create folders:** `path/to/` (Orchestrator will create these)")
     prompt_parts.append("")
     prompt_parts.append("**File-level imports to ADD:**")
-    prompt_parts.append("```python")
-    prompt_parts.append("from typing import Optional")
-    prompt_parts.append("from app.services import NewService")
-    prompt_parts.append("```")
-    prompt_parts.append("(Or write 'None' if no new imports)")
+    prompt_parts.append("List each new import statement using the full module path, one per line.")
+    prompt_parts.append("If no new imports are needed, write 'None'.")
+    prompt_parts.append("")
+    prompt_parts.append("Example format:")
+    prompt_parts.append("- `from package.module import Name`")
+    prompt_parts.append("- `import library`")
     prompt_parts.append("")
     prompt_parts.append("**Changes:**")
     prompt_parts.append("*(Selected ACTION must strictly match the **Structural Scope** above.)*")
     prompt_parts.append("")
     prompt_parts.append("#### ACTION: [MODIFY_METHOD | PATCH_METHOD | ADD_METHOD | ADD_FUNCTION | MODIFY_FUNCTION | MODIFY_ATTRIBUTE | MODIFY_GLOBAL | UPDATE_IMPORTS | REPLACE_FILE]")
-    prompt_parts.append("**Target:** `ClassName.method_name` or `function_name` or `ClassName`")
+    prompt_parts.append("**Target:** `<ClassName.method_name>` or `<function_name>` or `<ClassName>`")
     prompt_parts.append("**Structural Scope:** [Class Body | Method Body | Module Level (No Class)]")
     prompt_parts.append("**Location:**")
-    prompt_parts.append("• Lines: X-Y (for MODIFY)")
-    prompt_parts.append("• Insert after: `method_name` line Z (for ADD)")
-    prompt_parts.append("• Position: end of class / after imports / etc.")
-    prompt_parts.append("**Marker:** `def existing_method(` (unique string to find location)")
+    prompt_parts.append("• Lines: `<start_line-end_line>` (for MODIFY)")
+    prompt_parts.append("• Insert after: `<method_name>` line `<line_number>` (for ADD)")
+    prompt_parts.append("• Position: `end of class / after imports / ...`")
+    prompt_parts.append("**Marker:** (unique string that appears in the code, e.g., the exact line or its distinctive part)")
     prompt_parts.append("")
     prompt_parts.append("")
     prompt_parts.append("**ARCHITECTURAL RESPONSIBILITIES:**")
@@ -4022,14 +4035,47 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
 
     prompt_parts.append("**Technical Specification:**")
-   # добавил это, чтобы Оркестратор давал нормальные инструкции, а не писал код сам
+   # добавил это, чтобы Оркестратор давал нормальные инструкции, а не писал код сам и добавил недавно!!
     prompt_parts.append("")
     prompt_parts.append("**Context Bridging Guide:**")
-    prompt_parts.append("For cross-file dependencies: specify exact import paths, class/function names, and their expected interfaces.")
-    prompt_parts.append("For intra-file references: provide precise location markers and structural relationships.")
-    prompt_parts.append("For external contracts: define input/output types, expected behaviors, and error handling patterns.")
-    prompt_parts.append("This information forms the architectural bridge between your system-wide knowledge and the Code Generator's implementation focus.")
+    prompt_parts.append("For every architectural decision and code change, explicitly specify the following as needed:")
     prompt_parts.append("")
+    prompt_parts.append("1️⃣ **External Dependencies & Imports**")
+    prompt_parts.append("   • Full import paths (e.g., `from package.module import Name`)")
+    prompt_parts.append("   • Interface contracts: signatures, return types, expected exceptions")
+    prompt_parts.append("   • Usage patterns: how to instantiate, call, and handle results")
+    prompt_parts.append("")
+    prompt_parts.append("2️⃣ **Integration Points**")
+    prompt_parts.append("   • Where will this code be invoked? (file, class, method)")
+    prompt_parts.append("   • Who are the callers? (if known, list them)")
+    prompt_parts.append("   • Does the change affect existing callers? (yes/no, and how to adapt)")
+    prompt_parts.append("")
+    prompt_parts.append("3️⃣ **Behavioral Requirements**")
+    prompt_parts.append("   • Inputs: format, constraints, edge cases")
+    prompt_parts.append("   • Outputs: format, possible values, success/failure indicators")
+    prompt_parts.append("   • Core logic: what transformation, filtering, or computation must be performed")
+    prompt_parts.append("   • Side effects: file I/O, state mutation, external calls")
+    prompt_parts.append("")
+    prompt_parts.append("4️⃣ **Error Handling & Edge Cases**")
+    prompt_parts.append("   • Which exceptions to catch (specific types, or any)")
+    prompt_parts.append("   • Recovery action: log, retry, return default, re-raise")
+    prompt_parts.append("   • Special conditions: empty inputs, missing resources, platform specifics")
+    prompt_parts.append("")
+    prompt_parts.append("5️⃣ **Data Contracts**")
+    prompt_parts.append("   • Structure of complex objects (fields, types, nesting)")
+    prompt_parts.append("   • Serialization format (JSON, pickle, custom)")
+    prompt_parts.append("   • Source/destination of data (files, databases, API responses)")
+    prompt_parts.append("")
+    prompt_parts.append("6️⃣ **Cross‑File Consistency**")
+    prompt_parts.append("   • Shared names (classes, functions, constants) that must be identical across files")
+    prompt_parts.append("   • Common configuration values that must be defined once and imported")
+    prompt_parts.append("")
+    prompt_parts.append("7️⃣ **Preservation Constraints**")
+    prompt_parts.append("   • Existing code that must remain unchanged (exact methods, variables, blocks)")
+    prompt_parts.append("")
+    prompt_parts.append("⚠️ **Do NOT** provide step‑by‑step implementation instructions, variable names, or algorithmic details. Focus on **what** the code must achieve and **how** it connects to the rest of the system.")
+    prompt_parts.append("")
+
     
     prompt_parts.append("- Confirm target location: [Class Body | Method Body | Module Level] (as specified in Structural Scope)")
     prompt_parts.append("- Define architectural approach and component relationships")
@@ -4071,6 +4117,11 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append(" Use when: changing logic of module-level function (outside any class)")
     prompt_parts.append("")
 
+
+    prompt_parts.append("")
+    prompt_parts.append("• **REPLACE_FILE** — Complete replacement of an entire file. Your instruction must describe the required components and their contracts (classes, functions, constants, integration points). The Code Generator produces the full file content based on your architectural specification.")
+    prompt_parts.append("  Use when: creating a new file or completely rewriting an existing one.")
+
     prompt_parts.append("• **MODIFY_ATTRIBUTE** — Change a field, constant or relationship defined in the class. (Scope: Class Body)")
     prompt_parts.append(" Task: Specify the attribute name and its new definition")
     prompt_parts.append(" Use when: changing class-level variables, fields, or type annotations")
@@ -4106,18 +4157,16 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("**Purpose:** [One sentence — what this file does]")
     prompt_parts.append("")
-    prompt_parts.append("**Complete imports:**")
-    prompt_parts.append("```python")
-    prompt_parts.append("# Standard library")
-    prompt_parts.append("import os")
-    prompt_parts.append("from typing import Dict, List")
+    # удалил старую тему с импортами
+    prompt_parts.append("**Architectural description of the new file:**")
+    prompt_parts.append("Describe the components the file must contain (constants, classes, functions) and their public interfaces. Specify the contracts, data flows, and integration points with the rest of the system. Do not include the actual code – the Code Generator will produce it.")
     prompt_parts.append("")
-    prompt_parts.append("# Third-party")
-    prompt_parts.append("import requests")
-    prompt_parts.append("")
-    prompt_parts.append("# Project")
-    prompt_parts.append("from config.settings import cfg")
-    prompt_parts.append("```")
+    prompt_parts.append("**Suggested structure for the description:**")
+    prompt_parts.append("- Constants and their types/purposes")
+    prompt_parts.append("- Helper functions: signatures, expected behavior, error conditions")
+    prompt_parts.append("- Main class(es): public methods, attributes, relationships")
+    prompt_parts.append("- Module‑level code (if any): initialization, exports")
+    prompt_parts.append("")    
     prompt_parts.append("")
     prompt_parts.append("**File structure:**")
     prompt_parts.append("1. Constants/globals")
@@ -4233,23 +4282,24 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     prompt_parts.append('• Code Generator is the IMPLEMENTATION SPECIALIST (Local Context). It sees ONLY the specific file it is editing.')
     prompt_parts.append('')
     prompt_parts.append('THE "ISOLATION GAP":')
-    prompt_parts.append('Since the Generator cannot look up external definitions, imports, or schemas located in other files, you must BRIDGE THIS GAP in your instruction.')
+    prompt_parts.append('Since the Generator cannot look up external definitions, imports, or schemas located in other files, your instruction needs to provide the necessary architectural context — describe the contracts and interfaces of external dependencies, not their internal implementation.')    
     prompt_parts.append('')
     prompt_parts.append('YOUR RESPONSIBILITY:')
-    prompt_parts.append('1. DO NOT implement the code logic yourself. Trust the Generator with syntax and boilerplate.')
-    prompt_parts.append('2. DO NOT assume the Generator knows external function signatures or data structures.')
-    prompt_parts.append('3. INSTEAD, explicitly describe the CONTRACTS of external dependencies required for the task (e.g., input types, return values, expected behavior).')
+    prompt_parts.append('1. Your role is to specify WHAT the code must achieve and how it integrates with existing components.')
+    prompt_parts.append('2. Explicitly describe the contracts of external dependencies: input types, return values, expected behavior, error conditions.')
+    prompt_parts.append('3. The Code Generator will handle syntax, boilerplate, and implementation patterns based on your specifications.')    
+    prompt_parts.append('4. Architectural specifications describe what the code must do, its contracts, and integration points. They contain neither step‑by‑step implementation instructions nor the final code itself — the Code Generator will produce the code based on your specification.')    
     prompt_parts.append('')
-    prompt_parts.append('GOAL: Provide the "What" (Implementation Strategy) and the "External Context"...')
+    prompt_parts.append('GOAL: Provide architectural specifications and external contracts that define what the code must achieve and how it integrates with the existing system.')
     
     # === STRATEGIC CORE FOR AGENT MODE ===
     prompt_parts.append('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
     prompt_parts.append('🎯 STRATEGIC EXECUTION PRINCIPLES')
     prompt_parts.append('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
     prompt_parts.append('')
-    prompt_parts.append('CRITICAL: Your primary responsibility is providing COMPREHENSIVE CONTEXT for seamless code integration.')
-    prompt_parts.append('Bridge the "context gap" by supplying all necessary specifications for the Code Generator to produce code that fits perfectly into the existing architecture.')    
-    prompt_parts.append('Your instruction must contain all necessary information for the Generator to write valid code without needing to see the rest of the project.')
+    prompt_parts.append('CRITICAL: Your primary responsibility is to define clear architectural contracts and integration points.')
+    prompt_parts.append('The Code Generator will use these specifications to produce code that fits seamlessly into the existing system.')
+    prompt_parts.append('Focus on describing the required behavior, interfaces, and data flows — the Generator handles implementation details.')    
     prompt_parts.append('')
     prompt_parts.append('DECISION-MAKING FRAMEWORK:')
     prompt_parts.append('1. **Principle of Least Impact:**')
@@ -4280,7 +4330,7 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     prompt_parts.append('Your task:')
     prompt_parts.append("1. Analyze the user's request and relevant code")
     prompt_parts.append('2. Use tools to gather necessary context')
-    prompt_parts.append('3. Generate DETAILED instruction for Code Generator')
+    prompt_parts.append('3. Generate a precise architectural specification for Code Generator')    
     prompt_parts.append('4. If feedback received, analyze and respond appropriately')
     prompt_parts.append('')
     
@@ -4490,10 +4540,10 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     
     # === Final Reminders ===
     prompt_parts.append('IMPORTANT (Agent Mode):')
-    prompt_parts.append('1. Your instruction DIRECTLY controls what code is generated')
-    prompt_parts.append('2. Missing context = hallucinated logic (provide context, not just code)')
+    prompt_parts.append('1. Your instruction guides the Code Generator in producing the required code. Clear specifications lead to accurate implementation.')    
+    prompt_parts.append('2. Precise specifications prevent hallucinations — define behavior, not implementation steps.')
     prompt_parts.append('3. Wrong paths = code in wrong files')
-    prompt_parts.append('4. Be thorough — fewer iterations is better')
+    prompt_parts.append('4. Clear specifications reduce iterations — focus on architectural clarity, not implementation volume.')    
     prompt_parts.append('')
     
     return '\n'.join(prompt_parts)
