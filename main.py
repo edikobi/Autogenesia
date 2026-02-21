@@ -364,24 +364,42 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "3",
+        cfg.MODEL_SONNET_4_6,
+        "Claude Sonnet 4.6",
+        "Новая рабочая лошадка, говорят, лучше прошлой."
+    ),
+    (
+        "4",
         cfg.MODEL_OPUS_4_5,
         "Claude Opus 4.5",
         "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Также контекстное окно всего 200к токенов"
     ),
     (
-        "4",
+        "5",
+        cfg.MODEL_OPUS_4_6,
+        "Claude Opus 4.6",
+        "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Контекстное окно  1 млн. токенов"
+    ),
+    (
+        "6",
         cfg.MODEL_GEMINI_3_PRO,
-        "✨ Gemini 3.0 Pro",
+        "✨ Gemini 3.1 Pro",
         "Сложная модель, но исполнительная. Огромное окно 1 млн токенов. Не особо любит пользоваться инструментами. Относительно дешёвая."
     ),
     (
-        "5",
+        "7",
         cfg.MODEL_DEEPSEEK_REASONER,
         "DeepSeek V3.2 Reasoning",
         "Неплохо думает, но маленькое контекстное окно и слегка 'туповат' для сложных задач. В новых проектах может быть хорош. ОЧЕНЬ дешёвый!"
     ),
     (
-        "6",
+        "8",
+        cfg.MODEL_QWEN3_MAX_THINKING,
+        "Qwen3 Max Thinking",
+        "Обещают золотые горы, но это китайский ИИ с маленьким (200к) контекстным окном"
+    ),
+    (
+        "9",
         cfg.MODEL_NORMAL,
         "DeepSeek Chat",
         "Базовая модель для простых задач. Экономичная, быстрая, но без глубокого анализа."
@@ -2044,7 +2062,7 @@ async def select_orchestrator_model() -> bool:
     try:
         choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="r",
             show_back=True,
             show_menu=True
@@ -5928,7 +5946,7 @@ async def setup_mode_session(mode: str) -> bool:
         try:
             choice = prompt_with_navigation(
                 "Выбор",
-                choices=["r", "1", "2", "3", "4", "5", "6"],
+                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
                 default="r"
             )
         except BackException:
@@ -6042,7 +6060,7 @@ async def setup_mode_session(mode: str) -> bool:
     try:
         model_choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="r"
         )
     except BackException:
