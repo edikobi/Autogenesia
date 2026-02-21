@@ -500,6 +500,175 @@ SEARCH_PYPI_TOOL: Dict[str, Any] = {
 }
 
 # ============================================================================
+# FETCH WEBPAGE TOOL (raw HTML)
+# ============================================================================
+FETCH_WEBPAGE_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "fetch_webpage",
+        "description": (
+            "Fetch the raw HTML content of a webpage. Returns the full HTML wrapped in CDATA. "
+            "Use when you need the complete source code of a page for detailed parsing or analysis. "
+            "⚠️ LIMIT: Maximum 3 calls per session. For structured analysis, consider analyze_webpage instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL of the webpage (e.g., 'https://example.com/page')."
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": "Maximum number of characters to return. Default: 100000, Max: 500000.",
+                    "default": 100000,
+                    "maximum": 500000
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Request timeout in seconds. Default: 10, Max: 30.",
+                    "default": 10,
+                    "maximum": 30
+                }
+            },
+            "required": ["url"]
+        }
+    }
+}
+
+# ============================================================================
+# WEBPAGE ANALYSIS TOOL
+# ============================================================================
+ANALYZE_WEBPAGE_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "analyze_webpage",
+        "description": (
+            "Perform structural analysis of a webpage: extract title, meta tags, links, forms, media (images, video, audio), "
+            "and detect technologies (if possible). Returns structured XML without the full HTML. "
+            "Use when you need to understand the content and structure of a page without loading the entire HTML."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL of the webpage to analyze."
+                },
+                "extract_links": {
+                    "type": "boolean",
+                    "description": "Extract hyperlinks from the page. Default: true.",
+                    "default": True
+                },
+                "extract_metadata": {
+                    "type": "boolean",
+                    "description": "Extract title and meta tags. Default: true.",
+                    "default": True
+                },
+                "extract_forms": {
+                    "type": "boolean",
+                    "description": "Extract forms and their inputs. Default: true.",
+                    "default": True
+                },
+                "extract_media": {
+                    "type": "boolean",
+                    "description": "Extract image, video, and audio sources. Default: true.",
+                    "default": True
+                },
+                "extract_technologies": {
+                    "type": "boolean",
+                    "description": "Attempt to detect technologies (e.g., frameworks, CMS). Default: false (experimental).",
+                    "default": False
+                },
+                "max_links": {
+                    "type": "integer",
+                    "description": "Maximum number of links to return. Default: 100, Max: 500.",
+                    "default": 100,
+                    "maximum": 500
+                }
+            },
+            "required": ["url"]
+        }
+    }
+}
+
+# ============================================================================
+# SECURITY CHECK TOOL
+# ============================================================================
+CHECK_SECURITY_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "check_security",
+        "description": (
+            "Evaluate basic security posture of a website: HTTPS enforcement, security headers (HSTS, CSP, X-Frame-Options, etc.), "
+            "cookie security flags, and SSL/TLS certificate validity. Returns a report with recommendations."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL of the website to check (e.g., 'https://example.com')."
+                },
+                "check_certificate": {
+                    "type": "boolean",
+                    "description": "Check SSL/TLS certificate details. Default: true.",
+                    "default": True
+                },
+                "follow_redirects": {
+                    "type": "boolean",
+                    "description": "Follow redirects to final URL. Default: true.",
+                    "default": True
+                }
+            },
+            "required": ["url"]
+        }
+    }
+}
+
+# ============================================================================
+# EXTRACT MEDIA TOOL
+# ============================================================================
+EXTRACT_MEDIA_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "extract_media",
+        "description": (
+            "Extract URLs of media resources (images, videos, audio) from a webpage. "
+            "Returns the URLs along with their type and optionally file size (if available from headers). "
+            "Does NOT download the actual media – only provides metadata. "
+            "Use when you need to know what media exists on a page before generating download code."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL of the webpage to scan for media."
+                },
+                "media_types": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["image", "video", "audio"]},
+                    "description": "List of media types to extract. Default: all.",
+                    "default": ["image", "video", "audio"]
+                },
+                "max_urls": {
+                    "type": "integer",
+                    "description": "Maximum number of URLs to return per type. Default: 50, Max: 200.",
+                    "default": 50,
+                    "maximum": 200
+                },
+                "check_size": {
+                    "type": "boolean",
+                    "description": "Attempt to fetch Content-Length for each resource (performs a HEAD request). May increase execution time. Default: false.",
+                    "default": False
+                }
+            },
+            "required": ["url"]
+        }
+    }
+}
+# ============================================================================
 # COMBINED TOOLS LIST
 # ============================================================================
 
@@ -516,6 +685,10 @@ ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
     LIST_INSTALLED_PACKAGES_TOOL,
     INSTALL_DEPENDENCY_TOOL,
     SEARCH_PYPI_TOOL,
+    FETCH_WEBPAGE_TOOL,      # <-- добавить
+    ANALYZE_WEBPAGE_TOOL,    # <-- добавить
+    CHECK_SECURITY_TOOL,     # <-- добавить
+    EXTRACT_MEDIA_TOOL,      # <-- добавить
 ]
 
 
@@ -538,6 +711,10 @@ def get_tool_by_name(name: str) -> Dict[str, Any]:
         "list_installed_packages": LIST_INSTALLED_PACKAGES_TOOL,
         "install_dependency": INSTALL_DEPENDENCY_TOOL,
         "search_pypi": SEARCH_PYPI_TOOL,
+        "fetch_webpage": FETCH_WEBPAGE_TOOL,        # <-- добавить
+        "analyze_webpage": ANALYZE_WEBPAGE_TOOL,    # <-- добавить
+        "check_security": CHECK_SECURITY_TOOL,      # <-- добавить
+        "extract_media": EXTRACT_MEDIA_TOOL,        # <-- добавить
     }
     if name not in tools_map:
         raise ValueError(f"Unknown tool: {name}")
@@ -560,4 +737,8 @@ def get_tool_names() -> List[str]:
         "list_installed_packages",
         "install_dependency",
         "search_pypi",
+        "fetch_webpage",        # <-- добавить
+        "analyze_webpage",       # <-- добавить
+        "check_security",        # <-- добавить
+        "extract_media",         # <-- добавить
     ]

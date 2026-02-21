@@ -26,6 +26,17 @@ from app.tools.dependency_manager import (
     search_pypi_tool,
 )
 
+import httpx
+from urllib.parse import urlparse, urljoin
+from datetime import datetime
+
+try:
+    from bs4 import BeautifulSoup
+    BS_AVAILABLE = True
+except ImportError:
+    BS_AVAILABLE = False
+    logger.warning("BeautifulSoup not installed. Webpage analysis tools will not work. Install with: pip install beautifulsoup4")
+        
 logger = logging.getLogger(__name__)
 
 
@@ -58,6 +69,45 @@ class ToolExecutor:
         self.index = index or {}
         self.virtual_fs = virtual_fs  # NEW
         self._custom_tools: Dict[str, Callable] = {}
+    
+    
+    def _validate_url(self, url: str) -> bool:
+        """Проверяет, что URL безопасен для запроса (только http/https, не локальный)."""
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        host = parsed.hostname
+        forbidden = ('localhost', '127.0.0.1', '::1', '0.0.0.0')
+        if host in forbidden:
+            return False
+        return True
+
+    def _fetch_html(self, url: str, timeout: int = 10, max_length: int = 50000) -> tuple[httpx.Response, str]:
+        """Загружает HTML-страницу, обрезает до max_length символов."""
+        if not self._validate_url(url):
+            raise ValueError(f"URL not allowed: {url}")
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            content = resp.text
+            if len(content) > max_length:
+                content = content[:max_length] + "\n... (truncated due to length limit)"
+            return resp, content
+
+    def _fetch_head(self, url: str, timeout: int = 5) -> httpx.Response:
+        """Выполняет HEAD-запрос для получения заголовков (без тела)."""
+        if not self._validate_url(url):
+            raise ValueError(f"URL not allowed: {url}")
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            return client.head(url)
+
+    def _xml_escape(self, s: str) -> str:
+        """Экранирует спецсимволы для XML."""
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
+
+    def _absolutize_url(self, src: str, base_url: str) -> str:
+        """Преобразует относительный URL в абсолютный на основе base_url."""
+        return urljoin(base_url, src)    
     
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """
@@ -105,6 +155,14 @@ class ToolExecutor:
                 return self._execute_install_dependency(arguments)
             elif tool_name == "search_pypi":
                 return self._execute_search_pypi(arguments)
+            elif tool_name == "fetch_webpage":
+                return self._execute_fetch_webpage(arguments)
+            elif tool_name == "analyze_webpage":
+                return self._execute_analyze_webpage(arguments)
+            elif tool_name == "check_security":
+                return self._execute_check_security(arguments)
+            elif tool_name == "extract_media":
+                return self._execute_extract_media(arguments)
             elif tool_name == "grep_search": 
                 return self._execute_grep_search(arguments)
             elif tool_name == "show_file_relations":
@@ -385,6 +443,336 @@ class ToolExecutor:
         
         return search_pypi_tool(query=query)
 
+    
+    
+    
+    # ------------------------------------------------------------------------
+    # Инструмент fetch_webpage (сырой HTML)
+    # ------------------------------------------------------------------------
+    def _execute_fetch_webpage(self, arguments: Dict[str, Any]) -> str:
+        url = arguments.get("url", "").strip()
+        if not url:
+            return self._format_error("URL is required")
+
+        max_length = arguments.get("max_length", 100000)
+        timeout = arguments.get("timeout", 10)
+
+        try:
+            resp, html = self._fetch_html(url, timeout=timeout, max_length=max_length)
+        except Exception as e:
+            return self._format_error(f"Failed to fetch webpage: {e}")
+
+        safe_html = html.replace("]]>", "]]]]><![CDATA[>")
+
+        result = f"""<!-- Fetched webpage: {url} -->
+<webpage url="{self._xml_escape(url)}" status_code="{resp.status_code}" content_type="{self._xml_escape(resp.headers.get('content-type', ''))}">
+    <content length="{len(html)}"><![CDATA[
+{safe_html}
+    ]]></content>
+</webpage>"""
+        return result
+
+    # ------------------------------------------------------------------------
+    # Инструмент analyze_webpage
+    # ------------------------------------------------------------------------
+    def _execute_analyze_webpage(self, arguments: Dict[str, Any]) -> str:
+        url = arguments.get("url", "").strip()
+        if not url:
+            return self._format_error("URL is required")
+        if not BS_AVAILABLE:
+            return self._format_error("BeautifulSoup is not installed. Please install it: pip install beautifulsoup4")
+
+        extract_links = arguments.get("extract_links", True)
+        extract_metadata = arguments.get("extract_metadata", True)
+        extract_forms = arguments.get("extract_forms", True)
+        extract_media = arguments.get("extract_media", True)
+        extract_technologies = arguments.get("extract_technologies", False)
+        max_links = min(arguments.get("max_links", 100), 500)
+
+        try:
+            resp, html = self._fetch_html(url, timeout=10, max_length=200000)
+        except Exception as e:
+            return self._format_error(f"Failed to fetch webpage: {e}")
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        metadata_xml = ""
+        if extract_metadata:
+            title = soup.title.string if soup.title else ""
+            metadata_xml += f"<title>{self._xml_escape(title)}</title>\n"
+            for meta in soup.find_all("meta"):
+                name = meta.get("name") or meta.get("property")
+                content = meta.get("content", "")
+                if name and content:
+                    metadata_xml += f'<meta name="{self._xml_escape(name)}" content="{self._xml_escape(content)}" />\n'
+
+        links_xml = ""
+        links_count = 0
+        if extract_links:
+            links = []
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                text = a.get_text(strip=True)[:200]
+                links.append((href, text))
+                if len(links) >= max_links:
+                    break
+            links_count = len(links)
+            for href, text in links:
+                links_xml += f'<link href="{self._xml_escape(href)}">{self._xml_escape(text)}</link>\n'
+
+        forms_xml = ""
+        if extract_forms:
+            for form in soup.find_all("form"):
+                action = form.get("action", "")
+                method = form.get("method", "get").upper()
+                inputs = []
+                for inp in form.find_all("input"):
+                    name = inp.get("name")
+                    if name:
+                        inputs.append(f'{name} ({inp.get("type", "text")})')
+                forms_xml += f'<form action="{self._xml_escape(action)}" method="{method}">\n'
+                for inp_desc in inputs:
+                    forms_xml += f'  <input>{self._xml_escape(inp_desc)}</input>\n'
+                forms_xml += '</form>\n'
+
+        media_xml = ""
+        if extract_media:
+            images = []
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                alt = img.get("alt", "")[:100]
+                images.append((src, alt))
+            for src, alt in images[:50]:
+                media_xml += f'<image src="{self._xml_escape(src)}" alt="{self._xml_escape(alt)}" />\n'
+
+            for video in soup.find_all("video"):
+                for src in video.find_all("src"):
+                    media_xml += f'<video src="{self._xml_escape(src.get("src", ""))}" />\n'
+            for audio in soup.find_all("audio"):
+                for src in audio.find_all("src"):
+                    media_xml += f'<audio src="{self._xml_escape(src.get("src", ""))}" />\n'
+
+        tech_xml = ""
+        if extract_technologies:
+            techs = []
+            if soup.find("meta", attrs={"name": "generator"}):
+                gen = soup.find("meta", attrs={"name": "generator"}).get("content", "")
+                techs.append(f"Generator: {gen}")
+            if soup.find("script", src=lambda x: x and "jquery" in x.lower()):
+                techs.append("jQuery")
+            for t in techs:
+                tech_xml += f"<technology>{self._xml_escape(t)}</technology>\n"
+
+        result = f"""<!-- Analyzed webpage: {url} -->
+<webpage_analysis url="{self._xml_escape(url)}" timestamp="{datetime.now().isoformat()}" status_code="{resp.status_code}">
+    <metadata>
+{metadata_xml}
+    </metadata>
+    <links count="{links_count}">
+{links_xml}
+    </links>
+    <forms>
+{forms_xml}
+    </forms>
+    <media>
+{media_xml}
+    </media>
+    <technologies>
+{tech_xml}
+    </technologies>
+</webpage_analysis>"""
+        return result
+
+    # ------------------------------------------------------------------------
+    # Инструмент check_security
+    # ------------------------------------------------------------------------
+    def _execute_check_security(self, arguments: Dict[str, Any]) -> str:
+        url = arguments.get("url", "").strip()
+        if not url:
+            return self._format_error("URL is required")
+        check_cert = arguments.get("check_certificate", True)
+        follow_redirects = arguments.get("follow_redirects", True)
+
+        try:
+            with httpx.Client(timeout=10, follow_redirects=follow_redirects) as client:
+                resp = client.get(url)
+                final_url = str(resp.url)
+        except Exception as e:
+            return self._format_error(f"Failed to fetch {url}: {e}")
+
+        headers = resp.headers
+        security_headers = {
+            "Strict-Transport-Security": "HSTS",
+            "Content-Security-Policy": "CSP",
+            "X-Frame-Options": "Clickjacking protection",
+            "X-Content-Type-Options": "MIME sniffing prevention",
+            "Referrer-Policy": "Referrer policy",
+            "Permissions-Policy": "Permissions policy",
+        }
+
+        headers_xml = ""
+        recommendations = []
+
+        for header, desc in security_headers.items():
+            value = headers.get(header)
+            if value:
+                headers_xml += f'<header name="{header}" present="true">{self._xml_escape(value)}</header>\n'
+            else:
+                headers_xml += f'<header name="{header}" present="false" />\n'
+                recommendations.append(f"Missing {desc} header.")
+
+        if final_url.startswith("https://"):
+            headers_xml += '<https>enabled</https>\n'
+        else:
+            headers_xml += '<https>disabled</https>\n'
+            recommendations.append("Site is served over HTTP. Consider using HTTPS.")
+
+        cookies_xml = ""
+        set_cookie = headers.get("set-cookie")
+        if set_cookie:
+            if "Secure" not in set_cookie:
+                recommendations.append("Cookies missing 'Secure' flag.")
+            if "HttpOnly" not in set_cookie:
+                recommendations.append("Cookies missing 'HttpOnly' flag.")
+            cookies_xml = f"<set-cookie>{self._xml_escape(set_cookie[:200])}</set-cookie>\n"
+        else:
+            cookies_xml = "<set-cookie>None</set-cookie>\n"
+
+        cert_xml = ""
+        if check_cert and final_url.startswith("https://"):
+            try:
+                import ssl
+                import socket
+                hostname = urlparse(final_url).hostname
+                port = 443
+                ctx = ssl.create_default_context()
+                with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
+                    s.connect((hostname, port))
+                    cert = s.getpeercert()
+                subject = dict(x[0] for x in cert['subject'])
+                issuer = dict(x[0] for x in cert['issuer'])
+                not_after = cert['notAfter']
+                not_before = cert['notBefore']
+                expiry = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                now = datetime.utcnow()
+                days_left = (expiry - now).days
+                if days_left < 30:
+                    recommendations.append(f"SSL certificate expires in {days_left} days.")
+                cert_xml = f"""
+    <certificate>
+        <subject>{subject.get('commonName', '')}</subject>
+        <issuer>{issuer.get('commonName', '')}</issuer>
+        <not_before>{not_before}</not_before>
+        <not_after>{not_after}</not_after>
+        <days_left>{days_left}</days_left>
+    </certificate>"""
+            except Exception as e:
+                cert_xml = f"<certificate error=\"{self._xml_escape(str(e))}\" />"
+
+        rec_xml = ""
+        for rec in recommendations[:10]:
+            rec_xml += f"<recommendation>{self._xml_escape(rec)}</recommendation>\n"
+
+        result = f"""<!-- Security check for: {url} -->
+<security_report url="{self._xml_escape(url)}" final_url="{self._xml_escape(final_url)}" status_code="{resp.status_code}">
+    <headers>
+{headers_xml}
+    </headers>
+    <cookies>
+{cookies_xml}
+    </cookies>
+    {cert_xml}
+    <recommendations>
+{rec_xml}
+    </recommendations>
+</security_report>"""
+        return result
+
+    # ------------------------------------------------------------------------
+    # Инструмент extract_media
+    # ------------------------------------------------------------------------
+    def _execute_extract_media(self, arguments: Dict[str, Any]) -> str:
+        url = arguments.get("url", "").strip()
+        if not url:
+            return self._format_error("URL is required")
+        if not BS_AVAILABLE:
+            return self._format_error("BeautifulSoup is not installed. Please install it: pip install beautifulsoup4")
+
+        media_types = arguments.get("media_types", ["image", "video", "audio"])
+        max_urls = min(arguments.get("max_urls", 50), 200)
+        check_size = arguments.get("check_size", False)
+
+        try:
+            resp, html = self._fetch_html(url, timeout=10, max_length=200000)
+        except Exception as e:
+            return self._format_error(f"Failed to fetch webpage: {e}")
+
+        soup = BeautifulSoup(html, 'html.parser')
+        result_xml = f'<media_urls url="{self._xml_escape(url)}">\n'
+
+        if "image" in media_types:
+            images = []
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                abs_src = self._absolutize_url(src, url)
+                images.append(abs_src)
+            images = list(dict.fromkeys(images))[:max_urls]
+            result_xml += "  <images>\n"
+            for img in images:
+                size_attr = ""
+                if check_size:
+                    try:
+                        head = self._fetch_head(img, timeout=3)
+                        cl = head.headers.get("content-length")
+                        if cl:
+                            size_attr = f' size="{cl}"'
+                    except:
+                        pass
+                result_xml += f'    <image src="{self._xml_escape(img)}"{size_attr} />\n'
+            result_xml += "  </images>\n"
+
+        if "video" in media_types:
+            videos = []
+            for video in soup.find_all("video"):
+                for src in video.find_all("src"):
+                    videos.append(self._absolutize_url(src.get("src", ""), url))
+            videos = list(dict.fromkeys(videos))[:max_urls]
+            result_xml += "  <videos>\n"
+            for v in videos:
+                size_attr = ""
+                if check_size:
+                    try:
+                        head = self._fetch_head(v, timeout=3)
+                        cl = head.headers.get("content-length")
+                        if cl:
+                            size_attr = f' size="{cl}"'
+                    except:
+                        pass
+                result_xml += f'    <video src="{self._xml_escape(v)}"{size_attr} />\n'
+            result_xml += "  </videos>\n"
+
+        if "audio" in media_types:
+            audios = []
+            for audio in soup.find_all("audio"):
+                for src in audio.find_all("src"):
+                    audios.append(self._absolutize_url(src.get("src", ""), url))
+            audios = list(dict.fromkeys(audios))[:max_urls]
+            result_xml += "  <audios>\n"
+            for a in audios:
+                size_attr = ""
+                if check_size:
+                    try:
+                        head = self._fetch_head(a, timeout=3)
+                        cl = head.headers.get("content-length")
+                        if cl:
+                            size_attr = f' size="{cl}"'
+                    except:
+                        pass
+                result_xml += f'    <audio src="{self._xml_escape(a)}"{size_attr} />\n'
+            result_xml += "  </audios>\n"
+
+        result_xml += "</media_urls>"
+        return result_xml    
     
     def register_tool(self, name: str, func: Callable) -> None:
         """
