@@ -582,6 +582,9 @@ class LLMClient:
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
         content = message.get("content", "")
+        
+        if content is None:
+            content = ""
 
         # =====================================================================
         # NEW: Извлекаем finish_reason для диагностики обрезки
