@@ -29,6 +29,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import aiofiles
 import multiprocessing
 import httpx
+from app.services.tree_sitter_parser import MultiLanguageParser, MultiLanguageChunk
 
 # Правильные импорты относительно структуры проекта
 from app.utils.token_counter import TokenCounter
@@ -849,6 +850,54 @@ class SemanticIndexer:
             files.append(path)
         return sorted(files)
     
+    
+    def _collect_all_code_files(self) -> Dict[str, List[Path]]:
+        """Collects all supported code files grouped by language from root_path"""
+        result = {
+            "python": [],
+            "javascript": [],
+            "typescript": [],
+            "go": [],
+            "java": []
+        }
+        
+        extension_mapping = {
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".go": "go",
+            ".java": "java"
+        }
+        
+        try:
+            for file_path in self.root_path.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                
+                try:
+                    rel_parts = file_path.relative_to(self.root_path).parts
+                except ValueError:
+                    continue
+                
+                if any(part in IGNORE_DIRS or part.startswith('.') for part in rel_parts):
+                    continue
+                
+                ext = file_path.suffix.lower()
+                if ext in extension_mapping:
+                    language = extension_mapping[ext]
+                    result[language].append(file_path)
+        
+        except Exception as e:
+            logger.warning(f"Error collecting code files: {e}")
+        
+        # Sort each language list
+        for language in result:
+            result[language] = sorted(result[language])
+        
+        return result
+    
     def _get_index_path(self) -> Path:
         """Путь к файлу индекса - в корне индексируемой директории"""
         ai_agent_dir = self.root_path / ".ai-agent"
@@ -1344,6 +1393,131 @@ class SemanticIndexer:
             last_indexed=datetime.now(timezone.utc).isoformat()
         )
     
+    async def _index_non_python_file(self, file_path: Path, language: str, force: bool = False) -> Optional[FileIndex]:
+        """Indexes a non-Python file using Tree-sitter parser"""
+        try:
+            relative_path = str(file_path.relative_to(self.root_path))
+        except ValueError:
+            logger.warning(f"File {file_path} is not under {self.root_path}")
+            return None
+        
+        relative_path = relative_path.replace("\\", "/")
+        
+        try:
+            code = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning(f"Cannot read {relative_path} (encoding error): {e}")
+            return None
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Cannot read {relative_path}: {e}")
+            return None
+        
+        file_hash = self.hasher.hash_file(file_path)
+        
+        existing_file_data = None if force else self._get_existing_file_data(relative_path)
+        
+        if existing_file_data and existing_file_data.get("file_hash") == file_hash:
+            self.ai_client.stats.files_skipped += 1
+            return self._dict_to_file_index(existing_file_data)
+        
+        lines = code.splitlines()
+        tokens_total = self.token_counter.count(code)
+        
+        parser = MultiLanguageParser()
+        
+        try:
+            chunks = parser.chunk_file(str(file_path), language)
+        except Exception as e:
+            logger.warning(f"Parse error {relative_path}: {e}")
+            return None
+        
+        if not chunks:
+            logger.warning(f"No chunks extracted from {relative_path}")
+            return None
+        
+        classes = []
+        class_descriptions = []
+        
+        for chunk in chunks:
+            if chunk.kind in ("class", "interface", "struct"):
+                file_context = f"{file_path.name} ({language})"
+                
+                try:
+                    description, model = await self.ai_client.analyze_class(
+                        chunk.content, file_context, chunk.tokens
+                    )
+                    
+                    references = self.ref_extractor.extract(chunk.content)
+                    
+                    class_info = ClassInfo(
+                        name=chunk.name,
+                        lines=f"{chunk.start_line}-{chunk.end_line}",
+                        tokens=chunk.tokens,
+                        content_hash=self.hasher.hash_code_block(chunk.content),
+                        analyzed_by=model,
+                        description=description,
+                        references=references,
+                        methods=[]
+                    )
+                    classes.append(class_info)
+                    class_descriptions.append(f"{class_info.name}: {class_info.description}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to analyze class {chunk.name}: {e}")
+        
+        functions = []
+        func_descriptions = []
+        
+        for chunk in chunks:
+            if chunk.kind in ("function", "method"):
+                file_context = f"{file_path.name} ({language})"
+                
+                try:
+                    description, model = await self.ai_client.analyze_function(
+                        chunk.content, file_context, chunk.tokens
+                    )
+                    
+                    references = self.ref_extractor.extract(chunk.content)
+                    
+                    func_info = FunctionInfo(
+                        name=chunk.name,
+                        lines=f"{chunk.start_line}-{chunk.end_line}",
+                        tokens=chunk.tokens,
+                        content_hash=self.hasher.hash_code_block(chunk.content),
+                        analyzed_by=model,
+                        description=description,
+                        references=references
+                    )
+                    functions.append(func_info)
+                    func_descriptions.append(f"{func_info.name}: {func_info.description}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to analyze function {chunk.name}: {e}")
+        
+        all_descriptions = class_descriptions + func_descriptions
+        file_description = await self.ai_client.summarize_file(all_descriptions, file_path.name)
+        
+        if existing_file_data:
+            self.ai_client.stats.files_updated += 1
+        else:
+            self.ai_client.stats.files_added += 1
+        
+        return FileIndex(
+            name=file_path.name,
+            path=relative_path,
+            full_path=str(file_path),
+            file_hash=file_hash,
+            tokens_total=tokens_total,
+            lines_total=len(lines),
+            imports=None,
+            globals=None,
+            description=file_description,
+            classes=classes,
+            functions=functions,
+            last_indexed=datetime.now(timezone.utc).isoformat()
+        )
+    
+    
     def _dict_to_file_index(self, data: Dict) -> FileIndex:
         return FileIndex(
             name=data["name"],
@@ -1411,7 +1585,7 @@ class SemanticIndexer:
     
     async def build_index_async(self, force: bool = False) -> Dict:
         """
-        Полностью асинхронная версия build_index с отладкой
+        Полностью асинхронная версия build_index с поддержкой многоязычности
         """
         start_time = datetime.now(timezone.utc)
         
@@ -1420,52 +1594,62 @@ class SemanticIndexer:
             if self._existing_index:
                 logger.info(f"Loaded existing index ({len(self._existing_index.get('files', {}))} files)")
         
-        # --- DEBUG START ---
-        print(f"\n[DEBUG] Root path: {self.root_path}")
-        print(f"[DEBUG] Checking files in {self.root_path}...")
-        try:
-             # Попробуем найти хоть что-то без фильтров
-            raw_count = len(list(self.root_path.rglob("*.py")))
-            print(f"[DEBUG] Total .py files found (raw rglob): {raw_count}")
-        except Exception as e:
-            print(f"[DEBUG] Error listing files: {e}")
-        # --- DEBUG END ---
-
+        # Собираем Python файлы
         python_files = self._collect_python_files()
-        total_files = len(python_files)
         
-        print(f"[DEBUG] Files after _collect_python_files filter: {total_files}")
-        if total_files == 0 and raw_count > 0:
-             print("[DEBUG] WARNING: All files were filtered out! Check IGNORE_DIRS or path logic.")
-
+        # Собираем файлы других языков
+        all_code_files = self._collect_all_code_files()
+        non_python_files = []
+        for lang, files in all_code_files.items():
+            if lang != "python":
+                for f in files:
+                    non_python_files.append((f, lang))
+        
+        total_files = len(python_files) + len(non_python_files)
+        
+        logger.info(f"Found {len(python_files)} Python files, {len(non_python_files)} non-Python files")
+        
         # Берем настройки конкурентности
         concurrency = getattr(self, 'max_concurrent', 5)
-        logger.info(f"Found {total_files} Python files, processing with {concurrency} concurrent tasks")
+        logger.info(f"Processing with {concurrency} concurrent tasks")
         
         # Разбиваем на батчи
         batch_size = concurrency * 2
         all_file_indices = []
         
-        for i in range(0, total_files, batch_size):
+        # Обрабатываем Python файлы
+        for i in range(0, len(python_files), batch_size):
             batch = python_files[i:i + batch_size]
             
             self._report_progress(
-                min(i, total_files), 
+                min(i, len(python_files)), 
                 total_files,
-                f"Processing batch {i//batch_size + 1}/{(total_files + batch_size - 1)//batch_size}"
+                f"Processing Python batch {i//batch_size + 1}/{(len(python_files) + batch_size - 1)//batch_size}"
             )
             
-            # Обрабатываем батч
             batch_results = await self.index_files_batch(batch, force)
             all_file_indices.extend(batch_results)
         
-        # --- НАЧАЛО ИСПРАВЛЕНИЯ: ЛОГИКА СБОРКИ (вместо _build_final_index) ---
+        # Обрабатываем non-Python файлы
+        for i, (file_path, language) in enumerate(non_python_files):
+            self._report_progress(
+                len(python_files) + i,
+                total_files,
+                f"Processing {language} file: {file_path.name}"
+            )
+            
+            try:
+                file_index = await self._index_non_python_file(file_path, language, force)
+                if file_index:
+                    all_file_indices.append((file_path, file_index))
+            except Exception as e:
+                logger.error(f"Error indexing {file_path}: {e}")
         
+        # Собираем результаты в словарь
         files_index: Dict[str, Dict] = {}
         total_tokens = 0
         current_files = set()
         
-        # 1. Собираем результаты из списка в словарь
         for file_path, file_data in all_file_indices:
             if not file_data:
                 continue
@@ -1473,13 +1657,11 @@ class SemanticIndexer:
             try:
                 relative_path = str(file_path.relative_to(self.root_path)).replace("\\", "/")
             except ValueError:
-                 # Если вдруг путь не относительный (например, симлинк), сохраним как есть или пропустим
-                 logger.warning(f"Could not determine relative path for {file_path}")
-                 relative_path = file_path.name
+                logger.warning(f"Could not determine relative path for {file_path}")
+                relative_path = file_path.name
             
             current_files.add(relative_path)
             
-            # Конвертируем dataclass в dict
             if hasattr(file_data, 'tokens_total'):
                 files_index[relative_path] = asdict(file_data)
                 total_tokens += file_data.tokens_total
@@ -1487,25 +1669,25 @@ class SemanticIndexer:
                 files_index[relative_path] = file_data
                 total_tokens += file_data.get('tokens_total', 0)
         
-        # 2. Обрабатываем удаленные файлы
+        # Обрабатываем удаленные файлы
         if self._existing_index:
             existing_files = set(self._existing_index.get("files", {}).keys())
             deleted_files = existing_files - current_files
             
             if hasattr(self.ai_client.stats, 'files_removed'):
                 self.ai_client.stats.files_removed = len(deleted_files)
-                
+            
             for deleted in deleted_files:
                 logger.info(f"Removed from index: {deleted}")
         
-        # 3. Финализируем статистику
+        # Финализируем статистику
         end_time = datetime.now(timezone.utc)
         if hasattr(self.ai_client.stats, 'indexing_duration_seconds'):
             self.ai_client.stats.indexing_duration_seconds = (end_time - start_time).total_seconds()
         if hasattr(self.ai_client.stats, 'files_indexed'):
             self.ai_client.stats.files_indexed = len(files_index)
         
-        # 4. Формируем структуру полного индекса
+        # Формируем структуру полного индекса
         full_index = {
             "version": INDEX_VERSION,
             "created_at": (
@@ -1520,7 +1702,7 @@ class SemanticIndexer:
             "stats": asdict(self.ai_client.stats)
         }
         
-        # 5. Сохраняем, используя существующие методы
+        # Сохраняем
         self._save_full_index(full_index)
         
         compact_index = self._generate_compact_index(full_index)

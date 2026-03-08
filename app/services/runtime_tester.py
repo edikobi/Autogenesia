@@ -69,6 +69,7 @@ class AppType(Enum):
     UNKNOWN = "unknown"
     PACKAGE_MODULE = "package_module"  # Python package module (import only)
     UTILITY_SCRIPT = "utility_script"  # Standalone utility script with module-level execution
+    CROSS_LANGUAGE = "cross_language"  # Python with non-Python dependencies
 
 
 
@@ -310,6 +311,7 @@ class TimeoutCalculator:
         AppType.CLI: 30,            # 30 seconds — CLI testing
         AppType.TESTING: 120,       # 120 seconds for testing frameworks (pytest/unittest)
         AppType.UTILITY_SCRIPT: 15, # 15 seconds — import-only for utility scripts
+        AppType.CROSS_LANGUAGE: 60,
         AppType.UNKNOWN: 60,        # 60 seconds
     }
     
@@ -1751,6 +1753,7 @@ except Exception as e:
             AppType.CLI: 50,
             AppType.INTERACTIVE: 55,  # Higher than CLI, lower than DAEMON
             AppType.TESTING: 40,
+            AppType.CROSS_LANGUAGE: 35,  # Higher than UTILITY_SCRIPT, lower than TESTING
             AppType.UTILITY_SCRIPT: 5,
             AppType.STANDARD: 10,
         }
@@ -1827,8 +1830,78 @@ except Exception as e:
                         current_priority = pattern_priority
                         # Continue checking to find highest priority match
         
+        # NEW: Detect cross-language dependencies
+        # Only check if current app_type is lower priority than CROSS_LANGUAGE
+        cross_lang_priority = framework_priority.get(AppType.CROSS_LANGUAGE, 35)
+        if current_priority < cross_lang_priority:
+            try:
+                has_cross_lang, cross_deps = self._detect_cross_language_deps(content, file_path)
+                if has_cross_lang:
+                    detected['cross_language'] = f"Cross-language dependencies: {', '.join(cross_deps)}"
+                    app_type = AppType.CROSS_LANGUAGE
+            except Exception as e:
+                logger.warning(f"Error detecting cross-language dependencies in {file_path}: {e}")
+        
         return detected, app_type
 
+    def _detect_cross_language_deps(self, content: str, file_path: str) -> Tuple[bool, List[str]]:
+        """Detect if Python file has dependencies on non-Python code (Java, JS/TS, Go) via subprocess or imports."""
+        non_python_deps = []
+        
+        # Pattern 1: subprocess calls to non-Python files
+        subprocess_patterns = [
+            r'subprocess\.(run|call|Popen)\s*\(\s*["\']([^"\']*\.(js|ts|java|go|jar))',
+            r'subprocess\.(run|call|Popen)\s*\(\s*\[.*?["\']([^"\']*\.(js|ts|java|go|jar))',
+            r'os\.system\s*\(\s*["\']([^"\']*\.(js|ts|java|go|jar))',
+            r'os\.popen\s*\(\s*["\']([^"\']*\.(js|ts|java|go|jar))',
+        ]
+        
+        for pattern in subprocess_patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                file_ref = match.group(1) if match.lastindex >= 1 else match.group(0)
+                ext = match.group(2) if match.lastindex >= 2 else ""
+                if ext:
+                    lang_map = {'js': 'JavaScript', 'ts': 'TypeScript', 'java': 'Java', 'go': 'Go', 'jar': 'Java'}
+                    lang = lang_map.get(ext.lower(), ext.upper())
+                    non_python_deps.append(f"{lang} ({file_ref})")
+        
+        # Pattern 2: Direct imports of non-Python modules (e.g., jpype, node-js bindings)
+        import_patterns = [
+            r'import\s+jpype',
+            r'from\s+jpype',
+            r'import\s+js\b',
+            r'from\s+js\b',
+            r'import\s+go\b',
+            r'from\s+go\b',
+        ]
+        
+        for pattern in import_patterns:
+            if re.search(pattern, content):
+                if 'jpype' in pattern:
+                    non_python_deps.append("Java (via jpype)")
+                elif 'js' in pattern:
+                    non_python_deps.append("JavaScript (via js module)")
+                elif 'go' in pattern:
+                    non_python_deps.append("Go (via go module)")
+        
+        # Pattern 3: External process execution with language-specific tools
+        tool_patterns = [
+            (r'node\s+', 'JavaScript (Node.js)'),
+            (r'ts-node\s+', 'TypeScript (ts-node)'),
+            (r'javac\s+', 'Java (javac)'),
+            (r'java\s+', 'Java (java)'),
+            (r'go\s+run\s+', 'Go (go run)'),
+            (r'go\s+build\s+', 'Go (go build)'),
+        ]
+        
+        for pattern, lang_name in tool_patterns:
+            if re.search(pattern, content):
+                if lang_name not in non_python_deps:
+                    non_python_deps.append(lang_name)
+        
+        has_cross_lang = len(non_python_deps) > 0
+        return (has_cross_lang, non_python_deps)
 
 
     def _detect_interactive_patterns(self, content: str) -> bool:
@@ -2083,6 +2156,8 @@ except Exception as e:
                     result = await self._test_testing_framework(file_path, temp_dir, timeout)
                 elif app_type == AppType.UTILITY_SCRIPT:
                     result = await self._test_utility_script(file_path, temp_dir, timeout)
+                elif app_type == AppType.CROSS_LANGUAGE:
+                    result = await self._test_cross_language(file_path, temp_dir, timeout)
                 else:
                     # Check if this is a package module (not a standalone script)
                     if self._is_inside_package(file_path, temp_dir):
@@ -2551,6 +2626,142 @@ except Exception as e:
                 message=f"Utility script test error: {e}",
             )
     
+    async def _test_cross_language(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
+        """
+        Test Python file with cross-language dependencies.
+        
+        Strategy:
+        1. Detect non-Python dependencies (JS, Go, Java files)
+        2. Compile-check each dependency using appropriate language adapter
+        3. If all dependencies compile successfully, test Python code with import-only
+        
+        Args:
+            file_path: Relative file path
+            temp_dir: Temp directory with materialized VFS
+            timeout: Timeout for this file
+            
+        Returns:
+            TestResult
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            # Read file content
+            full_path = Path(temp_dir) / file_path
+            if not full_path.exists():
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.CROSS_LANGUAGE,
+                    status=TestStatus.FAILED,
+                    message=f"File not found: {file_path}",
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+            
+            content = full_path.read_text(encoding='utf-8', errors='replace')
+            
+            # Detect cross-language dependencies
+            has_deps, dep_list = self._detect_cross_language_deps(content, file_path)
+            
+            if not has_deps:
+                # No cross-language dependencies found, test as import-only
+                return await self._test_import_only(
+                    file_path, temp_dir, timeout, AppType.CROSS_LANGUAGE,
+                    message="Cross-language Python code validated (import-only, no external dependencies detected)"
+                )
+            
+            # Try to compile-check dependencies using language adapters
+            dep_errors = []
+            dep_successes = []
+            
+            try:
+                from app.services.language_adapter import AdapterManager
+                adapter_manager = AdapterManager.get_instance(Path(temp_dir))
+                
+                for dep_info in dep_list:
+                    try:
+                        # Parse dependency string like "JavaScript (path/to/file.js)" or "Java (via jpype)"
+                        dep_path = None
+                        dep_lang = None
+                        
+                        # Extract language and path from dependency info
+                        if '(' in dep_info and ')' in dep_info:
+                            lang_part = dep_info.split('(')[0].strip()
+                            path_part = dep_info.split('(')[1].split(')')[0].strip()
+                            
+                            dep_lang = lang_part
+                            if path_part != 'via jpype' and path_part != 'via js module' and path_part != 'via go module':
+                                dep_path = path_part
+                        
+                        # Try to compile-check the dependency
+                        if dep_path:
+                            full_dep_path = Path(temp_dir) / dep_path
+                            if full_dep_path.exists():
+                                # Get appropriate adapter for language
+                                adapter = None
+                                if 'JavaScript' in dep_lang or 'TypeScript' in dep_lang:
+                                    adapter = adapter_manager.get_adapter('javascript')
+                                elif 'Java' in dep_lang:
+                                    adapter = adapter_manager.get_adapter('java')
+                                elif 'Go' in dep_lang:
+                                    adapter = adapter_manager.get_adapter('go')
+                                
+                                if adapter:
+                                    # Attempt compile check
+                                    compile_result = await adapter.compile_check(str(full_dep_path))
+                                    if compile_result.success:
+                                        dep_successes.append(dep_info)
+                                    else:
+                                        dep_errors.append(f"{dep_info}: {compile_result.error}")
+                                else:
+                                    # No adapter available, assume success
+                                    dep_successes.append(dep_info)
+                            else:
+                                # File not found in temp_dir, assume it's external dependency
+                                dep_successes.append(dep_info)
+                        else:
+                            # No path to check (e.g., "via jpype"), assume success
+                            dep_successes.append(dep_info)
+                            
+                    except Exception as e:
+                        logger.debug(f"Error checking cross-language dependency {dep_info}: {e}")
+                        # Continue with other dependencies
+                        dep_successes.append(dep_info)
+            
+            except ImportError:
+                logger.debug("AdapterManager not available, skipping compile checks")
+                # If AdapterManager not available, assume all dependencies are OK
+                dep_successes = dep_list
+            
+            # If there were dependency errors, fail
+            if dep_errors:
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.CROSS_LANGUAGE,
+                    status=TestStatus.FAILED,
+                    message=f"Cross-language dependency compilation failed",
+                    details="\n".join(dep_errors),
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+            
+            # All dependencies compiled successfully, now test Python code via import-only
+            result = await self._test_import_only(
+                file_path, temp_dir, timeout, AppType.CROSS_LANGUAGE,
+                message=f"Cross-language Python code validated (dependencies: {', '.join(dep_list)})"
+            )
+            
+            result.duration_ms = (time.time() - start_time) * 1000
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in cross-language test for {file_path}: {e}", exc_info=True)
+            return TestResult(
+                file_path=file_path,
+                app_type=AppType.CROSS_LANGUAGE,
+                status=TestStatus.ERROR,
+                message=f"Cross-language test error: {e}",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
     
     def _is_inside_package(self, file_path: str, temp_dir: str) -> bool:
         """

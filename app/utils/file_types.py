@@ -11,7 +11,11 @@ class FileTypeDetector:
         ".py": "code/python",
         ".go": "code/go",
         ".js": "code/js",
+        ".jsx": "code/js",
+        ".mjs": "code/js",
         ".ts": "code/ts",
+        ".tsx": "code/ts",
+        ".java": "code/java",
     }
 
     TEXT_EXTENSIONS = {
@@ -61,7 +65,7 @@ class FileTypeDetector:
     
     def is_chunkable_code(self, file_type: str) -> bool:
         """Можно ли применить AST/структурное чанкирование."""
-        return file_type in ("code/python", "code/go", "sql")
+        return file_type in ("code/python", "code/go", "code/js", "code/ts", "code/java", "sql")
     
     def is_text_based(self, file_type: str) -> bool:
         """Текстовый файл (можно читать как UTF-8)."""

@@ -27,7 +27,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
-
+from app.services.tree_sitter_parser import MultiLanguageParser
 from config.settings import cfg
 
 # Core services
@@ -3464,6 +3464,52 @@ Remember: You can override the validator if you believe the critique is incorrec
                         except Exception as e:
                             logger.debug(f"Tree-sitter validation skipped: {e}")
                     
+                    # === NEW: Non-Python language validation ===
+                    elif final_content and block.language and block.language in ('javascript', 'typescript', 'go', 'java'):
+                        try:
+                            # Detect language from block or file extension
+                            block_language = block.language
+                            if not block_language:
+                                ext_map = {'.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript',
+                                        '.ts': 'typescript', '.tsx': 'typescript',
+                                        '.go': 'go', '.java': 'java'}
+                                import os
+                                _, ext = os.path.splitext(block.file_path)
+                                block_language = ext_map.get(ext.lower())
+                            
+                            if block_language and block_language in ('javascript', 'typescript', 'go', 'java'):
+                                multi_parser = MultiLanguageParser()
+                                is_valid, errors_list = multi_parser.validate_syntax(final_content, block_language)
+                                
+                                if not is_valid and errors_list:
+                                    structure_valid = False
+                                    logger.warning(f"Tree-sitter syntax validation failed for {block_language}: {errors_list[:3]}")
+                                    
+                                    # Restore original block code
+                                    block.code = original_block_code
+                                    
+                                    from app.agents.feedback_handler import StagingErrorType
+                                    error_dict = block.to_dict()
+                                    error_dict.update({
+                                        "error": f"Tree-sitter syntax validation failed for {block_language}: {'; '.join(errors_list[:3])}",
+                                        "error_type": StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                                        "code_preview": block.code[:100] if block.code else None,
+                                        "full_code": block.code,
+                                    })
+                                    errors.append(error_dict)
+                                    
+                                    # Restore backup for this file
+                                    if backup_content is not None:
+                                        self.vfs.stage_change(block.file_path, backup_content)
+                                    else:
+                                        self.vfs.unstage(block.file_path)
+                                    
+                                    logger.warning(f"Rejected block for {block.file_path}: {block_language} syntax validation failed")
+                                    continue
+                        
+                        except Exception as e:
+                            logger.debug(f"Non-Python language validation skipped: {e}")
+                    
                     if structure_valid:
                         # Stage the change
                         self.vfs.stage_change(block.file_path, final_content)
@@ -3496,7 +3542,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                         logger.warning(f"Rejected block for {block.file_path}: structure validation failed")
                         # Continue to next block - don't stop processing
                         continue
-                        
+                            
                 elif result.success:
                     # Success but no new_content (edge case)
                     self.vfs.stage_change(block.file_path, result.new_content or existing_content)
@@ -3536,8 +3582,10 @@ Remember: You can override the validator if you believe the critique is incorrec
         
         # Note: We no longer do full rollback on errors - each block is handled independently
         # This allows successful blocks to be staged even if some fail
-                    
+                            
         return errors
+    
+    
     
     def _attempt_structure_repair_with_context(
         self, 

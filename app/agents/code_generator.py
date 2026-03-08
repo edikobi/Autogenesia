@@ -748,6 +748,7 @@ async def generate_code_agent_mode(
     prompts = format_code_generator_prompt_agent(
         orchestrator_instruction=instruction,
         file_code=file_code,
+        file_contents=file_contents,
     )
     
     messages = [
@@ -1479,9 +1480,7 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         INSERT_BEFORE: element_name (optional)
         REPLACE_PATTERN: pattern_to_find (optional)
         
-        ```python
         <code here>
-        ```
         ### END_CODE_BLOCK
     
     Args:
@@ -1534,7 +1533,7 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
         
         # Извлекаем код из code fence
-        code = _extract_code_from_block(block_content)
+        code, language = _extract_code_from_block(block_content)
         
         # Валидация обязательных полей
         if not file_path:
@@ -1560,6 +1559,7 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             insert_after=insert_after,
             insert_before=insert_before,
             replace_pattern=replace_pattern,
+            language=language,
         ))
         
         logger.debug(f"Parsed CODE_BLOCK: {file_path} [{mode}]")
@@ -1594,52 +1594,50 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
     return None
 
 
-def _extract_code_from_block(content: str) -> Optional[str]:
+def _extract_code_from_block(content: str) -> Tuple[Optional[str], str]:
     """
     Извлекает код из CODE_BLOCK.
     
     Ищет код внутри code fence (```language ... ```)
-    Корректно обрабатывает случаи, когда ``` встречается внутри кода
-    (например, в regex-паттернах или строковых литералах).
-    """
-    # Улучшенный паттерн: закрывающий ``` должен быть в начале строки
-    # (возможно с пробелами перед ним) и не внутри строки
+    Корректно обрабатывает случаи, когда ``` встречается внутри кода.
     
+    Поддерживает языки: python, javascript, typescript, go, java и другие.
+    
+    Returns:
+        Tuple of (code_content, language)
+    """
     # Ищем открывающий fence
     open_match = re.search(r'^```(\w*)\s*$', content, re.MULTILINE)
     if not open_match:
-        # Fallback: ищем ``` в любом месте (для однострочных случаев)
+        # Fallback: ищем ``` в любом месте
         open_match = re.search(r'```(\w*)\n', content)
         if not open_match:
-            return None
+            return (None, "python")
     
     code_start = open_match.end()
-    language = open_match.group(1)
+    language = open_match.group(1).lower() if open_match.group(1) else "python"
     
-    # Ищем закрывающий fence: ``` в начале строки (с возможными пробелами)
-    # НЕ ищем ``` который является частью содержимого (внутри строк)
+    # Normalize language aliases
+    language_map = {
+        'py': 'python',
+        'js': 'javascript',
+        'ts': 'typescript',
+        'golang': 'go',
+    }
+    language = language_map.get(language, language)
+    
+    # Ищем закрывающий fence
     remaining_content = content[code_start:]
-    
-    # Паттерн: ``` в начале строки или после переноса строки
-    # Исключаем ``` внутри строковых литералов
-    close_pattern = r'^```\s*$'
-    
     lines = remaining_content.split('\n')
     code_lines = []
     
-    for i, line in enumerate(lines):
-        # Проверяем, является ли строка закрывающим fence
+    for line in lines:
         if re.match(r'^\s*```\s*$', line):
-            # Нашли закрывающий fence
             break
         code_lines.append(line)
-    else:
-        # Не нашли закрывающий fence - возвращаем всё
-        # (возможно fence обрезан или отсутствует)
-        pass
     
     code = '\n'.join(code_lines).strip()
-    return code if code else None
+    return (code, language) if code else (None, language)
 
 
 

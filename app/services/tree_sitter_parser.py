@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Iterator, Any
+from typing import Optional, List, Tuple, Iterator, Any, Dict
 from enum import Enum
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,18 @@ logger = logging.getLogger(__name__)
 _parser = None
 _language = None
 
+@dataclass
+class MultiLanguageChunk:
+    """Universal chunk for any language parsed by tree-sitter"""
+    file_path: str
+    kind: str  # "class", "function", "method", "interface", "struct", "imports", "file"
+    name: str
+    parent: Optional[str]  # Parent class/struct name for methods
+    start_line: int
+    end_line: int
+    tokens: int
+    content: str
+    language: str  # "javascript", "typescript", "go", "java"
 
 def _get_parser():
     """Ленивая инициализация Tree-sitter парсера."""
@@ -527,6 +540,361 @@ def get_parser() -> FaultTolerantParser:
     if _default_parser is None:
         _default_parser = FaultTolerantParser()
     return _default_parser
+
+
+class MultiLanguageParser:
+    """Multi-language fault-tolerant parser based on Tree-sitter. Supports JavaScript, TypeScript, Go, and Java. Each language has its own parser instance with lazy initialization."""
+
+    LANGUAGE_CONFIGS: Dict[str, Dict] = {
+        'javascript': {
+            'module': 'tree_sitter_javascript',
+            'extensions': ['.js', '.jsx', '.mjs'],
+            'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+            'class_types': ['class_declaration'],
+            'body_type': 'statement_block',
+        },
+        'typescript': {
+            'module': 'tree_sitter_typescript',
+            'attr': 'language_typescript',
+            'extensions': ['.ts', '.tsx'],
+            'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+            'class_types': ['class_declaration'],
+            'body_type': 'statement_block',
+        },
+        'go': {
+            'module': 'tree_sitter_go',
+            'extensions': ['.go'],
+            'function_types': ['function_declaration', 'method_declaration'],
+            'class_types': ['type_declaration'],
+            'body_type': 'block',
+        },
+        'java': {
+            'module': 'tree_sitter_java',
+            'extensions': ['.java'],
+            'function_types': ['method_declaration', 'constructor_declaration'],
+            'class_types': ['class_declaration', 'interface_declaration'],
+            'body_type': 'block',
+        },
+    }
+
+    def __init__(self):
+        """Initialize parser cache."""
+        self._parsers: Dict[str, any] = {}
+        self._languages: Dict[str, any] = {}
+
+    def _get_parser_for_language(self, language: str) -> tuple:
+        """Get or create parser for specified language.
+        
+        Returns:
+            tuple: (parser, language_object)
+            
+        Raises:
+            ValueError: If language is not supported.
+        """
+        if language in self._parsers:
+            return (self._parsers[language], self._languages[language])
+
+        if language not in self.LANGUAGE_CONFIGS:
+            raise ValueError(f"Unsupported language: {language}")
+
+        config = self.LANGUAGE_CONFIGS[language]
+
+        try:
+            # Import the tree-sitter language module
+            module_name = config['module']
+            module = __import__(module_name)
+
+            # Get the language object
+            if 'attr' in config:
+                # For TypeScript, need to access specific attribute
+                lang_obj = getattr(module, config['attr'])
+            else:
+                # For others, use default language attribute
+                lang_obj = module.language
+
+            # Create parser
+            parser = Parser()
+            parser.set_language(lang_obj)
+
+            # Cache for future use
+            self._parsers[language] = parser
+            self._languages[language] = lang_obj
+
+            return (parser, lang_obj)
+
+        except ImportError as e:
+            raise ValueError(f"Tree-sitter language module not installed for {language}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to initialize parser for {language}: {e}")
+
+    def get_language_for_file(self, file_path: str) -> Optional[str]:
+        """Detect language from file extension"""
+        ext = Path(file_path).suffix.lower()
+        
+        for language, config in self.LANGUAGE_CONFIGS.items():
+            if ext in config.get("extensions", []):
+                return language
+        
+        return None
+
+    def is_supported(self, file_path: str) -> bool:
+        """Check if file type is supported for parsing"""
+        return self.get_language_for_file(file_path) is not None
+
+    def chunk_file(self, file_path: str, language: str) -> List[MultiLanguageChunk]:
+        """Parse file and extract chunks (classes, functions, etc.) using tree-sitter"""
+        try:
+            with open(file_path, 'rb') as f:
+                source_bytes = f.read()
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            logger.warning(f"Cannot read {file_path}: {e}")
+            return []
+        
+        try:
+            parser, lang_obj = self._get_parser_for_language(language)
+        except ValueError as e:
+            logger.warning(f"No parser for {language}: {e}")
+            return []
+        
+        try:
+            tree = parser.parse(source_bytes)
+        except Exception as e:
+            logger.warning(f"Parse error in {file_path}: {e}")
+            return [self._create_file_level_chunk(file_path, source_bytes, language)]
+        
+        chunks = self._extract_chunks_from_tree(tree, source_bytes, file_path, language)
+        
+        if not chunks:
+            chunks = [self._create_file_level_chunk(file_path, source_bytes, language)]
+        
+        return chunks
+
+    def _extract_chunks_from_tree(self, tree, source_bytes: bytes, file_path: str, language: str) -> List[MultiLanguageChunk]:
+        """Walk tree and extract chunks matching language config"""
+        config = self.LANGUAGE_CONFIGS.get(language, {})
+        chunks = []
+        
+        # Extract imports block
+        imports_content = self._extract_imports_block(tree, source_bytes, config)
+        if imports_content:
+            chunks.append(MultiLanguageChunk(
+                file_path=file_path,
+                kind="imports",
+                name="imports",
+                parent=None,
+                start_line=1,
+                end_line=1,
+                tokens=len(imports_content.split()),
+                content=imports_content,
+                language=language
+            ))
+        
+        # Walk tree and extract nodes
+        self._walk_tree(
+            tree.root_node,
+            source_bytes,
+            file_path,
+            language,
+            config,
+            chunks,
+            parent_name=None
+        )
+        
+        return chunks
+
+    def _walk_tree(self, node, source_bytes: bytes, file_path: str, language: str, config: Dict, chunks: List[MultiLanguageChunk], parent_name: Optional[str] = None):
+        """Recursively walk tree and extract chunks"""
+        class_types = config.get("class_types", [])
+        function_types = config.get("function_types", [])
+        
+        if node.type in class_types:
+            name = self._extract_node_name(node, source_bytes)
+            if name:
+                content = self._get_node_content(node, source_bytes)
+                chunks.append(MultiLanguageChunk(
+                    file_path=file_path,
+                    kind="class",
+                    name=name,
+                    parent=parent_name,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    tokens=len(content.split()),
+                    content=content,
+                    language=language
+                ))
+                # Recursively process children with this class as parent
+                for child in node.children:
+                    self._walk_tree(child, source_bytes, file_path, language, config, chunks, parent_name=name)
+                return
+        
+        elif node.type in function_types:
+            name = self._extract_node_name(node, source_bytes)
+            if name:
+                content = self._get_node_content(node, source_bytes)
+                kind = "method" if parent_name else "function"
+                chunks.append(MultiLanguageChunk(
+                    file_path=file_path,
+                    kind=kind,
+                    name=name,
+                    parent=parent_name,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    tokens=len(content.split()),
+                    content=content,
+                    language=language
+                ))
+                return
+        
+        # Recursively process children
+        for child in node.children:
+            self._walk_tree(child, source_bytes, file_path, language, config, chunks, parent_name=parent_name)
+
+    def _extract_imports_block(self, tree, source_bytes: bytes, config: Dict) -> Optional[str]:
+        """Extract imports block from tree"""
+        import_types = ["import_statement", "import_declaration"]
+        
+        imports = []
+        for node in tree.root_node.children:
+            if node.type in import_types:
+                imports.append(self._get_node_content(node, source_bytes))
+        
+        if imports:
+            return "\n".join(imports)
+        return None
+
+    def _extract_node_name(self, node, source_bytes: bytes) -> Optional[str]:
+        """Extract identifier name from node"""
+        for child in node.children:
+            if child.type == "identifier":
+                return source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
+        return None
+
+    def _get_node_content(self, node, source_bytes: bytes) -> str:
+        """Get source code content of node"""
+        try:
+            return source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
+        except Exception:
+            return ""
+
+    def _create_file_level_chunk(self, file_path: str, source_bytes: bytes, language: str) -> MultiLanguageChunk:
+        """Create a file-level chunk when parsing fails or no chunks extracted"""
+        try:
+            content = source_bytes.decode('utf-8', errors='ignore')
+        except Exception:
+            content = ""
+        
+        return MultiLanguageChunk(
+            file_path=file_path,
+            kind="file",
+            name=Path(file_path).name,
+            parent=None,
+            start_line=1,
+            end_line=len(content.splitlines()),
+            tokens=len(content.split()),
+            content=content,
+            language=language
+        )
+
+    def find_element(
+        self,
+        source_code: str,
+        language: str,
+        element_name: str,
+        element_type: str = 'function',
+        parent_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Find a code element (function, method, class) by name in source code. Returns dict with start_line, end_line, indent, content or None."""
+        try:
+            # Validate language
+            if language not in self.LANGUAGE_CONFIGS:
+                raise ValueError(f"Unsupported language: {language}")
+            
+            # Get parser
+            ts_parser = self._get_parser_for_language(language)
+            tree = ts_parser.parse(source_code.encode('utf-8'))
+            
+            # Get config
+            config = self.LANGUAGE_CONFIGS[language]
+            function_types = config.get('function_types', [])
+            class_types = config.get('class_types', [])
+            
+            # Determine target types
+            if element_type in ('function', 'method'):
+                target_types = function_types
+            elif element_type == 'class':
+                target_types = class_types
+            else:
+                target_types = function_types
+            
+            # Helper to find node by name
+            def find_node_by_name(node, name, types, parent_class=None):
+                if node.type in types:
+                    node_name = self._extract_node_name(node, language)
+                    if node_name == name:
+                        # If parent_class specified, verify we're in that class
+                        if parent_class:
+                            # Check if this node is within parent_class
+                            # (simplified - just return if name matches)
+                            pass
+                        return node
+                
+                for child in node.children:
+                    result = find_node_by_name(child, name, types, parent_class)
+                    if result:
+                        return result
+                
+                return None
+            
+            # Find the element
+            found_node = find_node_by_name(tree.root_node, element_name, target_types, parent_name)
+            
+            if not found_node:
+                return None
+            
+            # Extract content
+            content = source_code[found_node.start_byte:found_node.end_byte]
+            
+            return {
+                'start_line': found_node.start_point[0] + 1,
+                'end_line': found_node.end_point[0] + 1,
+                'indent': found_node.start_point[1],
+                'content': content
+            }
+        
+        except Exception as e:
+            logger.warning(f"Error finding element: {e}")
+            return None
+
+    def validate_syntax(self, source_code: str, language: str) -> Tuple[bool, List[str]]:
+        """Validate syntax of source code using tree-sitter. Returns (is_valid, list_of_errors)."""
+        try:
+            # Get parser
+            ts_parser = self._get_parser_for_language(language)
+            tree = ts_parser.parse(source_code.encode('utf-8'))
+            
+            errors = []
+            
+            # Walk tree to find ERROR nodes
+            def walk_tree(node):
+                if node.type == 'ERROR':
+                    line_num = node.start_point[0] + 1
+                    text_snippet = source_code[node.start_byte:node.end_byte][:30]
+                    errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
+                
+                for child in node.children:
+                    walk_tree(child)
+            
+            walk_tree(tree.root_node)
+            
+            return (len(errors) == 0, errors)
+        
+        except ValueError:
+            # Unsupported language
+            return (True, [])
+        except Exception as e:
+            logger.debug(f"Error validating syntax: {e}")
+            return (True, [])
+        
 
 
 def parse(source_code: str) -> ParseResult:

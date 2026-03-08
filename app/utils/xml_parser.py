@@ -24,7 +24,10 @@ from enum import Enum
 
 class CodeLanguage(Enum):
     PYTHON = "python"
+    JAVASCRIPT = "javascript"
+    TYPESCRIPT = "typescript"
     GO = "go"
+    JAVA = "java"
     SQL = "sql"
     JSON = "json"
     MARKDOWN = "markdown"
@@ -89,8 +92,15 @@ class XMLResponseParser:
     LANGUAGE_MAP = {
         'python': CodeLanguage.PYTHON,
         'py': CodeLanguage.PYTHON,
+        'javascript': CodeLanguage.JAVASCRIPT,
+        'js': CodeLanguage.JAVASCRIPT,
+        'jsx': CodeLanguage.JAVASCRIPT,
+        'typescript': CodeLanguage.TYPESCRIPT,
+        'ts': CodeLanguage.TYPESCRIPT,
+        'tsx': CodeLanguage.TYPESCRIPT,
         'go': CodeLanguage.GO,
         'golang': CodeLanguage.GO,
+        'java': CodeLanguage.JAVA,
         'sql': CodeLanguage.SQL,
         'json': CodeLanguage.JSON,
         'markdown': CodeLanguage.MARKDOWN,
@@ -279,6 +289,12 @@ class XMLResponseParser:
                 return CodeLanguage.PYTHON
             if 'go' in hint_lower:
                 return CodeLanguage.GO
+            if 'javascript' in hint_lower or hint_lower in ('js', 'jsx'):
+                return CodeLanguage.JAVASCRIPT
+            if 'typescript' in hint_lower or hint_lower in ('ts', 'tsx'):
+                return CodeLanguage.TYPESCRIPT
+            if 'java' in hint_lower and 'javascript' not in hint_lower:
+                return CodeLanguage.JAVA
             if 'sql' in hint_lower:
                 return CodeLanguage.SQL
             if 'json' in hint_lower:
@@ -300,6 +316,14 @@ class XMLResponseParser:
         # SQL
         if re.search(r'^(CREATE |SELECT |INSERT |UPDATE |DELETE |ALTER )', content, re.MULTILINE | re.IGNORECASE):
             return CodeLanguage.SQL
+        
+        # JavaScript/TypeScript
+        if re.search(r'^(const |let |var |export |import .+ from |function |module\.exports)', content, re.MULTILINE):
+            return CodeLanguage.JAVASCRIPT
+
+        # Java
+        if re.search(r'^(public |private |protected |class .+ \{|interface .+ \{|import java\.)', content, re.MULTILINE):
+            return CodeLanguage.JAVA
         
         # JSON
         content_stripped = content.strip()

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Dict, Set, Optional, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
+from app.services.language_adapter import AdapterManager
+
 
 if TYPE_CHECKING:
     from app.services.backup_manager import BackupManager
@@ -902,7 +904,61 @@ class VirtualFileSystem:
         self._python_files_cache = sorted(list(files_set))
         return self._python_files_cache
 
+    def get_all_supported_files(self) -> List[str]:
+        """Returns list of all files in project that are supported by language adapters (Python, JS/TS, Go, Java)."""
+        adapter_manager = AdapterManager.get_instance()
+        supported_extensions = adapter_manager.get_supported_extensions()
+        
+        # Add .py to supported extensions (always supported)
+        supported_extensions = set(supported_extensions)
+        supported_extensions.add('.py')
+        
+        files_set = set()
+        
+        # Scan disk for files with supported extensions
+        try:
+            for file_path in self.project_root.rglob('*'):
+                if not file_path.is_file():
+                    continue
+                
+                # Check if file has supported extension
+                if file_path.suffix not in supported_extensions:
+                    continue
+                
+                # Skip system directories
+                parts = file_path.parts
+                if any(p in ('.git', '__pycache__', 'venv', '.venv', 'node_modules') for p in parts):
+                    continue
+                
+                # Get relative path
+                try:
+                    rel_path = str(file_path.relative_to(self.project_root)).replace('\\', '/')
+                    files_set.add(rel_path)
+                except ValueError:
+                    continue
+        
+        except Exception:
+            pass
+        
+        # Apply staged changes
+        for file_path in self._pending_changes.keys():
+            change = self._pending_changes[file_path]
+            if change.is_deletion:
+                files_set.discard(file_path)
+            else:
+                files_set.add(file_path)
+        
+        return sorted(list(files_set))
 
+    def get_file_language(self, file_path: str) -> Optional[str]:
+        """Returns the programming language for a file based on its extension."""
+        if file_path.endswith('.py'):
+            return "python"
+        
+        adapter_manager = AdapterManager.get_instance()
+        language = adapter_manager.get_language_for_file(file_path)
+        
+        return language
 
     def get_project_python(self) -> str:
         """

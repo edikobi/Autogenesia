@@ -33,13 +33,19 @@ class Config:
     ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", "https://routerai.ru/api/v1")    
     
     
-    # ============ ОБНОВЛЕННЫЕ МОДЕЛИ (Через RouterAI) ============
+    # ============ ОБНОВЛЕННЫЕ МОДЕЛИ  ============
     
     # Claude Opus 4.5 - для сложных задач (security, concurrency, heisenbug)
     MODEL_OPUS_4_5 = "anthropic/claude-opus-4.5" 
     
+    # Claude Opus 4.6 - для сложных задач (security, concurrency, heisenbug) и теперь с большим окном
+    MODEL_OPUS_4_6 = "anthropic/claude-opus-4.6" 
+    
     # Claude Sonnet 4.5 - для средних задач (NEW!)
     MODEL_SONNET_4_5 = "anthropic/claude-sonnet-4.5"
+    
+    # Claude Sonnet 4.6 - для средних задач (новая модель)
+    MODEL_SONNET_4_6 = "anthropic/claude-sonnet-4.6"
     
     # GPT-5.1 Codex Max - для простых задач
     # (переменная называется MODEL_GPT_5_2_Codex по историческим причинам)
@@ -47,10 +53,20 @@ class Config:
     
 # !!! GEMINI 3.0 PRO (РЕАЛЬНАЯ МОДЕЛЬ) !!!
     # ID модели в RouterAI/OpenRouter для версии 3.0 Pro
-    MODEL_GEMINI_3_PRO = "google/gemini-3-pro-preview"     
+    MODEL_GEMINI_3_PRO = "google/gemini-3.1-pro-preview"     
     
 # Gemini 2.0 Flash (для роутера и сжатия истории)
     MODEL_GEMINI_2_FLASH = "google/gemini-2.0-flash-001"
+    
+    # Gemini 2.5 Flash-Lite
+    MODEL_GEMINI_FLASH_LITE = "google/gemini-2.5-flash-lite-preview-09-2025"
+    
+    
+# !!! НОВАЯ МОДЕЛЬ QWEN3 MAX THINKING !!!
+    MODEL_QWEN3_MAX_THINKING = "qwen/qwen3-max-thinking"    
+    
+    MODEL_QWEN_3_5_Plus = "qwen/qwen3.5-plus-02-15"    
+
 
     # ============ НОВЫЕ МОДЕЛИ ГЕНЕРАТОРА (OpenRouter) ============
     MODEL_GLM_4_7 = "z-ai/glm-4.7"                # GLM 4.7
@@ -77,7 +93,7 @@ class Config:
         # === ГРУППА ROUTER AI ===
         
         # --- GEMINI 3.0 PRO CONFIG ---(разблокировать, если на Openrouter заблочат, просто поставить ключ из переменных росс. провайдера)
-        "google/gemini-3-pro-preview": {
+        "google/gemini-3.1-pro-preview": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER",
@@ -90,11 +106,56 @@ class Config:
             }
         },
         
+        "google/gemini-2.5-flash-lite-preview-09-2025": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter (Google)",
+            "extra_params": {
+                # "thinking": {"enabled": False}  # опционально
+            }
+        },
+        
+        "qwen/qwen3-max-thinking": {  # Используем ID модели
+            "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
+            "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
+            "provider_name": "OPENROUTER",    # Название провайдера для отображения
+
+            # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
+            # Для OpenAI-совместимых API, таких как OpenRouter, используется параметр reasoning_effort [citation:10].
+            "extra_params": {
+                "reasoning_effort": "xhigh"  # Или "medium", "max" для максимальной глубины.
+                # Вы можете поэкспериментировать с разными уровнями.
+            }
+        },
+        
+        # Конфигурация для Qwen3.5 Plus (НОВАЯ!)
+        "qwen/qwen3.5-plus-02-15": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter (Qwen 3.5 Plus)",
+            
+            # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
+            # Используем параметр "reasoning" как указано в документации OpenRouter [citation:1]
+            "extra_params": {
+                "reasoning": {
+                    "enabled": True  # Включаем показ мыслительного процесса модели
+                    # При необходимости можно добавить "budget_tokens" для контроля длины рассуждений
+                }
+            }
+        },
+        
         "anthropic/claude-opus-4.5": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER"
         },
+        
+        "anthropic/claude-opus-4.6": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OPENROUTER"
+        },
+
         # Claude Sonnet 4.5 - для средних задач (multi-component, business logic)
         "anthropic/claude-sonnet-4.5": {
             "api_key": OPENROUTER_API_KEY,
@@ -109,6 +170,22 @@ class Config:
                 }
             }
         },
+        
+        # Claude Sonnet 4.6 - для средних задач (multi-component, business logic)
+        "anthropic/claude-sonnet-4.6": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OPENROUTER",
+            
+            # Extended thinking для Sonnet 4.6 (оптимальный бюджет для средних задач)
+            "extra_params": {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 40000  # Сбалансированный бюджет: достаточно для анализа, не избыточно
+                }
+            }
+        },
+        
         "openai/gpt-5.2-codex": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
@@ -293,8 +370,8 @@ class Config:
         "test_output_limit": 2000,
         
         # --- AI Validator Model Selection ---
-        "ai_validator_token_threshold": 10000,
-        "ai_validator_model_small": "qwen/qwen-2.5-coder-32b-instruct",
+        "ai_validator_token_threshold": 25000,
+        "ai_validator_model_small": MODEL_GEMINI_FLASH_LITE,
         "ai_validator_model_large": "deepseek-chat",
         
         # --- Validation Levels ---
@@ -376,11 +453,15 @@ class Config:
         """
         return [
             cls.MODEL_OPUS_4_5,
+            cls.MODEL_OPUS_4_6,
             cls.MODEL_SONNET_4_5,  # NEW!
+            cls.MODEL_SONNET_4_6,
             cls.MODEL_GPT_5_2_Codex,
             cls.MODEL_GEMINI_2_FLASH,
             cls.MODEL_GEMINI_3_PRO,
             cls.MODEL_DEEPSEEK_REASONER,
+            cls.MODEL_QWEN3_MAX_THINKING,
+            cls.MODEL_QWEN_3_5_Plus,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
         ]
     
@@ -410,10 +491,14 @@ class Config:
         # Словарь красивых имен
         model_names = {
             cls.MODEL_OPUS_4_5: "Claude Opus 4.5",
+            cls.MODEL_OPUS_4_6: "Claude Opus 4.6",
             cls.MODEL_SONNET_4_5: "Claude Sonnet 4.5",  # NEW!
+            cls.MODEL_SONNET_4_6: "Claude Sonnet 4.6",
             cls.MODEL_DEEPSEEK_REASONER: "DeepSeek V3.2 Reasoning",
             cls.MODEL_GPT_5_2_Codex: "GPT-5.2 Codex",
-            cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.0 Pro (Thinking)",
+            cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.1 Pro (Thinking)",
+            cls.MODEL_QWEN3_MAX_THINKING: "🚀 Qwen3 Max Thinking (Deep Reasoning)",
+            cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
             # Модели генератора

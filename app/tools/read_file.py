@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-
+from app.services.tree_sitter_parser import MultiLanguageParser
 from app.utils.xml_wrapper import XMLWrapper, FileContent
 from app.utils.token_counter import TokenCounter
 from app.utils.file_types import FileTypeDetector
@@ -234,6 +234,97 @@ def read_file_raw(
         file_type=file_type
     )
 
+def read_code_chunk_tool(file_path: str, chunk_name: str, project_dir: str, index: Optional[Dict[str, Any]] = None) -> str:
+    """Read a specific class or function from a file. Works for Python and other supported languages."""
+    
+    # Validate inputs
+    if not file_path or not chunk_name or not project_dir:
+        return "<error>Missing required parameters: file_path, chunk_name, project_dir</error>"
+    
+    # Build full path
+    full_path = Path(project_dir) / file_path
+    
+    # Security check: path traversal
+    try:
+        full_path = full_path.resolve()
+        project_root = Path(project_dir).resolve()
+        full_path.relative_to(project_root)
+    except (ValueError, RuntimeError):
+        return f"<error>Path traversal detected: {file_path}</error>"
+    
+    # Check file exists
+    if not full_path.exists():
+        return f"<error>File not found: {file_path}</error>"
+    
+    # Detect file type
+    detector = FileTypeDetector()
+    file_type = detector.detect(str(full_path))
+    
+    try:
+        if file_type == "python":
+            # Use existing SmartPythonChunker for Python files
+            chunker = SmartPythonChunker(TokenCounter())
+            tree = chunker.chunk_file_to_tree(str(full_path))
+            
+            # Find chunk by name
+            def find_chunk(node, target_name):
+                if node.name == target_name:
+                    return node
+                for child in node.children:
+                    result = find_chunk(child, target_name)
+                    if result:
+                        return result
+                return None
+            
+            chunk = find_chunk(tree, chunk_name)
+            if not chunk:
+                return f"<error>Chunk '{chunk_name}' not found in {file_path}. Available: {[c.name for c in tree.children]}</error>"
+            
+            return f"""<code_chunk>
+<file>{file_path}</file>
+<chunk_name>{chunk_name}</chunk_name>
+<lines>{chunk.start_line}-{chunk.end_line}</lines>
+<tokens>{chunk.tokens}</tokens>
+<content>
+{chunk.content}
+</content>
+</code_chunk>"""
+        
+        else:
+            # Use MultiLanguageParser for other supported languages
+            parser = MultiLanguageParser()
+            language = parser.get_language_for_file(str(full_path))
+            
+            if not language:
+                return f"<error>Unsupported file type: {file_type}</error>"
+            
+            chunks = parser.chunk_file(str(full_path), language)
+            
+            # Find chunk by name
+            found_chunk = None
+            for chunk in chunks:
+                if chunk.name == chunk_name:
+                    found_chunk = chunk
+                    break
+            
+            if not found_chunk:
+                available = [c.name for c in chunks if c.kind != "imports"]
+                return f"<error>Chunk '{chunk_name}' not found in {file_path}. Available: {available}</error>"
+            
+            return f"""<code_chunk>
+<file>{file_path}</file>
+<chunk_name>{found_chunk.name}</chunk_name>
+<kind>{found_chunk.kind}</kind>
+<lines>{found_chunk.start_line}-{found_chunk.end_line}</lines>
+<tokens>{found_chunk.tokens}</tokens>
+<content>
+{found_chunk.content}
+</content>
+</code_chunk>"""
+    
+    except Exception as e:
+        logger.error(f"Error reading chunk {chunk_name} from {file_path}: {e}")
+        return f"<error>Failed to read chunk: {str(e)}</error>"
 
 def _format_error(message: str) -> str:
     """Format error message in XML-like structure"""

@@ -19,9 +19,13 @@ CENTRALIZED PROMPT STORAGE:
 - All other prompts: stored here
 """
 import logging
-from typing import Optional, List, Dict, Any
+import re
+import os
+
+from typing import Optional, List, Dict, Any, Set
 from config.settings import Config
 # (пока выключим импорт) from app.advice.advice_loader import get_catalog_for_prompt
+from pathlib import Path
 
 
 # Advice system import (with fallback)
@@ -512,26 +516,9 @@ def _build_adaptive_block_ask_reasoner() -> str:
 def _build_adaptive_block_executor() -> str:
     """Build adaptive block for executor models (GPT-5.1 Codex Max) in ASK mode"""
     prompt_parts: List[str] = []
-    prompt_parts.append("")
-    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    prompt_parts.append("🛑 STOP PATCHING SYMPTOMS - FIX THE ROOT CAUSE")
-    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    prompt_parts.append("You are trained to be efficient, but efficiency is NOT fixing symptoms.")
-    prompt_parts.append("Your instructions must address the ARCHITECTURAL ROOT CAUSE.")
-    prompt_parts.append("")
-    prompt_parts.append("MANDATORY 'WIDE-SCAN' PROTOCOL:")
-    prompt_parts.append("1. Before writing instructions, mentally LIST all files connected to the target file.")
-    prompt_parts.append("2. Ask: 'If I change X here, what breaks in Y?'")
-    prompt_parts.append("3. INSTRUCTION RULE: If a change requires updating 3 files, write instructions for ALL 3.")
-    prompt_parts.append("   Do not assume someone else will fix the dependencies.")
-    prompt_parts.append("")
-    prompt_parts.append("ANTI-COMPACTION TRIGGER:")
-    prompt_parts.append("Explicitly state: 'SCOPE ANALYSIS: This change affects [List Files].'")
-    prompt_parts.append("This forces your context window to acknowledge the full scope.")
-    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     prompt_parts.append('')
-    prompt_parts.append('⚠️ **PARSER-SAFETY PROTOCOL FOR GPT-5.1 CODEX MAX** ⚠️')
+    prompt_parts.append('⚠️ **PARSER-SAFETY PROTOCOL ** ⚠️')
     prompt_parts.append('')
     prompt_parts.append('YOUR INSTRUCTIONS ARE MACHINE-READABLE DATA, NOT NATURAL TEXT.')
     prompt_parts.append('The parser extracts your instruction using EXACT STRING MATCHING.')
@@ -3163,6 +3150,24 @@ HISTORY_COMPRESSOR_TOOL_RESULT_PROMPT = _build_history_compressor_tool_result_pr
 HISTORY_COMPRESSOR_REASONING_PROMPT = _build_history_compressor_reasoning_prompt()
 
 
+def _get_language_specific_examples(languages: Set) -> str:
+    """Build language-specific examples based on requested languages."""
+    parts = []
+    
+    if 'javascript' in languages:
+        parts.append(_get_javascript_prompt_injection())
+        parts.append("")
+
+    if 'java' in languages:
+        parts.append(_get_java_prompt_injection())
+        parts.append("")
+
+    if 'go' in languages:
+        parts.append(_get_go_prompt_injection())
+        parts.append("")
+
+    return "\n".join(parts)
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -4003,6 +4008,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("### FILE: `path/to/file.ext`")
     prompt_parts.append("**Operation:** [MODIFY | CREATE]")
+    prompt_parts.append("**Language:** [Python | JavaScript | TypeScript | Java | Go |]")
     prompt_parts.append("")
     prompt_parts.append("If CREATE and folder doesn't exist:")
     prompt_parts.append("**Create folders:** `path/to/` (Orchestrator will create these)")
@@ -4119,7 +4125,7 @@ def _build_agent_mode_instruction_format() -> str:
 
 
     prompt_parts.append("")
-    prompt_parts.append("• **REPLACE_FILE** — Complete replacement of an entire file. Your instruction must describe the required components and their contracts (classes, functions, constants, integration points). The Code Generator produces the full file content based on your architectural specification.")
+    prompt_parts.append("• **REPLACE_FILE** — Complete replacement of an entire file. Your instruction should provide an architectural specification of the new file's components and contracts — focus on describing the required structure and behavior, not on providing the final code. The Code Generator will generate the complete file content based on your specification and the existing context.")
     prompt_parts.append("  Use when: creating a new file or completely rewriting an existing one.")
 
     prompt_parts.append("• **MODIFY_ATTRIBUTE** — Change a field, constant or relationship defined in the class. (Scope: Class Body)")
@@ -4153,6 +4159,7 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("### FILE: `CREATE: path/to/new_file.py`")
     prompt_parts.append("**Operation:** CREATE")
+    prompt_parts.append("**Language:** [Python | JavaScript | TypeScript | Java | Go |]")
     prompt_parts.append("**Create folders:** `path/to/` (if doesn't exist)")
     prompt_parts.append("")
     prompt_parts.append("**Purpose:** [One sentence — what this file does]")
@@ -4268,6 +4275,7 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     
     # === Role Definition (Agent Mode specific) ===
     prompt_parts.append('You are Orchestrator — AI Code Assistant in AGENT MODE.')
+    prompt_parts.append('You can work with multiple programming languages: Python, JavaScript/TypeScript, Go, Java. Follow the user’s explicit language preference if given; otherwise, choose the language based on project context.')
     prompt_parts.append('')
     prompt_parts.append('AGENT MODE DIFFERENCE:')
     prompt_parts.append('Your instructions will be executed by an automated pipeline that:')
@@ -4543,7 +4551,9 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     prompt_parts.append('1. Your instruction guides the Code Generator in producing the required code. Clear specifications lead to accurate implementation.')    
     prompt_parts.append('2. Precise specifications prevent hallucinations — define behavior, not implementation steps.')
     prompt_parts.append('3. Wrong paths = code in wrong files')
-    prompt_parts.append('4. Clear specifications reduce iterations — focus on architectural clarity, not implementation volume.')    
+    prompt_parts.append('4. Clear specifications reduce iterations — focus on architectural clarity, not implementation volume.')
+    # новодел для мультиязычности
+    prompt_parts.append('5. When describing a file, include its programming language as part of the architectural specification (e.g., Python, JavaScript, TypeScript, Java, Go). This helps the Code Generator apply correct syntax and conventions.')    
     prompt_parts.append('')
     
     return '\n'.join(prompt_parts)
@@ -4584,6 +4594,7 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     
     # === Role Definition ===
     prompt_parts.append('You are the LEAD SOFTWARE ARCHITECT in AGENT MODE.')
+    prompt_parts.append('You can design projects in multiple programming languages: Python, JavaScript/TypeScript, Go, Java. Follow the user’s explicit language preference if given; otherwise, select the language based on project requirements.')
     prompt_parts.append('You are designing a professional-grade software project from scratch.')
     prompt_parts.append('')
     prompt_parts.append('AGENT MODE DIFFERENCE:')
@@ -4592,6 +4603,7 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('• Code Generator only writes code, not creates folders')
     prompt_parts.append('• Pipeline will create folders you specify before generating code')
     prompt_parts.append('')
+    
     
     # === ENVIRONMENT & DEPENDENCIES ===
     prompt_parts.append('')
@@ -4923,6 +4935,7 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('✅ All files are complete and ready to run.')
     prompt_parts.append('✅ Folder structure is clearly defined.')
     prompt_parts.append('✅ Dependencies are installed via tools.')
+    prompt_parts.append('✅ For each file, the programming language is included in its architectural description, guiding the Code Generator.')    
     prompt_parts.append('')
     
     # === Instruction Format ===
@@ -5242,6 +5255,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("4. INCLUDE DOCSTRINGS — every function/method needs a docstring")
     prompt_parts.append("5. PRESERVE EXISTING — don't remove code that should stay")
     prompt_parts.append("6. MATCH STYLE — follow the existing code style in the file")
+    prompt_parts.append("7. USE THE CORRECT PROGRAMMING LANGUAGE — generate code in the language appropriate for each file (Python, JavaScript, TypeScript, Java, Go).")
     prompt_parts.append("")
     prompt_parts.append("=" * 60)
     prompt_parts.append("⚠️ INDENTATION RULES (CRITICAL)")
@@ -5453,11 +5467,308 @@ def _build_code_generator_user_prompt_agent() -> str:
 CODE_GENERATOR_SYSTEM_PROMPT_AGENT = _build_code_generator_system_prompt_agent()
 CODE_GENERATOR_USER_PROMPT_AGENT = _build_code_generator_user_prompt_agent()
 
+def _detect_languages_from_files(file_paths: List[str]) -> Set[str]:
+    """Detect non-Python programming languages from a list of file paths. Returns a set of language identifiers: 'javascript', 'go', 'java', 'sql'."""
+    ext_to_lang = {
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "javascript",
+        ".tsx": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".go": "go",
+        ".java": "java",
+        ".kt": "java",
+        ".kts": "java",
+        ".sql": "sql",
+    }
+    
+    detected = set()
+    
+    for file_path in file_paths:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ext_to_lang:
+            detected.add(ext_to_lang[ext])
+    
+    return detected
+def _get_javascript_prompt_injection() -> str:
+    """Return language-specific prompt injection for JavaScript/TypeScript files with CODE_BLOCK examples."""
+    parts = []
+    parts.append("")
+    parts.append("=" * 60)
+    parts.append("JAVASCRIPT / TYPESCRIPT LANGUAGE GUIDE")
+    parts.append("=" * 60)
+    parts.append("")
+    parts.append("When working with .js, .jsx, .ts, .tsx files, use the appropriate language in code fences.")
+    parts.append("Use ```javascript for .js/.jsx files and ```typescript for .ts/.tsx files.")
+    parts.append("")
+    parts.append("⚠️ SYNTAX RULES FOR JS/TS:")
+    parts.append("• Use correct braces {} for blocks, not indentation-based syntax")
+    parts.append("• Ensure all brackets, parentheses, and braces are properly matched")
+    parts.append("• Use semicolons consistently according to the project's style")
+    parts.append("• Preserve existing module system (import/export vs require/module.exports)")
+    parts.append("• Maintain TypeScript type annotations when working with .ts files")
+    parts.append("")
+    parts.append("**JS/TS Example 1: Replace a function in a JS file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/utils/helpers.js")
+    parts.append("MODE: REPLACE_FUNCTION")
+    parts.append("TARGET_FUNCTION: formatDate")
+    parts.append("")
+    parts.append("```javascript")
+    parts.append("function formatDate(date) {")
+    parts.append("  const options = { year: 'numeric', month: 'long', day: 'numeric' };")
+    parts.append("  return new Date(date).toLocaleDateString('en-US', options);")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**JS/TS Example 2: Replace a method in a TypeScript class**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/services/UserService.ts")
+    parts.append("MODE: REPLACE_METHOD")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("TARGET_METHOD: findById")
+    parts.append("")
+    parts.append("```typescript")
+    parts.append("async findById(id: string): Promise<User | null> {")
+    parts.append("  const user = await this.repository.findOne({ where: { id } });")
+    parts.append("  if (!user) {")
+    parts.append("    return null;")
+    parts.append("  }")
+    parts.append("  return user;")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**JS/TS Example 3: Add import to a JS/TS file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/components/App.tsx")
+    parts.append("MODE: INSERT_IMPORT")
+    parts.append("")
+    parts.append("```typescript")
+    parts.append("import { useState, useEffect } from 'react';")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**JS/TS Example 4: Create new JS/TS file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/utils/validators.ts")
+    parts.append("MODE: REPLACE_FILE")
+    parts.append("")
+    parts.append("```typescript")
+    parts.append("export interface ValidationResult {")
+    parts.append("  valid: boolean;")
+    parts.append("  errors: string[];")
+    parts.append("}")
+    parts.append("")
+    parts.append("export function validateEmail(email: string): ValidationResult {")
+    parts.append("  const pattern = /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$/;")
+    parts.append("  const valid = pattern.test(email);")
+    parts.append("  return {")
+    parts.append("    valid,")
+    parts.append("    errors: valid ? [] : ['Invalid email format'],")
+    parts.append("  };")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    return "\n".join(parts)
+
+def _get_go_prompt_injection() -> str:
+    """Return language-specific prompt injection for Go files with CODE_BLOCK examples."""
+    parts = []
+    parts.append("")
+    parts.append("=" * 60)
+    parts.append("GO LANGUAGE GUIDE")
+    parts.append("=" * 60)
+    parts.append("")
+    parts.append("When working with .go files, use ```go in code fences.")
+    parts.append("")
+    parts.append("⚠️ SYNTAX RULES FOR GO:")
+    parts.append("• Always include the package declaration at the top when using REPLACE_FILE")
+    parts.append("• Use proper Go formatting (gofmt-compatible)")
+    parts.append("• Ensure all imports are used — Go does not allow unused imports")
+    parts.append("• Use proper error handling patterns (if err != nil)")
+    parts.append("• Opening braces must be on the same line as the statement")
+    parts.append("• Exported identifiers start with uppercase, unexported with lowercase")
+    parts.append("")
+    parts.append("**Go Example 1: Replace a function in a Go file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/handlers/user.go")
+    parts.append("MODE: REPLACE_FUNCTION")
+    parts.append("TARGET_FUNCTION: GetUserByID")
+    parts.append("")
+    parts.append("```go")
+    parts.append("func GetUserByID(db *sql.DB, id int) (*User, error) {")
+    parts.append("\tvar user User")
+    parts.append("\terr := db.QueryRow(\"SELECT id, name, email FROM users WHERE id = ?\", id).Scan(&user.ID, &user.Name, &user.Email)")
+    parts.append("\tif err != nil {")
+    parts.append("\t\treturn nil, fmt.Errorf(\"user not found: %w\", err)")
+    parts.append("\t}")
+    parts.append("\treturn &user, nil")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Go Example 2: Replace a method on a struct**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/services/auth.go")
+    parts.append("MODE: REPLACE_METHOD")
+    parts.append("TARGET_CLASS: AuthService")
+    parts.append("TARGET_METHOD: ValidateToken")
+    parts.append("")
+    parts.append("```go")
+    parts.append("func (s *AuthService) ValidateToken(token string) (bool, error) {")
+    parts.append("\tclaims, err := jwt.Parse(token, s.keyFunc)")
+    parts.append("\tif err != nil {")
+    parts.append("\t\treturn false, err")
+    parts.append("\t}")
+    parts.append("\treturn claims.Valid, nil")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Go Example 3: Create new Go file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/utils/validators.go")
+    parts.append("MODE: REPLACE_FILE")
+    parts.append("")
+    parts.append("```go")
+    parts.append("package utils")
+    parts.append("")
+    parts.append("import \"regexp\"")
+    parts.append("")
+    parts.append("var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$`)")
+    parts.append("")
+    parts.append("func ValidateEmail(email string) bool {")
+    parts.append("\treturn emailRegex.MatchString(email)")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Go Example 4: Add import to a Go file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/handlers/user.go")
+    parts.append("MODE: INSERT_IMPORT")
+    parts.append("")
+    parts.append("```go")
+    parts.append("import \"encoding/json\"")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    return "\n".join(parts)
+
+def _get_java_prompt_injection() -> str:
+    """Return language-specific prompt injection for Java/Kotlin files with CODE_BLOCK examples."""
+    parts = []
+    parts.append("")
+    parts.append("=" * 60)
+    parts.append("JAVA / KOTLIN LANGUAGE GUIDE")
+    parts.append("=" * 60)
+    parts.append("")
+    parts.append("When working with .java files, use ```java in code fences.")
+    parts.append("When working with .kt/.kts files, use ```kotlin in code fences.")
+    parts.append("")
+    parts.append("⚠️ SYNTAX RULES FOR JAVA/KOTLIN:")
+    parts.append("• Ensure all braces are properly matched")
+    parts.append("• Include proper access modifiers (public, private, protected)")
+    parts.append("• Use correct package and import declarations when using REPLACE_FILE")
+    parts.append("• Follow Java naming conventions: PascalCase for classes, camelCase for methods")
+    parts.append("• Handle checked exceptions appropriately (throws clause or try-catch)")
+    parts.append("• Use @Override annotation when overriding parent methods")
+    parts.append("")
+    parts.append("**Java Example 1: Replace a method in a Java class**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/main/java/com/app/service/UserService.java")
+    parts.append("MODE: REPLACE_METHOD")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("TARGET_METHOD: findById")
+    parts.append("")
+    parts.append("```java")
+    parts.append("public User findById(Long id) {")
+    parts.append("    return userRepository.findById(id)")
+    parts.append("        .orElseThrow(() -> new UserNotFoundException(id));")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Java Example 2: Add a new method to a Java class**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/main/java/com/app/service/UserService.java")
+    parts.append("MODE: INSERT_CLASS")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("INSERT_AFTER: findById")
+    parts.append("")
+    parts.append("```java")
+    parts.append("public List<User> findAll() {")
+    parts.append("    return userRepository.findAll();")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Java Example 3: Create new Java file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/main/java/com/app/util/Validators.java")
+    parts.append("MODE: REPLACE_FILE")
+    parts.append("")
+    parts.append("```java")
+    parts.append("package com.app.util;")
+    parts.append("")
+    parts.append("import java.util.regex.Pattern;")
+    parts.append("")
+    parts.append("public class Validators {")
+    parts.append("    private static final Pattern EMAIL_PATTERN = Pattern.compile(")
+    parts.append("        \"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\\\.[a-zA-Z0-9-.]+$\");")
+    parts.append("")
+    parts.append("    public static boolean validateEmail(String email) {")
+    parts.append("        return EMAIL_PATTERN.matcher(email).matches();")
+    parts.append("    }")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Java Example 4: Add import to a Java file**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/main/java/com/app/controller/AuthController.java")
+    parts.append("MODE: INSERT_IMPORT")
+    parts.append("")
+    parts.append("```java")
+    parts.append("import org.springframework.beans.factory.annotation.Autowired;")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    return "\n".join(parts)
+
 
 def format_code_generator_prompt_agent(
     orchestrator_instruction: str,
     file_code: str = "",
-    file_contents: Optional[Dict[str, str]] = None,  # NEW: multiple files
+    file_contents: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """
     Format Code Generator prompts for AGENT MODE.
@@ -5472,16 +5783,26 @@ def format_code_generator_prompt_agent(
     """
     # Format file contents for prompt
     if file_contents and len(file_contents) > 0:
-        # Multiple files mode
         formatted_files = _format_multiple_files(file_contents)
     elif file_code:
-        # Legacy single file mode
         formatted_files = file_code
     else:
         formatted_files = "[NEW FILE - no existing content]"
     
     # Determine if multi-file instruction
     is_multi_file = file_contents and len(file_contents) > 1
+    
+    # === Language-aware prompt injection ===
+    # Detect non-Python languages from file paths
+    file_paths = list(file_contents.keys()) if file_contents else []
+    detected_languages = _detect_languages_from_files(file_paths)
+    
+    # Build system prompt with optional language injections
+    system_prompt = _build_code_generator_system_prompt_agent()
+    if detected_languages:
+        lang_examples = _get_language_specific_examples(detected_languages)
+        if lang_examples:
+            system_prompt = system_prompt + "\n" + lang_examples
     
     # Build user prompt
     user_prompt = _build_user_prompt_with_files(
@@ -5491,7 +5812,7 @@ def format_code_generator_prompt_agent(
     )
     
     return {
-        "system": CODE_GENERATOR_SYSTEM_PROMPT_AGENT,
+        "system": system_prompt,
         "user": user_prompt,
     }
 
@@ -5762,24 +6083,3 @@ def format_orchestrator_prompt_new_project_agent(
 
 
 
-def format_code_generator_prompt_agent(
-    orchestrator_instruction: str,
-    file_code: str = ""
-) -> Dict[str, str]:
-    """
-    Format Code Generator prompts for AGENT MODE.
-    
-    Args:
-        orchestrator_instruction: Instruction from Orchestrator
-        file_code: Existing file content (for context)
-        
-    Returns:
-        Dict with "system" and "user" prompt strings
-    """
-    return {
-        "system": CODE_GENERATOR_SYSTEM_PROMPT_AGENT,
-        "user": CODE_GENERATOR_USER_PROMPT_AGENT.format(
-            orchestrator_instruction=orchestrator_instruction,
-            file_code=file_code or "[NEW FILE — no existing content]",
-        )
-    }

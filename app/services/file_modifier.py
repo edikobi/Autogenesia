@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
+from app.services.tree_sitter_parser import MultiLanguageParser
 import ast
 import textwrap
   
@@ -208,30 +209,73 @@ class ParsedCodeBlock:
         insert_before: Вставить перед элементом
         replace_pattern: Паттерн для поиска и замены
     """
-    file_path: str
-    mode: str
-    code: str
-    target_class: Optional[str] = None
-    target_method: Optional[str] = None
-    target_function: Optional[str] = None
-    target_attribute: Optional[str] = None  # ⭐ НОВОЕ: Для замены атрибута
-    insert_after: Optional[str] = None
-    insert_before: Optional[str] = None
-    replace_pattern: Optional[str] = None
+    def __init__(
+        self,
+        file_path: str,
+        mode: str,
+        code: str,
+        target_class: Optional[str] = None,
+        target_method: Optional[str] = None,
+        target_function: Optional[str] = None,
+        target_attribute: Optional[str] = None,
+        insert_after: Optional[str] = None,
+        insert_before: Optional[str] = None,
+        replace_pattern: Optional[str] = None,
+        language: Optional[str] = None,
+    ):
+        self.file_path = file_path
+        self.mode = mode
+        self.code = code
+        self.target_class = target_class
+        self.target_method = target_method
+        self.target_function = target_function
+        self.target_attribute = target_attribute
+        self.insert_after = insert_after
+        self.insert_before = insert_before
+        self.replace_pattern = replace_pattern
+        self.language = language  # Programming language (python, javascript, typescript, go, java)
     
     def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
         return {
-            "file_path": self.file_path,
-            "mode": self.mode,
-            "code": self.code,
-            "target_class": self.target_class,
-            "target_method": self.target_method,
-            "target_function": self.target_function,
-            "target_attribute": self.target_attribute,
-            "insert_after": self.insert_after,
-            "insert_before": self.insert_before,
-            "replace_pattern": self.replace_pattern,
+            'file_path': self.file_path,
+            'mode': self.mode,
+            'code': self.code,
+            'target_class': self.target_class,
+            'target_method': self.target_method,
+            'target_function': self.target_function,
+            'target_attribute': self.target_attribute,
+            'insert_after': self.insert_after,
+            'insert_before': self.insert_before,
+            'replace_pattern': self.replace_pattern,
+            'language': self.language,
         }
+
+class MultiLangDiffInstruction:
+    """Instruction for diff-based code insertion in non-Python languages."""
+    
+    def __init__(
+        self,
+        file_path: str,
+        language: str,
+        code: str,
+        target_class: Optional[str] = None,
+        target_method: Optional[str] = None,
+        target_function: Optional[str] = None,
+        insert_after: Optional[str] = None,
+        insert_before: Optional[str] = None,
+        replace_pattern: Optional[str] = None,
+    ):
+        """Initialize multi-language diff instruction."""
+        self.file_path = file_path
+        self.language = language
+        self.code = code
+        self.target_class = target_class
+        self.target_method = target_method
+        self.target_function = target_function
+        self.insert_after = insert_after
+        self.insert_before = insert_before
+        self.replace_pattern = replace_pattern
 
 # ============================================================================
 # MAIN CLASS
@@ -958,6 +1002,379 @@ class FileModifier:
             logger.info(f"Staged CODE_BLOCK modification to {block.file_path}")
         
         return result
+    
+    def apply_multilang_diff(self, existing_content: str, instruction: 'MultiLangDiffInstruction') -> ModifyResult:
+        """
+        Apply multi-language diffs for non-Python files (JS/TS, Go, Java).
+        
+        Supports two modes:
+        1. INSERT mode: insert_after or insert_before specified
+        2. REPLACE mode: replace_pattern specified
+        
+        Args:
+            existing_content: Current file content
+            instruction: MultiLangDiffInstruction with language, code, and targets
+            
+        Returns:
+            ModifyResult with success status and modified content
+        """
+        try:
+            # === VALIDATION: Language support ===
+            supported_langs = ['javascript', 'typescript', 'go', 'java']
+            if instruction.language not in supported_langs:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Unsupported language: {instruction.language}. Supported: {', '.join(supported_langs)}"
+                )
+            
+            # === INITIALIZATION ===
+            from app.services.tree_sitter_parser import MultiLanguageParser
+            parser = MultiLanguageParser()
+            source_bytes = existing_content.encode('utf-8')
+            lines = existing_content.split('\n')
+            
+            # === MODE 1: INSERT ===
+            if instruction.insert_after or instruction.insert_before:
+                # Find target element if specified
+                target_info = None
+                if instruction.target_function or instruction.target_class or instruction.target_method:
+                    target_info = self._find_multilang_target(
+                        parser,
+                        source_bytes,
+                        instruction.language,
+                        instruction.target_class,
+                        instruction.target_method,
+                        instruction.target_function
+                    )
+                    
+                    if not target_info:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Target not found: class={instruction.target_class}, method={instruction.target_method}, function={instruction.target_function}"
+                        )
+                
+                # Find insertion point
+                insert_line = None
+                
+                if instruction.insert_after:
+                    result = self._find_unique_anchor(lines, instruction.insert_after)
+                    if not result['found']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Insert anchor not found: '{instruction.insert_after}'"
+                        )
+                    if not result['unique']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_after}'"
+                        )
+                    insert_line = result['line_number'] + 1
+                    
+                elif instruction.insert_before:
+                    result = self._find_unique_anchor(lines, instruction.insert_before)
+                    if not result['found']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Insert anchor not found: '{instruction.insert_before}'"
+                        )
+                    if not result['unique']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_before}'"
+                        )
+                    insert_line = result['line_number']
+                    
+                elif target_info:
+                    insert_line = target_info['end_line']
+                
+                else:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message="No insertion point specified (no insert_after, insert_before, or target)"
+                    )
+                
+                # Calculate indentation from reference line
+                indent = 0
+                if insert_line > 0 and insert_line <= len(lines):
+                    ref_line = lines[insert_line - 1] if insert_line > 0 else ""
+                    indent = len(ref_line) - len(ref_line.lstrip())
+                
+                # Indent code lines
+                code_lines = instruction.code.split('\n')
+                indented_lines = []
+                for line in code_lines:
+                    if line.strip():
+                        indented_lines.append(' ' * indent + line)
+                    else:
+                        indented_lines.append(line)
+                
+                # Insert at position
+                modified_lines = lines[:insert_line] + indented_lines + lines[insert_line:]
+                modified_content = '\n'.join(modified_lines)
+                
+                # Validate syntax
+                is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                if not is_valid:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Syntax validation failed after insertion: {'; '.join(errors[:3])}"
+                    )
+                
+                return ModifyResult(
+                    success=True,
+                    new_content=modified_content,
+                    message=f"Inserted code for {instruction.language}",
+                    changes_made=[f"Inserted code at line {insert_line}"]
+                )
+            
+            # === MODE 2: REPLACE ===
+            elif instruction.replace_pattern:
+                # Find target scope if specified
+                search_start = 0
+                search_end = len(lines)
+                
+                if instruction.target_function or instruction.target_class or instruction.target_method:
+                    target_info = self._find_multilang_target(
+                        parser,
+                        source_bytes,
+                        instruction.language,
+                        instruction.target_class,
+                        instruction.target_method,
+                        instruction.target_function
+                    )
+                    
+                    if target_info:
+                        search_start = target_info['start_line']
+                        search_end = target_info['end_line']
+                
+                # Try to find pattern in target scope
+                result = self._find_unique_anchor(lines, instruction.replace_pattern, search_start, search_end)
+                
+                if result['found'] and result['unique']:
+                    # Found and unique in target scope
+                    replace_line = result['line_number']
+                    modified_lines = lines.copy()
+                    modified_lines[replace_line] = instruction.code
+                    modified_content = '\n'.join(modified_lines)
+                    
+                    # Validate syntax
+                    is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                    if not is_valid:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Syntax validation failed after replacement: {'; '.join(errors[:3])}"
+                        )
+                    
+                    return ModifyResult(
+                        success=True,
+                        new_content=modified_content,
+                        message=f"Replaced code for {instruction.language}",
+                        changes_made=[f"Replaced line {replace_line + 1}"]
+                    )
+                
+                # Not found in target scope, try full file search
+                if instruction.target_function or instruction.target_class or instruction.target_method:
+                    result = self._find_unique_anchor(lines, instruction.replace_pattern, 0, len(lines))
+                    
+                    if result['found'] and result['unique']:
+                        # Found in full file
+                        replace_line = result['line_number']
+                        modified_lines = lines.copy()
+                        modified_lines[replace_line] = instruction.code
+                        modified_content = '\n'.join(modified_lines)
+                        
+                        # Validate syntax
+                        is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                        if not is_valid:
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                message=f"Syntax validation failed after replacement: {'; '.join(errors[:3])}"
+                            )
+                        
+                        return ModifyResult(
+                            success=True,
+                            new_content=modified_content,
+                            message=f"Replaced code for {instruction.language}",
+                            changes_made=[f"Replaced line {replace_line + 1} (outside target scope)"],
+                            warnings=["Pattern found outside target scope"]
+                        )
+                    
+                    elif not result['found']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Replace pattern '{instruction.replace_pattern}' not found"
+                        )
+                    else:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
+                        )
+                
+                else:
+                    # No target specified, use full file result
+                    if not result['found']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Replace pattern '{instruction.replace_pattern}' not found"
+                        )
+                    elif not result['unique']:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
+                        )
+            
+            else:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="No operation specified (no insert_after, insert_before, or replace_pattern)"
+                )
+        
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error in apply_multilang_diff: {e}", exc_info=True)
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Unexpected error: {str(e)}"
+            )
+    
+    def _find_multilang_target(
+        self,
+        parser: 'MultiLanguageParser',
+        source_bytes: bytes,
+        language: str,
+        target_class: Optional[str],
+        target_method: Optional[str],
+        target_function: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Find a target element (class, method, function) in non-Python code using tree-sitter."""
+        try:
+            # Get parser for language
+            ts_parser = parser._get_parser_for_language(language)
+            tree = ts_parser.parse(source_bytes)
+            
+            # Get language config
+            lang_config = parser.LANGUAGE_CONFIGS.get(language, {})
+            function_types = lang_config.get('function_types', [])
+            class_types = lang_config.get('class_types', [])
+            
+            # Walk tree to find target
+            def walk_tree(node):
+                # Check for class
+                if target_class and node.type in class_types:
+                    name = parser._extract_node_name(node, language)
+                    if name == target_class:
+                        # Found class, now search for method within
+                        if target_method:
+                            for child in node.children:
+                                result = walk_tree(child)
+                                if result and result.get('name') == target_method:
+                                    return result
+                        else:
+                            return {
+                                'node': node,
+                                'start_line': node.start_point[0] + 1,
+                                'end_line': node.end_point[0] + 1,
+                                'name': name,
+                                'kind': 'class'
+                            }
+                
+                # Check for function/method
+                if (target_function or target_method) and node.type in function_types:
+                    name = parser._extract_node_name(node, language)
+                    if name == (target_function or target_method):
+                        return {
+                            'node': node,
+                            'start_line': node.start_point[0] + 1,
+                            'end_line': node.end_point[0] + 1,
+                            'name': name,
+                            'kind': 'function'
+                        }
+                
+                # Recurse
+                for child in node.children:
+                    result = walk_tree(child)
+                    if result:
+                        return result
+                
+                return None
+            
+            return walk_tree(tree.root_node)
+        
+        except Exception as e:
+            logger.warning(f"Error finding multilang target: {e}")
+            return None
+    
+    def _find_unique_anchor(
+        self,
+        lines: List[str],
+        pattern: str,
+        start_line: int = 0,
+        end_line: Optional[int] = None
+    ) -> Tuple[bool, int, str]:
+        """Find a unique anchor pattern in lines. Returns (is_unique, line_index, error_message)."""
+        if end_line is None:
+            end_line = len(lines)
+        
+        matches = []
+        
+        for i in range(start_line, min(end_line, len(lines))):
+            if pattern in lines[i]:
+                matches.append(i)
+        
+        if len(matches) == 0:
+            return (False, -1, f"Pattern '{pattern}' not found")
+        
+        if len(matches) > 1:
+            return (False, -1, f"Pattern '{pattern}' is not unique, found {len(matches)} occurrences")
+        
+        return (True, matches[0], "")
+    
+    def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:
+        """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""
+        try:
+            parser = MultiLanguageParser()
+            ts_parser = parser._get_parser_for_language(language)
+            tree = ts_parser.parse(content.encode('utf-8'))
+            
+            errors = []
+            
+            # Walk tree to find ERROR nodes
+            def walk_tree(node):
+                if node.type == 'ERROR':
+                    line_num = node.start_point[0] + 1
+                    text_snippet = content[node.start_byte:node.end_byte][:30]
+                    errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
+                
+                for child in node.children:
+                    walk_tree(child)
+            
+            walk_tree(tree.root_node)
+            
+            return (len(errors) == 0, errors)
+        
+        except ValueError:
+            # Unsupported language - skip validation
+            return (True, [])
+        except Exception as e:
+            logger.debug(f"Error validating syntax: {e}")
+            return (True, [])
     
     def validate_vfs_state(
         self, 

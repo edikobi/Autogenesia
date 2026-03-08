@@ -127,20 +127,60 @@ def _read_file_content(
 
 
 def _extract_imports(content: str) -> List[str]:
-    """Извлекает импорты из содержимого файла (простой regex)."""
+    """Извлекает импорты из содержимого файла (поддержка нескольких языков)."""
     imports = []
     
-    # import X
+    # Python: import X
     import_pattern = r'^import\s+([\w.]+)'
     for match in re.finditer(import_pattern, content, re.MULTILINE):
         imports.append(match.group(1))
     
-    # from X import Y
+    # Python: from X import Y
     from_pattern = r'^from\s+([\w.]+)\s+import'
     for match in re.finditer(from_pattern, content, re.MULTILINE):
         imports.append(match.group(1))
     
-    return imports
+    # JavaScript/TypeScript: import ... from 'X' or "X"
+    js_import_from = r'''import\s+.*?\s+from\s+['"]([^'"]+)['"]'''
+    for match in re.finditer(js_import_from, content, re.MULTILINE):
+        imports.append(match.group(1))
+    
+    # JavaScript/TypeScript: import 'X' or "X" (side-effect import)
+    js_import_direct = r'''import\s+['"]([^'"]+)['"]'''
+    for match in re.finditer(js_import_direct, content, re.MULTILINE):
+        imports.append(match.group(1))
+    
+    # JavaScript: require('X') or require("X")
+    js_require = r'''require\s*\(\s*['"]([^'"]+)['"]\s*\)'''
+    for match in re.finditer(js_require, content):
+        imports.append(match.group(1))
+    
+    # Go: import "X" or import ( "X" )
+    go_import = r'''import\s+["']([^"']+)["']'''
+    for match in re.finditer(go_import, content, re.MULTILINE):
+        imports.append(match.group(1))
+    
+    # Go: import block
+    go_import_block = r'''import\s*\(\s*([^)]+)\s*\)'''
+    for block_match in re.finditer(go_import_block, content, re.DOTALL):
+        block = block_match.group(1)
+        for line_match in re.finditer(r'''["']([^"']+)["']''', block):
+            imports.append(line_match.group(1))
+    
+    # Java: import X.Y.Z;
+    java_import = r'^import\s+([\w.]+);'
+    for match in re.finditer(java_import, content, re.MULTILINE):
+        imports.append(match.group(1))
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_imports = []
+    for imp in imports:
+        if imp not in seen:
+            seen.add(imp)
+            unique_imports.append(imp)
+    
+    return unique_imports
 
 
 def _find_importers(

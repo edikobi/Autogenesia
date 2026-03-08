@@ -13,12 +13,14 @@ import sys
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Set, Tuple
 import ast
 from enum import Enum
 from importlib.metadata import packages_distributions
+from app.services.language_adapter import AdapterManager
 
 
 logger = logging.getLogger(__name__)
@@ -655,6 +657,391 @@ class DependencyManager:
         """
         package_name = self.resolve_package_name(import_name)
         return self.install_package(package_name)
+    
+    
+    def install_npm_package(self, package_name: str, version: Optional[str] = None, dev: bool = False) -> InstallationResult:
+        """Install an npm package for JavaScript/TypeScript projects."""
+        try:
+            # Check if npm is available
+            if shutil.which('npm') is None:
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message="npm not available. Install Node.js to use npm packages."
+                )
+            
+            # Build command
+            cmd = ['npm', 'install']
+            
+            if dev:
+                cmd.append('--save-dev')
+            
+            if version:
+                cmd.append(f"{package_name}@{version}")
+            else:
+                cmd.append(package_name)
+            
+            # Run subprocess
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=300,
+                cwd=str(self.project_root)
+            )
+            
+            if result.returncode == 0:
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.SUCCESS,
+                    message=f"Successfully installed {package_name}"
+                )
+            else:
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message=result.stderr[:500] if result.stderr else "Unknown error"
+                )
+        
+        except subprocess.TimeoutExpired:
+            return InstallationResult(
+                package=package_name,
+                status=InstallResult.FAILED,
+                message="Installation timed out (5 min)"
+            )
+        except Exception as e:
+            return InstallationResult(
+                package=package_name,
+                status=InstallResult.FAILED,
+                message=str(e)
+            )
+    
+    def install_go_module(self, module_path: str) -> InstallationResult:
+        """Install a Go module using go get."""
+        try:
+            # Check if go is available
+            if shutil.which('go') is None:
+                return InstallationResult(
+                    package=module_path,
+                    status=InstallResult.FAILED,
+                    message="go not available. Install Go to use Go modules."
+                )
+            
+            # Build command
+            cmd = ['go', 'get', module_path]
+            
+            # Run subprocess
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=300,
+                cwd=str(self.project_root)
+            )
+            
+            if result.returncode == 0:
+                return InstallationResult(
+                    package=module_path,
+                    status=InstallResult.SUCCESS,
+                    message=f"Successfully installed {module_path}"
+                )
+            else:
+                return InstallationResult(
+                    package=module_path,
+                    status=InstallResult.FAILED,
+                    message=result.stderr[:500] if result.stderr else "Unknown error"
+                )
+        
+        except subprocess.TimeoutExpired:
+            return InstallationResult(
+                package=module_path,
+                status=InstallResult.FAILED,
+                message="Installation timed out (5 min)"
+            )
+        except Exception as e:
+            return InstallationResult(
+                package=module_path,
+                status=InstallResult.FAILED,
+                message=str(e)
+            )
+    
+    def install_maven_dependency(self, group_id: str, artifact_id: str, version: Optional[str] = None) -> InstallationResult:
+        """
+        Install a Maven dependency for Java projects.
+        
+        If Maven is not installed, returns a non-critical warning that allows
+        the pipeline to continue (the error will be reported but not block execution).
+        
+        Args:
+            group_id: Maven group ID (e.g., 'org.apache.commons')
+            artifact_id: Maven artifact ID (e.g., 'commons-lang3')
+            version: Optional version (e.g., '3.12.0')
+            
+        Returns:
+            InstallationResult with status and message
+        """
+        package_name = f"{group_id}:{artifact_id}" + (f":{version}" if version else "")
+        
+        try:
+            # Check if Maven is available
+            if shutil.which('mvn') is None:
+                # Return a special status that indicates Maven is not available
+                # This is NOT a critical error - the pipeline should continue
+                logger.warning(
+                    f"Maven not available. Cannot install Java dependency: {package_name}. "
+                    "Install Maven to manage Java dependencies automatically."
+                )
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.NOT_FOUND,
+                    message=(
+                        "Maven not available. Java dependency management requires Maven. "
+                        "Please install Maven or add the dependency manually to pom.xml. "
+                        "This is not a critical error - compilation will be attempted anyway."
+                    )
+                )
+            
+            # Check if pom.xml exists
+            pom_path = self.project_root / "pom.xml"
+            if not pom_path.exists():
+                logger.warning(f"No pom.xml found in {self.project_root}. Cannot add Maven dependency.")
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message=(
+                        f"No pom.xml found in project root. "
+                        "Create a pom.xml file or use 'mvn archetype:generate' to initialize a Maven project."
+                    )
+                )
+            
+            # Build Maven command to add dependency
+            # Using dependency:get to download the dependency to local repository
+            cmd = [
+                'mvn', 'dependency:get',
+                f'-DgroupId={group_id}',
+                f'-DartifactId={artifact_id}',
+            ]
+            
+            if version:
+                cmd.append(f'-Dversion={version}')
+            
+            logger.info(f"Installing Maven dependency: {package_name}")
+            
+            # Run subprocess
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=300,
+                cwd=str(self.project_root)
+            )
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully installed Maven dependency: {package_name}")
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.SUCCESS,
+                    message=f"Successfully downloaded {package_name} to local Maven repository"
+                )
+            else:
+                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
+                logger.warning(f"Failed to install Maven dependency {package_name}: {error_msg}")
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message=f"Maven dependency installation failed: {error_msg}"
+                )
+        
+        except subprocess.TimeoutExpired:
+            return InstallationResult(
+                package=package_name,
+                status=InstallResult.FAILED,
+                message="Maven dependency installation timed out (5 min)"
+            )
+        except Exception as e:
+            return InstallationResult(
+                package=package_name,
+                status=InstallResult.FAILED,
+                message=str(e)
+            )
+    
+    def install_dependency_for_language(self, package_name: str, language: Optional[str] = None, version: Optional[str] = None) -> InstallationResult:
+        """
+        Install a dependency for a specific language.
+        
+        If language is None, tries all supported package managers in order:
+        Python (pip) → JavaScript (npm) → Go (go get)
+        
+        For Java, attempts to parse Maven coordinates from package_name
+        (format: 'groupId:artifactId' or 'groupId:artifactId:version').
+        
+        Args:
+            package_name: Package name or Maven coordinates for Java
+            language: Target language (python, javascript, typescript, go, java)
+            version: Optional version specifier
+            
+        Returns:
+            InstallationResult with status and message
+        """
+        try:
+            if language is not None:
+                language_lower = language.lower()
+                
+                if language_lower == "python":
+                    return self.install_from_import(package_name)
+                
+                elif language_lower in ("javascript", "typescript"):
+                    return self.install_npm_package(package_name, version)
+                
+                elif language_lower == "go":
+                    return self.install_go_module(package_name)
+                
+                elif language_lower == "java":
+                    # Parse Maven coordinates from package_name
+                    # Expected format: 'groupId:artifactId' or 'groupId:artifactId:version'
+                    parts = package_name.split(':')
+                    if len(parts) >= 2:
+                        group_id = parts[0]
+                        artifact_id = parts[1]
+                        maven_version = parts[2] if len(parts) > 2 else version
+                        return self.install_maven_dependency(group_id, artifact_id, maven_version)
+                    else:
+                        # Cannot parse as Maven coordinates
+                        return InstallationResult(
+                            package=package_name,
+                            status=InstallResult.FAILED,
+                            message=(
+                                f"Invalid Java dependency format: '{package_name}'. "
+                                "Use Maven coordinates format: 'groupId:artifactId' or 'groupId:artifactId:version'"
+                            )
+                        )
+                
+                else:
+                    return InstallationResult(
+                        package=package_name,
+                        status=InstallResult.FAILED,
+                        message=f"Unsupported language: {language}"
+                    )
+            
+            else:
+                # Try all supported package managers in order
+                # Python first (most common)
+                result = self.install_from_import(package_name)
+                if result.status == InstallResult.SUCCESS:
+                    return result
+                
+                # Try npm
+                result = self.install_npm_package(package_name, version)
+                if result.status == InstallResult.SUCCESS:
+                    return result
+                
+                # Try go
+                result = self.install_go_module(package_name)
+                if result.status == InstallResult.SUCCESS:
+                    return result
+                
+                # Return last result (go) if all failed
+                return result
+        
+        except Exception as e:
+            return InstallationResult(
+                package=package_name,
+                status=InstallResult.FAILED,
+                message=str(e)
+            )
+    
+    def detect_missing_dependencies_from_errors(self, error_message: str, language: str) -> List[str]:
+        """
+        Detects missing dependencies from error messages.
+        
+        Supports patterns for:
+        - Python: ImportError, ModuleNotFoundError
+        - JavaScript/Node: Cannot find module
+        - TypeScript: TS2307 errors
+        - Go: module not found
+        - Java: cannot find symbol
+        """
+        missing_deps = []
+        
+        if not error_message:
+            return missing_deps
+        
+        try:
+            # Python patterns
+            if language.lower() in ('python', 'py'):
+                # Pattern: ModuleNotFoundError: No module named 'requests'
+                py_pattern = r"(?:ModuleNotFoundError|ImportError):\s*No module named ['\"]([^'\"]+)['\"]"
+                matches = re.findall(py_pattern, error_message)
+                missing_deps.extend(matches)
+                
+                # Pattern: cannot import name 'X' from 'module'
+                py_import_pattern = r"cannot import name ['\"]([^'\"]+)['\"]"
+                matches = re.findall(py_import_pattern, error_message)
+                missing_deps.extend(matches)
+            
+            # JavaScript/Node patterns
+            if language.lower() in ('javascript', 'js', 'node'):
+                # Pattern: Cannot find module 'express'
+                js_pattern = r"Cannot find module ['\"]([^'\"]+)['\"]"
+                matches = re.findall(js_pattern, error_message)
+                missing_deps.extend(matches)
+                
+                # Pattern: MODULE_NOT_FOUND
+                js_not_found = r"code: 'MODULE_NOT_FOUND'.*require\(['\"]([^'\"]+)['\"]\)"
+                matches = re.findall(js_not_found, error_message, re.DOTALL)
+                missing_deps.extend(matches)
+            
+            # TypeScript patterns
+            if language.lower() in ('typescript', 'ts'):
+                # Pattern: error TS2307: Cannot find module 'lodash'
+                ts_pattern = r"error TS2307: Cannot find module ['\"]([^'\"]+)['\"]"
+                matches = re.findall(ts_pattern, error_message)
+                missing_deps.extend(matches)
+            
+            # Go patterns
+            if language.lower() in ('go', 'golang'):
+                # Pattern: go: module github.com/user/pkg: not found
+                go_pattern = r"go: module ([^\s:]+):\s*not found"
+                matches = re.findall(go_pattern, error_message)
+                missing_deps.extend(matches)
+                
+                # Pattern: cannot find package "github.com/user/pkg"
+                go_pkg_pattern = r"cannot find package ['\"]([^'\"]+)['\"]"
+                matches = re.findall(go_pkg_pattern, error_message)
+                missing_deps.extend(matches)
+            
+            # Java patterns
+            if language.lower() in ('java', 'jvm'):
+                # Pattern: error: cannot find symbol class ArrayList
+                # Note: This is harder to map to Maven coordinates, so we just log a warning
+                java_pattern = r"error: cannot find symbol.*class ([A-Z][a-zA-Z0-9_]+)"
+                matches = re.findall(java_pattern, error_message)
+                if matches:
+                    logger.warning(
+                        f"Java import errors detected for classes: {matches}. "
+                        f"Manual Maven dependency resolution may be required."
+                    )
+                    # Don't add to missing_deps as we can't reliably map class names to Maven coordinates
+            
+        except re.error as e:
+            logger.warning(f"Regex error in detect_missing_dependencies_from_errors: {e}")
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_deps = []
+        for dep in missing_deps:
+            if dep not in seen:
+                seen.add(dep)
+                unique_deps.append(dep)
+        
+        return unique_deps
+    
     
     def install_missing_from_validation(
         self,

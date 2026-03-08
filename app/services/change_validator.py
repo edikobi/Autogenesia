@@ -29,8 +29,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
-from app.tools.dependency_manager import IMPORT_TO_PACKAGE, get_import_to_package_mapping
+from app.tools.dependency_manager import IMPORT_TO_PACKAGE, get_import_to_package_mapping, DependencyManager
 from app.services.runtime_tester import RuntimeTester, RuntimeTestSummary, TestStatus, AppType
+from app.services.language_adapter import AdapterManager
 
 import time
 
@@ -63,6 +64,66 @@ class IssueSeverity(Enum):
     WARNING = "warning"
     INFO = "info"
 
+class ValidationErrorCode(Enum):
+    """Unique error codes for validation issues, categorized by language and error type."""
+    
+    # Python errors
+    PYTHON_SYNTAX_ERROR = "python_syntax_error"
+    PYTHON_IMPORT_ERROR = "python_import_error"
+    PYTHON_RUNTIME_ERROR = "python_runtime_error"
+    PYTHON_TYPE_ERROR = "python_type_error"
+    
+    # JavaScript/TypeScript errors
+    JS_SYNTAX_ERROR = "javascript_syntax_error"
+    JS_LINT_ERROR = "javascript_lint_error"
+    JS_COMPILE_ERROR = "javascript_compile_error"
+    JS_MISSING_MODULE = "javascript_missing_module"
+    TS_SYNTAX_ERROR = "typescript_syntax_error"
+    TS_COMPILE_ERROR = "typescript_compile_error"
+    TS_TYPE_ERROR = "typescript_type_error"
+    
+    # Go errors
+    GO_SYNTAX_ERROR = "go_syntax_error"
+    GO_COMPILE_ERROR = "go_compile_error"
+    GO_LINT_ERROR = "go_lint_error"
+    GO_MISSING_PACKAGE = "go_missing_package"
+    
+    # Java errors
+    JAVA_SYNTAX_ERROR = "java_syntax_error"
+    JAVA_COMPILE_ERROR = "java_compile_error"
+    JAVA_LINT_ERROR = "java_lint_error"
+    JAVA_MISSING_PACKAGE = "java_missing_package"
+    
+    # Generic errors
+    UNKNOWN_ERROR = "unknown_error"
+    TIMEOUT_ERROR = "timeout_error"
+
+
+def get_error_code_for_language(language: str, error_type: str) -> str:
+    """Returns the appropriate error code for a language and error type combination."""
+    code_map = {
+        ("python", "syntax"): ValidationErrorCode.PYTHON_SYNTAX_ERROR.value,
+        ("python", "import"): ValidationErrorCode.PYTHON_IMPORT_ERROR.value,
+        ("python", "runtime"): ValidationErrorCode.PYTHON_RUNTIME_ERROR.value,
+        ("python", "type"): ValidationErrorCode.PYTHON_TYPE_ERROR.value,
+        ("javascript", "syntax"): ValidationErrorCode.JS_SYNTAX_ERROR.value,
+        ("javascript", "lint"): ValidationErrorCode.JS_LINT_ERROR.value,
+        ("javascript", "compile"): ValidationErrorCode.JS_COMPILE_ERROR.value,
+        ("javascript", "missing"): ValidationErrorCode.JS_MISSING_MODULE.value,
+        ("typescript", "syntax"): ValidationErrorCode.TS_SYNTAX_ERROR.value,
+        ("typescript", "compile"): ValidationErrorCode.TS_COMPILE_ERROR.value,
+        ("typescript", "type"): ValidationErrorCode.TS_TYPE_ERROR.value,
+        ("go", "syntax"): ValidationErrorCode.GO_SYNTAX_ERROR.value,
+        ("go", "compile"): ValidationErrorCode.GO_COMPILE_ERROR.value,
+        ("go", "lint"): ValidationErrorCode.GO_LINT_ERROR.value,
+        ("go", "missing"): ValidationErrorCode.GO_MISSING_PACKAGE.value,
+        ("java", "syntax"): ValidationErrorCode.JAVA_SYNTAX_ERROR.value,
+        ("java", "compile"): ValidationErrorCode.JAVA_COMPILE_ERROR.value,
+        ("java", "lint"): ValidationErrorCode.JAVA_LINT_ERROR.value,
+        ("java", "missing"): ValidationErrorCode.JAVA_MISSING_PACKAGE.value,
+    }
+    
+    return code_map.get((language.lower(), error_type.lower()), ValidationErrorCode.UNKNOWN_ERROR.value)
 
 @dataclass
 class ValidationIssue:
@@ -75,11 +136,13 @@ class ValidationIssue:
     column: Optional[int] = None
     code: Optional[str] = None
     suggestion: Optional[str] = None
+    language: Optional[str] = None
     
     def __str__(self) -> str:
         loc = f":{self.line}" if self.line else ""
         col = f":{self.column}" if self.column else ""
-        return f"[{self.level.value}] {self.file_path}{loc}{col}: {self.message}"
+        lang = f" [{self.language}]" if self.language else ""
+        return f"[{self.level.value}]{lang} {self.file_path}{loc}{col}: {self.message}"
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -91,6 +154,7 @@ class ValidationIssue:
             "column": self.column,
             "code": self.code,
             "suggestion": self.suggestion,
+            "language": self.language,
         }
 
 
@@ -441,7 +505,7 @@ class ChangeValidator:
     # ========================================================================
     
     async def _check_syntax(self, files: List[str], result: Optional[ValidationResult] = None) -> List[ValidationIssue]:
-        """Проверяет синтаксис Python файлов."""
+        """Проверяет синтаксис Python файлов и выполняет linting/компиляцию для других языков."""
         issues = []
         
         # Initialize stats if result object is provided
@@ -464,6 +528,9 @@ class ChangeValidator:
                 "failed_files": []  # NEW: Track failures
             }
         
+        # ========================================================================
+        # PYTHON FILE VALIDATION
+        # ========================================================================
         for file_path in files:
             if not file_path.endswith('.py'):
                 continue
@@ -511,12 +578,143 @@ class ChangeValidator:
                         line=issue.line,
                         column=issue.column,
                         suggestion=issue.suggestion,
+                        language="python",
                     ))
             
             # === STAGE VALID CHANGES ===
             if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
                 logger.info(f"[VALIDATION] Staging auto-fixed content for {file_path}")
                 self.vfs.stage_change(file_path, check_result.fixed_content)
+        
+        # ========================================================================
+        # NON-PYTHON FILE VALIDATION (JS/TS, Go, Java)
+        # ========================================================================
+        
+        adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root)
+        dependency_manager = DependencyManager(project_root=self.vfs.project_root)
+        
+        for file_path in files:
+            # Skip Python files (already handled above)
+            if file_path.endswith('.py'):
+                continue
+            
+            # Check if we have an adapter for this file type
+            if not adapter_manager.is_supported(file_path):
+                continue
+            
+            if result:
+                result.auto_format_stats["stats"]["checked"] += 1
+            
+            # Read fresh content from VFS
+            content = self.vfs.read_file(file_path)
+            if content is None:
+                continue
+            
+            # Get language for this file
+            file_language = adapter_manager.get_language_for_file(file_path) or "unknown"
+            
+            # Save original content for potential rollback
+            original_content = content
+            
+            # Try linting with auto-fix
+            try:
+                fixed_code, lint_issues = adapter_manager.lint_file(content, file_path, fix=True)
+                
+                # Check if code was fixed AND no errors remain
+                if fixed_code != content and fixed_code.strip():
+                    if not lint_issues:
+                        # No errors remain - stage the fixed content
+                        logger.info(f"[VALIDATION] Auto-fixed {file_path} via language adapter ({file_language})")
+                        self.vfs.stage_change(file_path, fixed_code)
+                        if result:
+                            result.auto_format_stats["stats"]["fixed"] += 1
+                            result.auto_format_stats["fixed_files"].append({
+                                "file": file_path,
+                                "fixes": [f"Linter auto-fix applied ({file_language})"]
+                            })
+                    else:
+                        # Errors remain - explicitly restore original content in VFS
+                        # This handles the case where file was already staged with broken code
+                        logger.warning(f"[VALIDATION] Auto-fix attempted but {len(lint_issues)} errors remain in {file_path}, restoring original")
+                        self.vfs.stage_change(file_path, original_content)
+                        if result:
+                            result.auto_format_stats["stats"]["failed"] += 1
+                            result.auto_format_stats["failed_files"].append({
+                                "file": file_path,
+                                "errors": [f"Auto-fix failed, {len(lint_issues)} errors remain"]
+                            })
+                
+                # Collect lint issues as validation issues
+                if lint_issues:
+                    logger.warning(f"[VALIDATION] Found {len(lint_issues)} lint issues in {file_path} ({file_language})")
+                    if result:
+                        result.auto_format_stats["stats"]["with_errors"] += 1
+                    
+                    for lint_issue in lint_issues:
+                        issues.append(ValidationIssue(
+                            level=ValidationLevel.SYNTAX,
+                            severity=IssueSeverity.ERROR if lint_issue.get('severity') == 'error' else IssueSeverity.WARNING,
+                            file_path=file_path,
+                            message=lint_issue.get('message', 'Lint error'),
+                            line=lint_issue.get('line'),
+                            column=lint_issue.get('column'),
+                            language=file_language,
+                        ))
+                    
+                    # Check for missing dependency patterns
+                    stderr_text = '\n'.join([issue.get('message', '') for issue in lint_issues])
+                    missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
+                        stderr_text, file_language
+                    )
+                    
+                    if missing_deps:
+                        logger.info(f"[VALIDATION] Detected missing dependencies for {file_language}: {missing_deps}")
+                        
+                        # Try to install each missing dependency
+                        for package in missing_deps:
+                            try:
+                                logger.info(f"[VALIDATION] Installing missing dependency: {package} for {file_language}")
+                                success = dependency_manager.install_dependency_for_language(package, file_language)
+                                
+                                if success:
+                                    logger.info(f"[VALIDATION] Successfully installed {package}")
+                                    
+                                    # Re-run lint to check if error is resolved
+                                    fixed_code_retry, lint_issues_retry = adapter_manager.lint_file(
+                                        original_content, file_path, fix=True
+                                    )
+                                    
+                                    if not lint_issues_retry or len(lint_issues_retry) < len(lint_issues):
+                                        logger.info(f"[VALIDATION] Lint errors resolved after installing {package}")
+                                        # Update issues list with new results
+                                        issues = [i for i in issues if i.file_path != file_path]
+                                        for lint_issue in lint_issues_retry:
+                                            issues.append(ValidationIssue(
+                                                level=ValidationLevel.SYNTAX,
+                                                severity=IssueSeverity.ERROR if lint_issue.get('severity') == 'error' else IssueSeverity.WARNING,
+                                                file_path=file_path,
+                                                message=lint_issue.get('message', 'Lint error'),
+                                                line=lint_issue.get('line'),
+                                                column=lint_issue.get('column'),
+                                                language=file_language,
+                                            ))
+                                        # Stage the fixed code if it was improved
+                                        if fixed_code_retry != original_content and fixed_code_retry.strip():
+                                            self.vfs.stage_change(file_path, fixed_code_retry)
+                                else:
+                                    logger.warning(f"[VALIDATION] Failed to install {package}")
+                            
+                            except Exception as e:
+                                logger.warning(f"[VALIDATION] Error installing {package}: {e}")
+            
+            except Exception as e:
+                logger.warning(f"[VALIDATION] Linting failed for {file_path} ({file_language}): {e}")
+                if result:
+                    result.auto_format_stats["stats"]["failed"] += 1
+                    result.auto_format_stats["failed_files"].append({
+                        "file": file_path,
+                        "errors": [str(e)]
+                    })
         
         return issues
     
@@ -1682,6 +1880,7 @@ exclude =
                         file_path=test_result.file_path,
                         message=test_result.message,
                         suggestion=test_result.suggestion,
+                        language="python",
                     ))
                     logger.info(f"RUNTIME SKIPPED: {test_result.file_path} - {test_result.message}")
                     
@@ -1702,10 +1901,9 @@ exclude =
                         file_path=test_result.file_path,
                         message=full_message,
                         suggestion=test_result.suggestion,
+                        language="python",
                     ))
                     logger.warning(f"RUNTIME FAILED: {test_result.file_path} - {test_result.message}")
-                  
-                  
                     
                 elif test_result.status == TestStatus.TIMEOUT:
                     # Timeout — ERROR
@@ -1715,6 +1913,7 @@ exclude =
                         file_path=test_result.file_path,
                         message=test_result.message,
                         suggestion=test_result.suggestion or "Check for infinite loops or blocking operations",
+                        language="python",
                     ))
                     logger.warning(f"RUNTIME TIMEOUT: {test_result.file_path} - {test_result.message}")
                     
@@ -1735,6 +1934,7 @@ exclude =
                         file_path=test_result.file_path,
                         message=full_message,
                         suggestion=test_result.suggestion,
+                        language="python",
                     ))
                     logger.error(f"RUNTIME ERROR: {test_result.file_path} - {test_result.message}")
             
@@ -1759,12 +1959,120 @@ exclude =
                 severity=IssueSeverity.ERROR,
                 file_path="<runtime>",
                 message=f"Runtime validation error: {e}",
+                language="python",
             ))
         finally:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
         
-        return issues    
+        # ========================================================================
+        # NON-PYTHON FILE COMPILATION CHECKS (JS/TS, Go, Java)
+        # ========================================================================
+        adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root)
+        dependency_manager = DependencyManager(project_root=self.vfs.project_root)
+        
+        
+        non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
+        
+        if non_py_files:
+            logger.info(f"RUNTIME: Checking {len(non_py_files)} non-Python files with language adapters")
+            
+            for file_path in non_py_files:
+                # Read fresh content from VFS
+                content = self.vfs.read_file(file_path)
+                if content is None:
+                    continue
+                
+                language = adapter_manager.get_language_for_file(file_path) or "unknown"
+                
+                try:
+                    compile_result = adapter_manager.compile_check(content, file_path)
+                    
+                    if compile_result.get('success', False):
+                        logger.info(f"RUNTIME PASSED ({language}): {file_path}")
+                        if result is not None:
+                            result.runtime_files_checked += 1
+                            result.runtime_files_passed += 1
+                    else:
+                        stderr = compile_result.get('stderr', '')
+                        exit_code = compile_result.get('exit_code', -1)
+                        
+                        # Check for missing dependencies before reporting error
+                        missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
+                            stderr, language
+                        )
+                        
+                        if missing_deps:
+                            logger.info(f"[RUNTIME] Detected missing dependencies for {language}: {missing_deps}")
+                            
+                            # Try to install each missing dependency
+                            any_installed = False
+                            for package in missing_deps:
+                                try:
+                                    logger.info(f"[RUNTIME] Installing missing dependency: {package} for {language}")
+                                    success = dependency_manager.install_dependency_for_language(package, language)
+                                    
+                                    if success:
+                                        logger.info(f"[RUNTIME] Successfully installed {package}")
+                                        any_installed = True
+                                    else:
+                                        logger.warning(f"[RUNTIME] Failed to install {package}")
+                                
+                                except Exception as e:
+                                    logger.warning(f"[RUNTIME] Error installing {package}: {e}")
+                            
+                            # If any packages were installed, re-run compile check
+                            if any_installed:
+                                logger.info(f"[RUNTIME] Re-running compile check for {file_path} after dependency installation")
+                                compile_result = adapter_manager.compile_check(content, file_path)
+                                
+                                if compile_result.get('success', False):
+                                    logger.info(f"RUNTIME PASSED ({language}): {file_path} (after dependency install)")
+                                    if result is not None:
+                                        result.runtime_files_checked += 1
+                                        result.runtime_files_passed += 1
+                                    continue
+                        
+                        # If still failing, report error
+                        error_message = (
+                            f"Compilation/syntax check failed for {language} file.\n"
+                            f"Exit code: {exit_code}\n"
+                            f"Error output:\n{stderr[:500]}"
+                        )
+                        
+                        issues.append(ValidationIssue(
+                            level=ValidationLevel.RUNTIME,
+                            severity=IssueSeverity.ERROR,
+                            file_path=file_path,
+                            message=error_message,
+                            code=f"{language}_compile_error",
+                            suggestion=f"Fix the {language} compilation errors shown above",
+                            language=language,
+                        ))
+                        
+                        logger.warning(f"RUNTIME FAILED ({language}): {file_path} - {stderr[:100]}")
+                        
+                        if result is not None:
+                            result.runtime_files_checked += 1
+                            result.runtime_files_failed += 1
+                
+                except Exception as e:
+                    logger.error(f"RUNTIME ERROR ({language}): {file_path} - {e}")
+                    issues.append(ValidationIssue(
+                        level=ValidationLevel.RUNTIME,
+                        severity=IssueSeverity.ERROR,
+                        file_path=file_path,
+                        message=f"Compilation check error for {language}: {e}",
+                        code=f"{language}_check_error",
+                        language=language,
+                    ))
+                    if result is not None:
+                        result.runtime_files_checked += 1
+                        result.runtime_files_failed += 1
+            
+            logger.info(f"RUNTIME: Non-Python checks complete for {len(non_py_files)} files")
+        
+        return issues
     
     
     
