@@ -280,6 +280,16 @@ class DependencyManager:
         # Update pip and python paths
         self._update_paths()
         
+        # Initialize environments for other languages (JS/TS, Go, Java)
+        if auto_create_venv:
+            try:
+                self._language_env_results = self.ensure_language_environments()
+            except Exception as e:
+                logger.warning(f"Error initializing language environments: {e}")
+                self._language_env_results = {}
+        else:
+            self._language_env_results = {}
+        
         logger.info(
             f"DependencyManager initialized: project={self.project_root}, "
             f"venv={self._venv_path if self._venv_path else 'not found'}"
@@ -381,6 +391,239 @@ class DependencyManager:
             logger.error(f"Exception creating venv: {e}")
             return False
     
+    def _detect_project_languages(self) -> Set[str]:
+        """
+        Detects programming languages used in the project based on file extensions and config files.
+        
+        Returns:
+            Set of language names: 'python', 'javascript', 'typescript', 'go', 'java'
+        """
+        languages: Set[str] = set()
+        
+        # Check for config files first (most reliable)
+        config_indicators = {
+            'python': ['requirements.txt', 'setup.py', 'pyproject.toml', 'Pipfile'],
+            'javascript': ['package.json'],
+            'typescript': ['tsconfig.json'],
+            'go': ['go.mod', 'go.sum'],
+            'java': ['pom.xml', 'build.gradle', 'build.gradle.kts'],
+        }
+        
+        for language, config_files in config_indicators.items():
+            for config_file in config_files:
+                if (self.project_root / config_file).exists():
+                    languages.add(language)
+                    break
+        
+        # Scan for source files if no config found
+        extension_map = {
+            '.py': 'python',
+            '.js': 'javascript',
+            '.jsx': 'javascript',
+            '.mjs': 'javascript',
+            '.ts': 'typescript',
+            '.tsx': 'typescript',
+            '.go': 'go',
+            '.java': 'java',
+        }
+        
+        try:
+            for file_path in self.project_root.rglob('*'):
+                if not file_path.is_file():
+                    continue
+                
+                # Skip common non-source directories
+                parts = file_path.parts
+                if any(p in ('node_modules', 'venv', '.venv', '__pycache__', '.git', 'vendor', 'target', 'build') for p in parts):
+                    continue
+                
+                suffix = file_path.suffix.lower()
+                if suffix in extension_map:
+                    languages.add(extension_map[suffix])
+                
+                # Early exit if we found all languages
+                if len(languages) >= 5:
+                    break
+        except Exception as e:
+            logger.debug(f"Error scanning for languages: {e}")
+        
+        return languages
+    
+    def _ensure_npm_environment(self) -> bool:
+        """
+        Ensures npm environment is initialized. Creates package.json if not exists.
+        
+        Returns:
+            True if npm environment exists or was created successfully
+        """
+        # Check if npm is available
+        if shutil.which('npm') is None:
+            logger.warning("npm not available. Install Node.js to use JavaScript/TypeScript features.")
+            return False
+        
+        package_json = self.project_root / "package.json"
+        
+        # If package.json exists, environment is ready
+        if package_json.exists():
+            logger.debug(f"npm environment already initialized at {self.project_root}")
+            return True
+        
+        # Initialize npm project
+        try:
+            logger.info(f"Initializing npm environment at {self.project_root}")
+            result = subprocess.run(
+                ['npm', 'init', '-y'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=60,
+                cwd=str(self.project_root)
+            )
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully initialized npm environment at {self.project_root}")
+                return True
+            else:
+                logger.warning(f"Failed to initialize npm: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("npm init timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Error initializing npm environment: {e}")
+            return False
+    
+    def _ensure_go_environment(self) -> bool:
+        """
+        Ensures Go module environment is initialized. Creates go.mod if not exists.
+        
+        Returns:
+            True if Go environment exists or was created successfully
+        """
+        # Check if go is available
+        if shutil.which('go') is None:
+            logger.warning("go not available. Install Go to use Go features.")
+            return False
+        
+        go_mod = self.project_root / "go.mod"
+        
+        # If go.mod exists, environment is ready
+        if go_mod.exists():
+            logger.debug(f"Go module already initialized at {self.project_root}")
+            return True
+        
+        # Initialize go module
+        try:
+            # Use directory name as module name
+            module_name = self.project_root.name
+            
+            logger.info(f"Initializing Go module at {self.project_root}")
+            result = subprocess.run(
+                ['go', 'mod', 'init', module_name],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=60,
+                cwd=str(self.project_root)
+            )
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully initialized Go module: {module_name}")
+                return True
+            else:
+                logger.warning(f"Failed to initialize go mod: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("go mod init timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Error initializing Go environment: {e}")
+            return False
+    
+    def _ensure_maven_environment(self) -> bool:
+        """
+        Checks if Maven environment is available. Does not create pom.xml automatically
+        as Maven projects require specific configuration.
+        
+        Returns:
+            True if Maven is available and pom.xml exists, False otherwise
+        """
+        # Check if maven is available
+        if shutil.which('mvn') is None:
+            logger.warning("Maven (mvn) not available. Install Maven to use Java dependency management.")
+            return False
+        
+        pom_xml = self.project_root / "pom.xml"
+        
+        # If pom.xml exists, environment is ready
+        if pom_xml.exists():
+            logger.debug(f"Maven project found at {self.project_root}")
+            return True
+        
+        # Check for Gradle as alternative
+        build_gradle = self.project_root / "build.gradle"
+        build_gradle_kts = self.project_root / "build.gradle.kts"
+        
+        if build_gradle.exists() or build_gradle_kts.exists():
+            logger.debug(f"Gradle project found at {self.project_root}")
+            return True
+        
+        # Don't auto-create pom.xml - it requires specific configuration
+        logger.info(
+            f"No Maven/Gradle configuration found in {self.project_root}. "
+            "Java dependency management will be limited. "
+            "Create pom.xml or build.gradle to enable full Java support."
+        )
+        return False
+    
+    def ensure_language_environments(self) -> Dict[str, bool]:
+        """
+        Detects project languages and ensures appropriate environments are initialized.
+        
+        Returns:
+            Dict mapping language name to initialization success status
+        """
+        results: Dict[str, bool] = {}
+        
+        # Detect languages used in project
+        languages = self._detect_project_languages()
+        
+        if not languages:
+            logger.debug("No specific languages detected in project")
+            return results
+        
+        logger.info(f"Detected languages in project: {languages}")
+        
+        # Initialize environments for detected languages
+        if 'python' in languages:
+            # Python venv is handled by ensure_project_venv, already called in __init__
+            results['python'] = self._venv_path is not None
+        
+        if 'javascript' in languages or 'typescript' in languages:
+            results['javascript'] = self._ensure_npm_environment()
+            if 'typescript' in languages:
+                results['typescript'] = results['javascript']
+        
+        if 'go' in languages:
+            results['go'] = self._ensure_go_environment()
+        
+        if 'java' in languages:
+            results['java'] = self._ensure_maven_environment()
+        
+        # Log summary
+        initialized = [lang for lang, success in results.items() if success]
+        failed = [lang for lang, success in results.items() if not success]
+        
+        if initialized:
+            logger.info(f"Language environments ready: {initialized}")
+        if failed:
+            logger.warning(f"Language environments not available: {failed}")
+        
+        return results
     
     def ensure_formatting_tools(self, tools: Optional[List[str]] = None) -> Dict[str, bool]:
         """Ensures formatting tools are installed in the project's virtual environment. Installs black, autopep8, isort, yapf if not already present. Returns dict of {tool_name: success}."""
@@ -876,7 +1119,7 @@ class DependencyManager:
         Install a dependency for a specific language.
         
         If language is None, tries all supported package managers in order:
-        Python (pip) → JavaScript (npm) → Go (go get)
+        Python (pip) → JavaScript (npm) → Go (go get) → Java (Maven)
         
         For Java, attempts to parse Maven coordinates from package_name
         (format: 'groupId:artifactId' or 'groupId:artifactId:version').
@@ -930,13 +1173,13 @@ class DependencyManager:
                     )
             
             else:
-                # Try all supported package managers in order
+                # Auto-detection: try all supported package managers in order
                 # Python first (most common)
                 result = self.install_from_import(package_name)
                 if result.status == InstallResult.SUCCESS:
                     return result
                 
-                # Try npm
+                # Try npm (JavaScript/TypeScript)
                 result = self.install_npm_package(package_name, version)
                 if result.status == InstallResult.SUCCESS:
                     return result
@@ -945,6 +1188,17 @@ class DependencyManager:
                 result = self.install_go_module(package_name)
                 if result.status == InstallResult.SUCCESS:
                     return result
+                
+                # Try Java: check if package_name looks like Maven coordinates
+                if ':' in package_name:
+                    parts = package_name.split(':')
+                    if len(parts) >= 2:
+                        group_id = parts[0]
+                        artifact_id = parts[1]
+                        maven_version = parts[2] if len(parts) > 2 else version
+                        result = self.install_maven_dependency(group_id, artifact_id, maven_version)
+                        if result.status == InstallResult.SUCCESS:
+                            return result
                 
                 # Return last result (go) if all failed
                 return result
@@ -955,6 +1209,7 @@ class DependencyManager:
                 status=InstallResult.FAILED,
                 message=str(e)
             )
+    
     
     def detect_missing_dependencies_from_errors(self, error_message: str, language: str) -> List[str]:
         """
@@ -1338,124 +1593,277 @@ class DependencyManager:
 # TOOL FUNCTIONS (для вызова из ToolExecutor)
 # ============================================================================
 
-def list_installed_packages_tool(project_dir: str, python_path: Optional[str] = None) -> str:
+def list_installed_packages_tool(
+    project_dir: str,
+    language: Optional[str] = None,
+    python_path: Optional[str] = None
+) -> str:
     """
-    Lists installed packages in the project.
-    
+    Lists installed packages for one or all supported languages.
+
     Args:
         project_dir: Path to project directory
-        python_path: Optional path to Python executable to use
-        
+        language: Optional language filter ('python', 'javascript', 'typescript', 'go', 'java').
+                If None, lists packages for all detected languages.
+        python_path: Optional path to Python executable to use for Python packages.
+
     Returns:
-        XML formatted list of packages
+        XML formatted list of packages grouped by language
     """
     import subprocess
     import json
-    
-    packages = []
-    
-    if python_path:
-        # Use provided python_path directly
-        try:
-            result = subprocess.run(
-                [python_path, "-m", "pip", "list", "--format=json"],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=30
-            )
-            
-            if result.returncode == 0:
-                pip_list = json.loads(result.stdout)
-                packages = [
-                    {"name": pkg.get("name", ""), "version": pkg.get("version", "")}
-                    for pkg in pip_list
-                ]
-        except Exception as e:
-            logger.warning(f"Failed to list packages with python_path {python_path}: {e}")
-            packages = []
-    else:
-        # Fall back to DependencyManager logic
-        try:
-            manager = DependencyManager(Path(project_dir), auto_create_venv=False)
-            packages = manager.list_installed_packages()
-        except Exception as e:
-            logger.warning(f"Failed to list packages: {e}")
-            packages = []
-    
-    # Format as XML
+
+    project_path = Path(project_dir)
     xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>']
-    xml_lines.append('<packages>')
-    
-    for pkg in packages:
-        name = pkg.get("name", "unknown")
-        version = pkg.get("version", "unknown")
-        xml_lines.append(f'  <package name="{name}" version="{version}" />')
-    
-    xml_lines.append('</packages>')
-    
+    xml_lines.append('<installed_packages>')
+
+    languages_to_check = []
+    if language:
+        lang_lower = language.lower()
+        # Treat typescript as javascript (both use npm)
+        if lang_lower == "typescript":
+            lang_lower = "javascript"
+        languages_to_check = [lang_lower]
+    else:
+        # Check all supported languages
+        languages_to_check = ["python", "javascript", "go", "java"]
+
+    for lang in languages_to_check:
+        xml_lines.append(f'  <language name="{lang}">')
+
+        if lang == "python":
+            # --- Python: use pip list ---
+            packages = []
+            effective_python = python_path or sys.executable
+            try:
+                result = subprocess.run(
+                    [effective_python, "-m", "pip", "list", "--format=json"],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    pip_list = json.loads(result.stdout)
+                    packages = [
+                        {"name": pkg.get("name", ""), "version": pkg.get("version", "")}
+                        for pkg in pip_list
+                    ]
+            except Exception as e:
+                logger.warning(f"Failed to list Python packages: {e}")
+            for pkg in packages:
+                name = pkg.get("name", "unknown")
+                version = pkg.get("version", "unknown")
+                xml_lines.append(f'    <package name="{name}" version="{version}" />')
+
+        elif lang == "javascript":
+            # --- JavaScript/TypeScript: use npm list ---
+            if shutil.which('npm') is None:
+                xml_lines.append('    <!-- npm not available -->')
+            else:
+                try:
+                    result = subprocess.run(
+                        ['npm', 'list', '--json', '--depth=0'],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=30,
+                        cwd=str(project_path)
+                    )
+                    # npm list exits with non-zero if there are peer dep issues; still parse stdout
+                    if result.stdout.strip():
+                        try:
+                            npm_data = json.loads(result.stdout)
+                            deps = npm_data.get("dependencies", {})
+                            for pkg_name, pkg_info in deps.items():
+                                ver = pkg_info.get("version", "unknown") if isinstance(pkg_info, dict) else "unknown"
+                                xml_lines.append(f'    <package name="{pkg_name}" version="{ver}" />')
+                        except json.JSONDecodeError:
+                            xml_lines.append('    <!-- Failed to parse npm list output -->')
+                    else:
+                        xml_lines.append('    <!-- No npm packages found or package.json missing -->')
+                except Exception as e:
+                    logger.warning(f"Failed to list npm packages: {e}")
+                    xml_lines.append(f'    <!-- Error: {e} -->')
+
+        elif lang == "go":
+            # --- Go: parse go.sum or use go list ---
+            go_mod = project_path / "go.mod"
+            if not go_mod.exists():
+                xml_lines.append('    <!-- go.mod not found in project root -->')
+            elif shutil.which('go') is None:
+                xml_lines.append('    <!-- go binary not available -->')
+            else:
+                try:
+                    result = subprocess.run(
+                        ['go', 'list', '-m', '-json', 'all'],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=30,
+                        cwd=str(project_path)
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        # Output is multiple JSON objects concatenated
+                        # Parse them one by one
+                        decoder = json.JSONDecoder()
+                        raw = result.stdout.strip()
+                        pos = 0
+                        while pos < len(raw):
+                            try:
+                                obj, idx = decoder.raw_decode(raw, pos)
+                                mod_path = obj.get("Path", "")
+                                mod_ver = obj.get("Version", "")
+                                if mod_path and mod_ver:
+                                    xml_lines.append(f'    <package name="{mod_path}" version="{mod_ver}" />')
+                                pos = idx
+                                # Skip whitespace between JSON objects
+                                while pos < len(raw) and raw[pos] in ' \t\n\r':
+                                    pos += 1
+                            except json.JSONDecodeError:
+                                break
+                    else:
+                        xml_lines.append('    <!-- No Go modules found -->')
+                except Exception as e:
+                    logger.warning(f"Failed to list Go modules: {e}")
+                    xml_lines.append(f'    <!-- Error: {e} -->')
+
+        elif lang == "java":
+            # --- Java: parse pom.xml dependencies ---
+            pom_xml = project_path / "pom.xml"
+            build_gradle = project_path / "build.gradle"
+            build_gradle_kts = project_path / "build.gradle.kts"
+
+            if pom_xml.exists():
+                try:
+                    import xml.etree.ElementTree as ET
+                    tree = ET.parse(str(pom_xml))
+                    root = tree.getroot()
+                    # Maven namespaces
+                    ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+                    # Try with namespace first, then without
+                    deps_section = root.find('.//m:dependencies', ns)
+                    if deps_section is None:
+                        deps_section = root.find('.//dependencies')
+                    if deps_section is not None:
+                        for dep in deps_section.findall('m:dependency', ns) or deps_section.findall('dependency'):
+                            group_id = dep.find('m:groupId', ns) or dep.find('groupId')
+                            artifact_id = dep.find('m:artifactId', ns) or dep.find('artifactId')
+                            version_el = dep.find('m:version', ns) or dep.find('version')
+                            g = group_id.text if group_id is not None else "unknown"
+                            a = artifact_id.text if artifact_id is not None else "unknown"
+                            v = version_el.text if version_el is not None else "unknown"
+                            xml_lines.append(f'    <package name="{g}:{a}" version="{v}" />')
+                    else:
+                        xml_lines.append('    <!-- No dependencies section found in pom.xml -->')
+                except Exception as e:
+                    logger.warning(f"Failed to parse pom.xml: {e}")
+                    xml_lines.append(f'    <!-- Error parsing pom.xml: {e} -->')
+            elif build_gradle.exists() or build_gradle_kts.exists():
+                # Basic Gradle support: read file and extract dependency lines
+                gradle_file = build_gradle if build_gradle.exists() else build_gradle_kts
+                try:
+                    content = gradle_file.read_text(encoding='utf-8')
+                    dep_pattern = re.compile(
+                        r"""(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s+['\"]([^'\"]+)['\"]"""
+                    )
+                    matches = dep_pattern.findall(content)
+                    for match in matches:
+                        # Parse Maven coordinates: groupId:artifactId:version
+                        parts = match.split(':')
+                        if len(parts) >= 2:
+                            group_id = parts[0]
+                            artifact_id = parts[1]
+                            version = parts[2] if len(parts) > 2 else "unknown"
+                            xml_lines.append(f'    <package name="{group_id}:{artifact_id}" version="{version}" />')
+                    if not matches:
+                        xml_lines.append('    <!-- No dependencies found in build.gradle -->')
+                except Exception as e:
+                    logger.warning(f"Failed to parse build.gradle: {e}")
+                    xml_lines.append(f'    <!-- Error parsing build.gradle: {e} -->')
+            else:
+                xml_lines.append('    <!-- No pom.xml or build.gradle found -->')
+
+        xml_lines.append(f'  </language>')
+
+    xml_lines.append('</installed_packages>')
     return '\n'.join(xml_lines)
 
 
 def install_dependency_tool(
-    project_dir: str, 
-    import_name: str, 
+    project_dir: str,
+    package_name: str,
+    language: Optional[str] = None,
     version: Optional[str] = None,
     python_path: Optional[str] = None
 ) -> str:
     """
-    Installs a dependency in the project.
-    
+    Installs a dependency for the specified programming language.
+
     Args:
         project_dir: Path to project directory
-        import_name: Name of the package to install
+        package_name: Package identifier (pip name, npm name, go module path, or Maven coordinates)
+        language: Target language: 'python', 'javascript', 'typescript', 'go', 'java'.
+                 If None, attempts installation for all supported languages.
         version: Optional version specifier
-        python_path: Optional path to Python executable to use
-        
+        python_path: Optional path to Python executable (used for Python installs)
+
     Returns:
         XML formatted result
     """
     try:
         manager = DependencyManager(Path(project_dir), auto_create_venv=True)
-        
-        # Override python_path if provided
-        if python_path:
+
+        # Override python_path if provided (relevant for Python installs)
+        if python_path and language and language.lower() == "python":
             manager._python_path = python_path
-            # Derive pip_path from python_path
             if python_path.endswith("python.exe"):
                 manager._pip_path = python_path.replace("python.exe", "pip.exe")
             elif python_path.endswith("python"):
                 manager._pip_path = python_path.replace("python", "pip")
             else:
-                # Fallback: assume pip is in same directory
                 python_dir = Path(python_path).parent
                 if sys.platform == "win32":
                     manager._pip_path = str(python_dir / "pip.exe")
                 else:
                     manager._pip_path = str(python_dir / "pip")
-        
-        success = manager.install_package(import_name, version)
-        
+
+        # Route to the appropriate language installer
+        result = manager.install_dependency_for_language(
+            package_name=package_name,
+            language=language,
+            version=version,
+        )
+
         xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>']
         xml_lines.append('<result>')
-        xml_lines.append(f'  <status>{"success" if success else "failed"}</status>')
-        xml_lines.append(f'  <package>{import_name}</package>')
-        if version:
-            xml_lines.append(f'  <version>{version}</version>')
+        xml_lines.append(f'  <status>{result.status.value}</status>')
+        xml_lines.append(f'  <package>{result.package}</package>')
+        if language:
+            xml_lines.append(f'  <language>{language}</language>')
+        else:
+            xml_lines.append(f'  <language>auto-detected</language>')
+        xml_lines.append(f'  <message>{result.message}</message>')
+        if result.version:
+            xml_lines.append(f'  <version>{result.version}</version>')
         xml_lines.append('</result>')
-        
+
         return '\n'.join(xml_lines)
-        
+
     except Exception as e:
-        logger.error(f"Failed to install {import_name}: {e}")
+        logger.error(f"Failed to install {package_name} ({language}): {e}")
         xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>']
         xml_lines.append('<result>')
         xml_lines.append(f'  <status>error</status>')
-        xml_lines.append(f'  <package>{import_name}</package>')
+        xml_lines.append(f'  <package>{package_name}</package>')
+        if language:
+            xml_lines.append(f'  <language>{language}</language>')
         xml_lines.append(f'  <error>{str(e)}</error>')
         xml_lines.append('</result>')
-        
+
         return '\n'.join(xml_lines)
 
 

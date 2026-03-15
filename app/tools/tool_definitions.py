@@ -433,46 +433,68 @@ LIST_INSTALLED_PACKAGES_TOOL: Dict[str, Any] = {
     "function": {
         "name": "list_installed_packages",
         "description": (
-            "List all Python packages installed in the project environment. "
+            "List all packages installed in the project environment for one or all supported languages. "
             "Use BEFORE generating code to check what libraries are available. "
-            "Returns package names and versions. "
+            "Returns package names and versions grouped by language. "
+            "Supports Python (pip), JavaScript/TypeScript (npm), Go (go modules), and Java (Maven/Gradle). "
+            "If 'language' is omitted, lists packages for ALL detected languages. "
             "Helps avoid import errors by knowing what's already installed."
         ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "enum": ["python", "javascript", "typescript", "go", "java"],
+                    "description": (
+                        "Optional language filter. If provided, lists packages only for that language. "
+                        "If omitted, lists packages for all supported languages. "
+                        "Options: 'python', 'javascript', 'typescript', 'go', 'java'."
+                    )
+                }
+            },
             "required": []
         }
     }
 }
+
 
 INSTALL_DEPENDENCY_TOOL: Dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "install_dependency",
         "description": (
-            "Install a Python package into the project environment. "
-            "Use when validation fails due to missing imports. "
-            "Automatically maps import names to pip packages: "
-            "docx→python-docx, cv2→opencv-python, PIL→Pillow, etc. "
-            "⚠️ Use only for legitimate dependencies needed by the code."
+            "Install a package for the specified programming language into the project environment. "
+            "Use when validation fails due to missing imports or modules. "
+            "For Python, automatically maps import names to pip package names (e.g., 'docx' → 'python-docx'). "
+            "For JavaScript/TypeScript, use the npm package name. "
+            "For Go, use the module path (e.g., 'github.com/gorilla/mux'). "
+            "For Java, use Maven coordinates in the format 'groupId:artifactId:version' (version optional). "
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "import_name": {
+                "package_name": {
                     "type": "string",
                     "description": (
-                        "The import name that failed (e.g., 'docx', 'cv2', 'PIL'). "
-                        "Will be automatically converted to pip package name."
+                        "Package identifier for the given language: "
+                        "- Python: import name (e.g., 'requests', 'PIL') "
+                        "- JavaScript/TypeScript: npm package name (e.g., 'lodash', 'express') "
+                        "- Go: module path (e.g., 'github.com/gorilla/mux') "
+                        "- Java: Maven coordinates (e.g., 'com.google.code.gson:gson:2.8.9' or 'org.apache.commons:commons-lang3')"
                     )
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["python", "javascript", "typescript", "go", "java"],
+                    "description": "Target programming language for the package."
                 },
                 "version": {
                     "type": "string",
-                    "description": "Specific version to install (optional). Example: '2.0.1'"
+                    "description": "Specific version to install (optional). For Java, can be included in package_name."
                 }
             },
-            "required": ["import_name"]
+            "required": ["package_name"]
         }
     }
 }

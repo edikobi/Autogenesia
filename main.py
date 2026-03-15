@@ -24,6 +24,7 @@ Autogenesia - Главная точка входа
 """
 
 from __future__ import annotations
+from app.agents.pre_filter import analyze_query, PreFilterMode, PreFilterAdvice
 
 import re
 import os
@@ -396,13 +397,13 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
         "8",
         cfg.MODEL_QWEN3_MAX_THINKING,
         "Qwen3 Max Thinking",
-        "Обещают золотые горы, но это китайский ИИ с маленьким (200к) контекстным окном"
+        "(полная фигня)Обещают золотые горы, но это китайский ИИ с маленьким (200к) контекстным окном"
     ),
     (
         "9",
-        cfg.MODEL_NORMAL,
-        "DeepSeek Chat",
-        "Базовая модель для простых задач. Экономичная, быстрая, но без глубокого анализа."
+        cfg.MODEL_QWEN_3_5_Plus,
+        "Qwen3.5 Plus",
+        "Обещают золотые горы, но это китайский ИИ."
     ),
 ]
 
@@ -485,6 +486,10 @@ class AppState:
         # NEW: Настройка проверки типов
         self.enable_type_checking: bool = False
         
+                # NEW: Настройки Pre-filter
+        self.prefilter_mode: str = "normal"  # "normal" или "advanced"
+        self.prefilter_model: Optional[str] = None  # Модель для Pre-filter (None = из конфига)
+
         self._saved_file_names: set = set()  # Отслеживание сохранённых файлов
 
     
@@ -519,6 +524,104 @@ class AppState:
 # Глобальное состояние
 state = AppState()
 
+def load_user_settings() -> Dict[str, Any]:
+    """
+    Загружает пользовательские настройки из файла data/user_settings.json.
+    Если файл не существует, возвращает настройки по умолчанию.
+    
+    Returns:
+        Dict с настройками пользователя
+    """
+    settings_path = Path("data/user_settings.json")
+    
+    default_settings = {
+        "prefilter_mode": cfg.PREFILTER_DEFAULT_MODE,
+        "prefilter_model": cfg.AGENT_MODELS.get("pre_filter", cfg.MODEL_NORMAL),
+        "generator_model": cfg.AGENT_MODELS.get("code_generator", cfg.MODEL_NORMAL),
+        "use_router": cfg.ROUTER_ENABLED,
+        "fixed_orchestrator_model": None,
+        "enable_type_checking": False,
+    }
+    
+    if not settings_path.exists():
+        return default_settings
+    
+    try:
+        import json
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+        
+        # Мержим с дефолтами (на случай новых полей)
+        for key, value in default_settings.items():
+            if key not in saved:
+                saved[key] = value
+        
+        logger.info(f"Loaded user settings from {settings_path}")
+        return saved
+        
+    except Exception as e:
+        logger.warning(f"Failed to load user settings: {e}")
+        return default_settings
+
+def save_user_settings(settings: Dict[str, Any]) -> bool:
+    """
+    Сохраняет пользовательские настройки в файл data/user_settings.json.
+    
+    Args:
+        settings: Словарь с настройками
+        
+    Returns:
+        True если сохранение успешно
+    """
+    settings_path = Path("data/user_settings.json")
+    
+    try:
+        # Создаём директорию если не существует
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        import json
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Saved user settings to {settings_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to save user settings: {e}")
+        return False
+
+def get_current_user_settings() -> Dict[str, Any]:
+    """
+    Возвращает текущие настройки из state в формате для сохранения.
+    
+    Returns:
+        Dict с текущими настройками
+    """
+    return {
+        "prefilter_mode": state.prefilter_mode,
+        "prefilter_model": state.prefilter_model,
+        "generator_model": state.generator_model,
+        "use_router": state.use_router,
+        "fixed_orchestrator_model": state.fixed_orchestrator_model,
+        "enable_type_checking": state.enable_type_checking,
+    }
+
+
+def apply_user_settings(settings: Dict[str, Any]) -> None:
+    """
+    Применяет загруженные настройки к глобальному state.
+    
+    Args:
+        settings: Словарь с настройками
+    """
+    state.prefilter_mode = settings.get("prefilter_mode", "normal")
+    state.prefilter_model = settings.get("prefilter_model")
+    state.generator_model = settings.get("generator_model", cfg.MODEL_NORMAL)
+    state.use_router = settings.get("use_router", True)
+    state.fixed_orchestrator_model = settings.get("fixed_orchestrator_model")
+    state.enable_type_checking = settings.get("enable_type_checking", False)
+    
+    logger.info(f"Applied user settings: prefilter_mode={state.prefilter_mode}, prefilter_model={state.prefilter_model}")
 
 # ============================================================================
 # УТИЛИТЫ НАВИГАЦИИ
@@ -720,6 +823,19 @@ def print_status_bar():
         else:
             parts.append(f"🔍 Типы: [dim]OFF[/]")
     
+        # NEW: Статус Pre-filter (для режимов ask и agent)
+    if state.mode in ("ask", "agent"):
+        pf_mode_label = "Продв." if state.prefilter_mode == "advanced" else "Обычн."
+        if state.prefilter_model:
+            pf_model_name = cfg.get_model_display_name(state.prefilter_model)
+            if len(pf_model_name) > 15:
+                pf_model_name = pf_model_name[:12] + "..."
+            parts.append(f"🔍 PF: [bold]{pf_mode_label}[/]|{pf_model_name}")
+        else:
+            parts.append(f"🔍 PF: [bold]{pf_mode_label}[/]|[dim]Авто[/]")
+
+    
+    
     # Тред
     if state.current_thread:
         parts.append(f"💬 Тред: [dim]{state.current_thread.id[:8]}...[/]")
@@ -748,7 +864,13 @@ def print_main_menu():
     menu.add_row("[5]", "⚙️  Настройки модели оркестратора")
     menu.add_row("[6]", f"🔧 Настройки модели генератора: [{get_generator_model_short_name(state.generator_model)}]")
     menu.add_row("[7]", "🔍 Проверка типов (mypy): " + ("[green]ВКЛ[/]" if state.enable_type_checking else "[dim]ВЫКЛ[/]"))
-    menu.add_row("[8]", "📖 О программе")
+   
+    # NEW: Настройки Pre-filter
+    pf_mode_label = "Обычный" if state.prefilter_mode == "normal" else "Продвинутый"
+    pf_model_name = cfg.get_model_display_name(state.prefilter_model) if state.prefilter_model else "Авто"
+    menu.add_row("[8]", f"🔬 Настройки Pre-filter: [{pf_mode_label} | {pf_model_name}]")
+    
+    menu.add_row("[9]", "📖 О программе")
     menu.add_row("[0]", "🚪 Выход")
     
     console.print(Panel(menu, title="[bold]Главное меню[/]", border_style=COLORS['secondary']))
@@ -977,6 +1099,322 @@ def print_thinking(content: str, title: str = "Размышления агент
         border_style="dim",
         box=box.ROUNDED,
     ))
+
+
+def print_prefilter_advice(advice: 'PreFilterAdvice', mode: str, tool_calls: int = 0) -> None:
+    """
+    Отображает совет Pre-filter агента с переводом на русский.
+    
+    ИСПРАВЛЕНО: Если структурированные поля пусты, показываем raw_response напрямую.
+    
+    Args:
+        advice: Объект PreFilterAdvice с рекомендациями
+        mode: Режим работы ("normal" или "advanced")
+        tool_calls: Количество вызовов инструментов (для advanced режима)
+    """
+    if not advice:
+        return
+    
+    mode_label = "🔍 Обычный" if mode == "normal" else "🔬 Продвинутый"
+    
+    # Формируем текст совета
+    advice_parts = []
+    
+    if advice.clarified_query and advice.clarified_query.strip():
+        advice_parts.append(f"**Уточнённый запрос:** {advice.clarified_query}")
+    
+    if advice.possible_cause and advice.possible_cause != "N/A" and advice.possible_cause.strip():
+        advice_parts.append(f"**Возможная причина:** {advice.possible_cause}")
+    
+    if advice.recommended_actions:
+        advice_parts.append("**Рекомендуемые действия:**")
+        for action in advice.recommended_actions[:5]:
+            advice_parts.append(f"  • {action}")
+    
+    if advice.files_to_check:
+        advice_parts.append("**Файлы для проверки:**")
+        for file_info in advice.files_to_check[:5]:
+            advice_parts.append(f"  • `{file_info}`")
+    
+    if advice.additional_context and advice.additional_context != "N/A" and advice.additional_context.strip():
+        advice_parts.append(f"**Дополнительный контекст:** {advice.additional_context}")
+    
+    # ИСПРАВЛЕНО: Если структурированные поля пусты, но raw_response есть — показываем его
+    if not advice_parts and advice.raw_response:
+        advice_text = advice.raw_response.strip()
+        # Ограничиваем длину для отображения
+        if len(advice_text) > 2000:
+            advice_text = advice_text[:2000] + "\n\n[dim]... (обрезано для отображения)[/]"
+    else:
+        advice_text = "\n".join(advice_parts) if advice_parts else ""
+    
+    # Переводим на русский если нужно
+    if TRANSLATION_AVAILABLE and advice_text and not is_mostly_russian(advice_text):
+        try:
+            advice_text = translate_sync(advice_text, "Pre-filter analysis advice")
+        except Exception as e:
+            logger.warning(f"Failed to translate prefilter advice: {e}")
+    
+    # Заголовок с информацией о режиме
+    title = f"💡 Совет Pre-filter ({mode_label})"
+    if mode == "advanced" and tool_calls > 0:
+        title += f" | 🛠️ {tool_calls} инструментов"
+    
+    if advice_text:
+        console.print(Panel(
+            Markdown(advice_text),
+            title=title,
+            border_style=COLORS['info'],
+            padding=(1, 2),
+        ))
+
+
+async def run_prefilter_analysis(
+    user_query: str,
+    project_dir: str,
+    project_index: Dict[str, Any],
+    mode: str = "normal",
+    model: Optional[str] = None,
+) -> Tuple[str, Optional[PreFilterAdvice]]:
+    """
+    Запускает Pre-filter анализ запроса и возвращает советы для Оркестратора.
+
+    Эта функция объединяет:
+    1. Вызов analyze_query из pre_filter.py
+    2. Визуализацию результатов через print_prefilter_advice
+    3. Форматирование советов в строку для передачи Оркестратору
+
+    Args:
+        user_query: Запрос пользователя
+        project_dir: Путь к директории проекта
+        project_index: Семантический индекс проекта
+        mode: Режим работы ("normal" или "advanced")
+        model: Модель для Pre-filter (None = из конфига)
+
+    Returns:
+        Tuple[str, Optional[PreFilterAdvice]]:
+            - Строка с советами для Оркестратора (или пустая строка)
+            - Объект PreFilterAdvice (или None при ошибке)
+    """
+    import time as _time
+    from app.services.project_map_builder import get_project_map_for_prompt
+    from app.builders.semantic_index_builder import create_chunks_list_auto
+    
+    pf_start = _time.time()
+    
+    # =====================================================================
+    # ПОЛНОЕ ЛОГИРОВАНИЕ: Начало Pre-filter
+    # =====================================================================
+    console.print(f"\n[bold cyan]{'─' * 50}[/]")
+    console.print(f"[bold cyan]🔬 PRE-FILTER: Начало анализа[/]")
+    console.print(f"[bold cyan]{'─' * 50}[/]")
+    console.print(f"   [dim]Режим:[/] [bold]{'Продвинутый (advanced)' if mode == 'advanced' else 'Обычный (normal)'}[/]")
+    console.print(f"   [dim]Модель (параметр):[/] [bold]{model or 'None (будет определена из конфига)'}[/]")
+    console.print(f"   [dim]Запрос:[/] {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
+    console.print(f"   [dim]Проект:[/] {project_dir}")
+    console.print(f"   [dim]Индекс:[/] {'Загружен (' + str(len(project_index)) + ' ключей)' if project_index else 'Пустой/None'}")
+    
+    logger.info(f"[PRE-FILTER] Starting analysis: mode={mode}, model={model or 'default'}")
+    
+    try:
+        # Определяем режим Pre-filter
+        prefilter_mode = PreFilterMode.ADVANCED if mode == "advanced" else PreFilterMode.NORMAL
+        
+        # Определяем модель: если не указана, берём из конфига
+        actual_model = model
+        if actual_model is None:
+            actual_model = cfg.AGENT_MODELS.get("pre_filter") or cfg.MODEL_NORMAL
+            console.print(f"   [dim]Модель (из конфига AGENT_MODELS['pre_filter']):[/] [bold]{actual_model}[/]")
+        
+        model_display = cfg.get_model_display_name(actual_model)
+        console.print(f"   [dim]Модель (итоговая):[/] [bold]{model_display}[/] ({actual_model})")
+        
+        logger.info(f"[PRE-FILTER] Using model: {model_display}")
+        
+        # Получаем project_map
+        console.print(f"\n   [dim]📂 Загрузка project_map...[/]")
+        pm_start = _time.time()
+        project_map = get_project_map_for_prompt(project_dir) if project_dir else ""
+        pm_elapsed = _time.time() - pm_start
+        console.print(f"   [dim]   → project_map: {len(project_map)} символов ({pm_elapsed:.1f}с)[/]")
+        
+        # Загружаем compact_index из файла (как Orchestrator)
+        console.print(f"   [dim]📋 Загрузка compact_index...[/]")
+        compact_index = ""
+        ci_start = _time.time()
+        
+        if project_dir:
+            compact_md_path = Path(project_dir) / ".ai-agent" / "compact_index.md"
+            if compact_md_path.exists():
+                try:
+                    compact_index = compact_md_path.read_text(encoding="utf-8")
+                    ci_elapsed = _time.time() - ci_start
+                    console.print(f"   [dim]   → compact_index: {len(compact_index)} символов ({ci_elapsed:.1f}с) [из файла][/]")
+                    logger.debug(f"[PRE-FILTER] Loaded compact_index.md: {len(compact_index)} chars")
+                except Exception as e:
+                    console.print(f"   [yellow]   → ⚠️ Ошибка чтения compact_index.md: {e}[/]")
+                    logger.warning(f"[PRE-FILTER] Failed to read compact_index.md: {e}")
+                    # Fallback: генерируем из индекса
+                    if project_index:
+                        compact_index = create_chunks_list_auto(project_index)
+                        console.print(f"   [dim]   → compact_index: {len(compact_index)} символов [сгенерирован][/]")
+            else:
+                console.print(f"   [dim]   → compact_index.md не найден, генерируем...[/]")
+                if project_index:
+                    compact_index = create_chunks_list_auto(project_index)
+                    ci_elapsed = _time.time() - ci_start
+                    console.print(f"   [dim]   → compact_index: {len(compact_index)} символов ({ci_elapsed:.1f}с) [сгенерирован][/]")
+        else:
+            console.print(f"   [dim]   → compact_index: пропущен (нет project_dir)[/]")
+        
+        # =====================================================================
+        # ВЫЗОВ analyze_query
+        # =====================================================================
+        console.print(f"\n   [bold cyan]📡 Вызов analyze_query → LLM API...[/]")
+        console.print(f"   [dim]   Модель: {actual_model}[/]")
+        console.print(f"   [dim]   Режим: {prefilter_mode.value}[/]")
+        console.print(f"   [dim]   system_prompt будет сформирован внутри analyze_query[/]")
+        
+        llm_start = _time.time()
+        
+        with console.status(f"[bold cyan]🔬 Pre-filter анализ ({model_display})...[/]"):
+            advice = await analyze_query(
+                user_query=user_query,
+                project_map=project_map,
+                compact_index=compact_index,
+                project_dir=project_dir,
+                index=project_index,
+                mode=prefilter_mode,
+                model=actual_model,
+            )
+        
+        llm_elapsed = _time.time() - llm_start
+        
+        # =====================================================================
+        # ЛОГИРОВАНИЕ РЕЗУЛЬТАТА
+        # =====================================================================
+        console.print(f"\n   [bold]📊 Результат analyze_query ({llm_elapsed:.1f}с):[/]")
+        
+        if advice:
+            console.print(f"   [dim]   raw_response: {len(advice.raw_response)} символов[/]")
+            console.print(f"   [dim]   tool_calls_made: {advice.tool_calls_made}[/]")
+            console.print(f"   [dim]   clarified_query: {'✅ есть' if advice.clarified_query else '❌ пусто'}[/]")
+            console.print(f"   [dim]   possible_cause: {'✅ есть' if advice.possible_cause else '❌ пусто'}[/]")
+            console.print(f"   [dim]   recommended_actions: {len(advice.recommended_actions)} шт.[/]")
+            console.print(f"   [dim]   files_to_check: {len(advice.files_to_check)} шт.[/]")
+            
+            if advice.raw_response:
+                # Показываем первые 200 символов raw_response для диагностики
+                preview = advice.raw_response[:200].replace('\n', ' ')
+                console.print(f"   [dim]   raw_response preview: {preview}{'...' if len(advice.raw_response) > 200 else ''}[/]")
+            
+            logger.info(f"[PRE-FILTER] Analysis complete: raw_response={len(advice.raw_response)} chars, tool_calls={advice.tool_calls_made}")
+        else:
+            console.print(f"   [red]   ❌ analyze_query вернул None![/]")
+            logger.warning("[PRE-FILTER] Analysis returned None")
+        
+        # Визуализируем результаты
+        if advice and advice.raw_response:
+            print_prefilter_advice(advice, mode, advice.tool_calls_made)
+            console.print(f"[green]   ✓ Pre-filter завершён успешно[/]")
+        else:
+            console.print("[yellow]   ⚠️ Pre-filter не вернул рекомендаций (raw_response пуст)[/]")
+            if advice and hasattr(advice, 'raw_response') and advice.raw_response:
+                console.print(f"[dim]   Сырой ответ ({len(advice.raw_response)} символов): {advice.raw_response[:200]}...[/]")
+        
+        # Форматируем советы в строку для Оркестратора
+        advice_str = _format_prefilter_advice_for_orchestrator(advice) if advice else ""
+        
+        # Логируем что передаём Оркестратору
+        total_elapsed = _time.time() - pf_start
+        
+        if advice_str:
+            logger.info(f"[PRE-FILTER] Advice for Orchestrator: {len(advice_str)} chars")
+            console.print(f"[green]   📤 Советы переданы Оркестратору ({len(advice_str)} символов)[/]")
+        else:
+            logger.warning("[PRE-FILTER] No advice to pass to Orchestrator")
+            console.print("[yellow]   📤 Нет советов для передачи Оркестратору[/]")
+        
+        console.print(f"[dim]   ⏱️ Общее время Pre-filter: {total_elapsed:.1f}с[/]")
+        console.print(f"[bold cyan]{'─' * 50}[/]")
+        
+        return advice_str, advice
+        
+    except Exception as e:
+        total_elapsed = _time.time() - pf_start
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        logger.error(f"[PRE-FILTER] Analysis error: {e}", exc_info=True)
+        
+        # ПОЛНОЕ отображение ошибки в консоли
+        console.print(f"\n[bold red]   ❌ PRE-FILTER ОШИБКА ({total_elapsed:.1f}с)[/]")
+        console.print(f"   [red]Тип: {error_type}[/]")
+        console.print(f"   [red]Сообщение: {error_msg}[/]")
+        console.print(f"   [red]Модель: {model or 'default'}, Режим: {mode}[/]")
+        
+        # Показываем трейсбек ВСЕГДА (не только в DEBUG)
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        console.print(f"\n[dim]Полный трейсбек:[/]")
+        console.print(f"[red]{tb_str}[/]")
+        
+        console.print(f"[bold cyan]{'─' * 50}[/]")
+        
+        return "", None
+
+
+def _format_prefilter_advice_for_orchestrator(advice: PreFilterAdvice) -> str:
+    """
+    Форматирует PreFilterAdvice в строку для передачи Оркестратору.
+    
+    Если структурированные поля пусты (LLM вернул свободный текст),
+    используем raw_response напрямую.
+    
+    ИСПРАВЛЕНО: Всегда возвращаем raw_response если он есть и структурированные поля пусты.
+    """
+    if not advice:
+        return ""
+    
+    # Если raw_response пуст — нечего передавать
+    if not advice.raw_response:
+        return ""
+    
+    parts = []
+    
+    if advice.clarified_query and advice.clarified_query.strip():
+        parts.append(f"CLARIFIED_QUERY: {advice.clarified_query}")
+    
+    if advice.possible_cause and advice.possible_cause != "N/A" and advice.possible_cause.strip():
+        parts.append(f"POSSIBLE_CAUSE: {advice.possible_cause}")
+    
+    if advice.recommended_actions:
+        parts.append("RECOMMENDED_ACTIONS:")
+        for action in advice.recommended_actions:
+            parts.append(f"- {action}")
+    
+    if advice.files_to_check:
+        parts.append("FILES_TO_CHECK:")
+        for file_info in advice.files_to_check:
+            parts.append(f"- {file_info}")
+    
+    if advice.additional_context and advice.additional_context != "N/A" and advice.additional_context.strip():
+        parts.append(f"ADDITIONAL_CONTEXT: {advice.additional_context}")
+    
+    if advice.tool_calls_made > 0:
+        parts.append(f"TOOL_CALLS_MADE: {advice.tool_calls_made}")
+    
+    # ИСПРАВЛЕНО: Если структурированные поля пусты, но raw_response есть —
+    # передаём raw_response напрямую (LLM вернул свободный текст)
+    if not parts:
+        logger.info(f"Pre-filter: No structured fields parsed, using raw_response ({len(advice.raw_response)} chars)")
+        return advice.raw_response.strip()
+    
+    # FIX: Ранее здесь отсутствовал return — функция возвращала None,
+    # из-за чего советы Pre-filter никогда не доходили до Оркестратора
+    return "\n".join(parts)
+    
+
 
 def print_instruction(instruction: str, title: str = "Инструкция для Code Generator"):
     """
@@ -2032,6 +2470,81 @@ async def select_generator_model() -> bool:
     return False
 
 
+async def select_prefilter_settings() -> bool:
+    """
+    Интерактивный выбор режима и модели Pre-filter.
+    
+    Returns:
+        True если настройки изменены, False если отменено
+    """
+    console.print("\n[bold]🔍 Настройки Pre-filter[/]\n")
+    
+    # Показываем текущие настройки
+    current_mode_label = "Обычный" if state.prefilter_mode == "normal" else "Продвинутый"
+    current_model_name = cfg.get_model_display_name(state.prefilter_model) if state.prefilter_model else "По умолчанию"
+    console.print(f"[dim]Текущие настройки: режим={current_mode_label}, модель={current_model_name}[/]\n")
+    
+    # Выбор режима
+    console.print("[bold cyan]Выберите режим Pre-filter:[/]")
+    console.print("  [green]1[/] - Обычный (normal) - быстрый анализ на основе имеющихся данных")
+    console.print("  [green]2[/] - Продвинутый (advanced) - глубокий анализ с инструментами")
+    console.print("  [yellow]0[/] - Отмена (вернуться в меню)")
+    
+    mode_choice = console.input("\n[bold]Ваш выбор (0-2):[/] ").strip()
+    
+    if mode_choice == "0" or mode_choice.lower() in ("q", "quit", "exit", "back"):
+        console.print("[dim]Отменено[/]")
+        return False
+    
+    if mode_choice == "1":
+        state.prefilter_mode = "normal"
+    elif mode_choice == "2":
+        state.prefilter_mode = "advanced"
+    else:
+        console.print("[red]❌ Неверный выбор[/]")
+        return False
+    
+    # Выбор модели — используем тот же список, что и для Оркестратора
+    console.print("\n[bold cyan]Выберите модель Pre-filter:[/]\n")
+    console.print("  [yellow]0[/] - Отмена (вернуться в меню)\n")
+    
+    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+        console.print(f"  [green]{key}[/] - {short_name}")
+        # Укорачиваем описание для компактности
+        short_desc = description[:80] + "..." if len(description) > 80 else description
+        console.print(f"      [dim]{short_desc}[/]\n")
+    
+    model_choice = console.input(f"[bold]Ваш выбор (0-{len(AVAILABLE_ORCHESTRATOR_MODELS)}):[/] ").strip()
+    
+    if model_choice == "0" or model_choice.lower() in ("q", "quit", "exit", "back"):
+        console.print("[dim]Отменено[/]")
+        return False
+    
+    # Ищем выбранную модель
+    selected_model = None
+    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+        if key == model_choice:
+            selected_model = model_id
+            break
+    
+    if selected_model is None:
+        console.print("[red]❌ Неверный выбор модели[/]")
+        return False
+    
+    state.prefilter_model = selected_model
+    
+    console.print(f"\n[green]✅ Настройки Pre-filter обновлены:[/]")
+    mode_label = "Обычный" if state.prefilter_mode == "normal" else "Продвинутый"
+    console.print(f"   • Режим: {mode_label}")
+    console.print(f"   • Модель: {cfg.get_model_display_name(state.prefilter_model)}")
+    
+    # Сохраняем настройки
+    current_settings = get_current_user_settings()
+    save_user_settings(current_settings)
+    
+    return True
+
+
 # ============================================================================
 # ВЫБОР МОДЕЛИ ОРКЕСТРАТОРА
 # ============================================================================
@@ -2499,6 +3012,9 @@ async def find_or_create_thread_for_project(project_dir: Optional[str]) -> Optio
     Находит существующий тред для проекта или предлагает создать новый.
     Показывает превью последнего запроса для каждого диалога.
     
+    Для General Chat разделяет треды по подрежиму (Legal / Обычный)
+    на основе префикса в названии треда.
+    
     Args:
         project_dir: Путь к проекту (None для General Chat)
         
@@ -2518,15 +3034,32 @@ async def find_or_create_thread_for_project(project_dir: Optional[str]) -> Optio
     if project_dir:
         matching_threads = [t for t in threads if t.project_path == project_dir]
     else:
-        # Для General Chat — треды без проекта
-        matching_threads = [t for t in threads if not t.project_path]
+        # Для General Chat — треды без проекта, разделённые по подрежиму
+        no_project_threads = [t for t in threads if not t.project_path]
+        
+        if state.is_legal_mode:
+            # Legal режим — только треды с префиксом "Legal Chat"
+            matching_threads = [
+                t for t in no_project_threads 
+                if (t.title or "").startswith("Legal Chat")
+            ]
+        else:
+            # Обычный режим — треды БЕЗ префикса "Legal Chat"
+            matching_threads = [
+                t for t in no_project_threads 
+                if not (t.title or "").startswith("Legal Chat")
+            ]
     
     if not matching_threads:
         # Нет существующих — создаём новый
         return await create_new_thread()
     
     # Есть существующие — спрашиваем пользователя
-    console.print(f"\n[bold]💬 Найдено {len(matching_threads)} диалог(ов)[/]\n")
+    submode_label = ""
+    if state.mode == "general":
+        submode_label = " [Legal]" if state.is_legal_mode else " [Обычный]"
+    
+    console.print(f"\n[bold]💬 Найдено {len(matching_threads)} диалог(ов){submode_label}[/]\n")
     
     # Показываем последние 5 с превью
     display_threads = matching_threads[:5]
@@ -2581,6 +3114,15 @@ async def find_or_create_thread_for_project(project_dir: Optional[str]) -> Optio
             selected = display_threads[idx]
             console.print(f"\n[green]✓[/] Продолжаем диалог: [bold]{selected.title}[/]")
             console.print(f"   📊 Сообщений: {selected.message_count}, Токенов: {selected.total_tokens:,}")
+            
+            # Восстанавливаем подрежим из выбранного треда (для General Chat)
+            if not project_dir and state.mode == "general":
+                is_legal_thread = (selected.title or "").startswith("Legal Chat")
+                state.is_legal_mode = is_legal_thread
+                if is_legal_thread:
+                    console.print(f"   ⚖️ Подрежим: [yellow]Legal[/]")
+                else:
+                    console.print(f"   💬 Подрежим: Обычный")
             
             # === ПОКАЗЫВАЕМ ИСТОРИЮ ПРИ ВХОДЕ ===
             await display_thread_history(selected, state.mode, limit=5)
@@ -3381,7 +3923,6 @@ async def handle_ask_mode(query: str):
     
     try:
         from app.agents.orchestrator import orchestrate, orchestrate_agent
-        from app.agents.pre_filter import pre_filter_chunks
         from app.agents.router import route_request
         from app.builders.semantic_index_builder import create_chunks_list_auto
         from app.services.project_map_builder import get_project_map_for_prompt
@@ -3602,59 +4143,33 @@ async def handle_ask_mode(query: str):
                 "fallback_model": model,
             })
         
-        # =====================================================================
-        # ШАГ 2: ПРЕ-ФИЛЬТР
+    # =====================================================================
+        # ШАГ 2: PRE-FILTER АНАЛИЗ (СОВЕТЫ ДЛЯ ОРКЕСТРАТОРА)
         # =====================================================================
         console.print("\n" + "=" * 60)
-        console.print("[bold cyan]📊 ШАГ 2: ПРЕ-ФИЛЬТР — Выбор релевантного кода[/]")
+        console.print("[bold cyan]💡 ШАГ 2: PRE-FILTER АНАЛИЗ — Советы для Оркестратора[/]")
         console.print("=" * 60)
         
-        trace_stage("PREFILTER_START", {
-            "model": model,
-            "project_dir": state.project_dir,
-            "index_items": len(project_index.get("files", {})) or len(project_index.get("classes", [])),
-        })
+        prefilter_advice_str = ""
+        prefilter_advice_obj = None
         
         try:
-            with console.status("[bold cyan]📊 Выбор релевантного кода...[/]"):
-                pre_filter_result = await pre_filter_chunks(
-                    user_query=query,
-                    index=project_index,
-                    project_dir=state.project_dir or ".",
-                    orchestrator_model=model,
-                )
+            prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
+                user_query=query,
+                project_dir=state.project_dir or ".",
+                project_index=project_index,
+                mode=state.prefilter_mode,
+                model=state.prefilter_model,
+            )
             
-            console.print(f"[green]✓[/] Выбрано [bold]{len(pre_filter_result.selected_chunks)}[/] фрагментов кода")
-            console.print(f"   [dim]Всего токенов: {pre_filter_result.total_tokens:,}[/]")
-            
-            if pre_filter_result.pruned:
-                console.print(f"   [yellow]Обрезано {pre_filter_result.pruned_count} фрагментов (превышен лимит)[/]")
-            
-            # Показываем выбранные фрагменты
-            if pre_filter_result.selected_chunks:
-                console.print("\n   [dim]Выбранные фрагменты:[/]")
-                for i, chunk in enumerate(pre_filter_result.selected_chunks[:5], 1):
-                    console.print(f"   {i}. [cyan]{chunk.name}[/] ({chunk.chunk_type}) — `{chunk.file_path}`")
-                    console.print(f"      [dim]Релевантность: {chunk.relevance_score:.2f} | {chunk.tokens} токенов[/]")
-                if len(pre_filter_result.selected_chunks) > 5:
-                    console.print(f"   [dim]... и ещё {len(pre_filter_result.selected_chunks) - 5} фрагментов[/]")
-                
-            trace_stage("PREFILTER_COMPLETE", {
-                "chunks_count": len(pre_filter_result.selected_chunks),
-                "total_tokens": pre_filter_result.total_tokens,
-                "pruned": pre_filter_result.pruned,
-                "pruned_count": pre_filter_result.pruned_count,
-                "original_count": pre_filter_result.original_count,
+            trace_stage("PREFILTER_ANALYSIS", {
+                "mode": state.prefilter_mode,
+                "has_advice": bool(prefilter_advice_str),
+                "tool_calls": prefilter_advice_obj.tool_calls_made if prefilter_advice_obj else 0,
             })
         except Exception as e:
-            logger.error(f"Ошибка пре-фильтра: {e}", exc_info=True)
-            from app.agents.pre_filter import PreFilterResult
-            pre_filter_result = PreFilterResult(
-                selected_chunks=[], total_tokens=0, pruned=False, pruned_count=0, original_count=0,
-            )
-            console.print(f"[yellow]⚠️ Ошибка пре-фильтра, продолжаем без контекста кода[/]")
-            
-            trace_stage("PREFILTER_ERROR", {"error": str(e)})
+            logger.warning(f"Pre-filter analysis failed: {e}")
+            trace_stage("PREFILTER_ANALYSIS_ERROR", {"error": str(e)})
         
         # Компактный индекс - читаем готовый MD файл
         compact_index = ""
@@ -3682,6 +4197,7 @@ async def handle_ask_mode(query: str):
             "project_map_tokens": _map_tokens,
         })
         
+        
         # =====================================================================
         # ШАГ 3: ОРКЕСТРАТОР
         # =====================================================================
@@ -3690,14 +4206,13 @@ async def handle_ask_mode(query: str):
         console.print("=" * 60)
         
         # Подсчёт токенов
-        chunks_tokens = pre_filter_result.total_tokens
         history_tokens = sum(len(h["content"]) for h in history) // 4
         index_tokens = len(compact_index) // 4
         map_tokens = len(project_map) // 4
         query_tokens = len(query) // 4
         
         system_prompt_base_tokens = 15000
-        first_call_tokens = system_prompt_base_tokens + history_tokens + index_tokens + map_tokens + query_tokens + chunks_tokens
+        first_call_tokens = system_prompt_base_tokens + history_tokens + index_tokens + map_tokens + query_tokens
         
         console.print(f"[dim]Модель: {model_name}[/]")
         console.print(f"[dim]Примерный размер контекста: ~{first_call_tokens:,} токенов[/]")
@@ -3717,7 +4232,7 @@ async def handle_ask_mode(query: str):
             if use_agent_orchestrator:
                 orchestrator_result = await orchestrate_agent(
                     user_query=query,
-                    selected_chunks=pre_filter_result.selected_chunks,
+                    selected_chunks=[],
                     compact_index=compact_index,
                     history=history,
                     orchestrator_model=model,
@@ -3725,17 +4240,19 @@ async def handle_ask_mode(query: str):
                     index=project_index,
                     project_map=project_map,
                     is_new_project=state.is_new_project,
+                    prefilter_advice=prefilter_advice_str,
                 )
             else:
                 orchestrator_result = await orchestrate(
                     user_query=query,
-                    selected_chunks=pre_filter_result.selected_chunks,
+                    selected_chunks=[],
                     compact_index=compact_index,
                     history=history,
                     orchestrator_model=model,
                     project_dir=state.project_dir or ".",
                     index=project_index,
                     project_map=project_map,
+                    prefilter_advice=prefilter_advice_str,
                 )
             
             trace_stage("ORCHESTRATOR_COMPLETE", {
@@ -4196,6 +4713,32 @@ async def handle_agent_mode(query: str):
                 content=content,
                 tokens=tokens
             )
+
+    # =====================================================================
+    # PRE-FILTER АНАЛИЗ (СОВЕТЫ ДЛЯ ОРКЕСТРАТОРА)
+    # =====================================================================
+    console.print("\n[bold cyan]💡 Pre-filter анализ...[/]")
+    
+    prefilter_advice_str = ""
+    
+    try:
+        prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
+            user_query=query,
+            project_dir=state.project_dir or ".",
+            project_index=state.project_index or {},
+            mode=state.prefilter_mode,
+            model=state.prefilter_model,
+        )
+        
+        log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter completed", {
+            "mode": state.prefilter_mode,
+            "has_advice": bool(prefilter_advice_str),
+            "tool_calls": prefilter_advice_obj.tool_calls_made if prefilter_advice_obj else 0,
+        })
+    except Exception as e:
+        logger.warning(f"Pre-filter analysis failed: {e}")
+        log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter failed: {e}")
+
 
     log_pipeline_stage("START", f"Processing agent request: {query[:100]}...", {
         "project_dir": state.project_dir,
@@ -4703,6 +5246,7 @@ async def handle_agent_mode(query: str):
             on_status=on_status_callback,
             on_stage=on_stage_callback,
             on_user_decision=on_user_decision_callback,
+            prefilter_advice=prefilter_advice_str,
         )
         
         log_pipeline_stage("PIPELINE_RESULT", f"Completed: {result.status.value}", {
@@ -5541,7 +6085,7 @@ async def handle_restore_command(args: str):
     backup_manager = state.pipeline.backup_manager
     
     if not args.strip():
-        # Показать список сессий
+        # Показать список сессий С ФАЙЛАМИ
         sessions = backup_manager.list_sessions(limit=10)
         
         if not sessions:
@@ -5550,13 +6094,6 @@ async def handle_restore_command(args: str):
         
         console.print("\n[bold]💾 Доступные бэкапы:[/]\n")
         
-        table = Table(show_header=True, box=box.ROUNDED)
-        table.add_column("#", style="bold cyan", width=3)
-        table.add_column("ID сессии", style="cyan", width=25)
-        table.add_column("Дата", style="dim", width=19)
-        table.add_column("Файлов", width=7)
-        table.add_column("Описание", max_width=40)
-        
         for i, session in enumerate(sessions, 1):
             # Форматируем дату
             created = session.created_at[:19].replace('T', ' ') if session.created_at else "?"
@@ -5564,36 +6101,50 @@ async def handle_restore_command(args: str):
             # Форматируем ID (укорачиваем)
             session_id_short = session.session_id[:20] + "..." if len(session.session_id) > 20 else session.session_id
             
-            # Укорачиваем описание
-            desc = session.description[:37] + "..." if len(session.description) > 40 else session.description
+            # Описание
+            desc = session.description[:50] + "..." if len(session.description) > 50 else session.description
             
-            table.add_row(
-                str(i),
-                session_id_short,
-                created,
-                str(len(session.backups)),
-                desc,
-            )
+            console.print(f"[bold cyan]#{i}[/] | ID: [cyan]{session_id_short}[/] | {created} | {desc}")
+            
+            if session.backups:
+                for backup in session.backups:
+                    # Показываем размер файла в человекочитаемом формате
+                    size_kb = backup.file_size / 1024 if backup.file_size else 0
+                    if size_kb > 1024:
+                        size_str = f"{size_kb / 1024:.1f} MB"
+                    else:
+                        size_str = f"{size_kb:.1f} KB"
+                    console.print(f"   📄 [yellow]{backup.original_path}[/] ({size_str})")
+            else:
+                console.print("   [dim]Нет файлов[/]")
+            console.print()
         
-        console.print(table)
-        console.print("\n[dim]Для восстановления введите номер или ID сессии:[/]")
-        console.print("[dim]  /restore 1[/]")
-        console.print("[dim]  /restore 20240115_143052[/]")
+        console.print("[dim]Для восстановления всей сессии:[/]")
+        console.print("[dim]  /restore 1          (по номеру)[/]")
+        console.print("[dim]  /restore 20240115   (по ID)[/]")
+        console.print()
+        console.print("[dim]Для восстановления одного файла из сессии:[/]")
+        console.print("[dim]  /restore 1 app/services/auth.py[/]")
         return
     
+    # Парсим аргументы: может быть "номер" или "номер путь_к_файлу"
+    parts = args.strip().split(None, 1)
+    session_selector = parts[0]
+    file_filter = parts[1].strip() if len(parts) > 1 else None
+    
     # Определяем сессию
-    session_id = args.strip()
     sessions = backup_manager.list_sessions(limit=50)
     
     # Проверяем, это номер или ID
     session = None
     try:
-        idx = int(session_id) - 1
+        idx = int(session_selector) - 1
         if 0 <= idx < len(sessions):
             session = sessions[idx]
             session_id = session.session_id
     except ValueError:
         # Ищем по ID (частичное совпадение)
+        session_id = session_selector
         matches = [s for s in sessions if session_id in s.session_id]
         
         if len(matches) == 1:
@@ -5610,7 +6161,7 @@ async def handle_restore_command(args: str):
             session = backup_manager.get_session(session_id)
     
     if not session:
-        print_error(f"Сессия не найдена: {session_id}")
+        print_error(f"Сессия не найдена: {session_selector}")
         return
     
     # Показываем что будет восстановлено
@@ -5624,9 +6175,81 @@ async def handle_restore_command(args: str):
         print_warning("В этой сессии нет файлов для восстановления")
         return
     
-    console.print("[bold yellow]Файлы для восстановления:[/]")
+    # Если указан конкретный файл — восстанавливаем только его
+    if file_filter:
+        # Нормализуем путь
+        file_filter = file_filter.replace('\\', '/')
+        
+        # Ищем файл в бэкапах
+        matching_backups = [b for b in session.backups if file_filter in b.original_path]
+        
+        if not matching_backups:
+            print_error(f"Файл не найден в сессии: {file_filter}")
+            console.print("[dim]Доступные файлы:[/]")
+            for b in session.backups:
+                console.print(f"   • {b.original_path}")
+            return
+        
+        if len(matching_backups) > 1:
+            print_warning(f"Найдено несколько файлов, содержащих '{file_filter}':")
+            for b in matching_backups:
+                console.print(f"   • {b.original_path}")
+            console.print("[dim]Уточните путь к файлу[/]")
+            return
+        
+        # Один файл найден
+        backup = matching_backups[0]
+        
+        console.print(f"[bold yellow]📄 Восстановление файла:[/]")
+        console.print(f"   Путь: [cyan]{backup.original_path}[/]")
+        
+        # Размер файла
+        size_kb = backup.file_size / 1024 if backup.file_size else 0
+        if size_kb > 1024:
+            size_str = f"{size_kb / 1024:.1f} MB"
+        else:
+            size_str = f"{size_kb:.1f} KB"
+        console.print(f"   Размер: {size_str}")
+        console.print()
+        
+        # Подтверждение
+        try:
+            confirm = confirm_with_navigation(
+                f"Восстановить файл {backup.original_path}?",
+                default=False
+            )
+        except (BackException, BackToMenuException, QuitException):
+            raise
+        
+        if confirm:
+            console.print("\n[dim]⏳ Восстановление...[/]")
+            
+            try:
+                result = backup_manager.restore_file(session.session_id, backup.original_path)
+                
+                if result:
+                    print_success(f"✅ Файл восстановлен: {backup.original_path}")
+                else:
+                    print_error(f"Не удалось восстановить файл: {backup.original_path}")
+                    
+            except Exception as e:
+                logger.error(f"Error restoring file: {e}", exc_info=True)
+                print_error(f"Ошибка при восстановлении: {e}")
+        else:
+            print_info("Восстановление отменено")
+        
+        return
+    
+    # === ВОССТАНОВЛЕНИЕ ВСЕЙ СЕССИИ ===
+    
+    console.print("[bold yellow]📋 Файлы для восстановления:[/]")
     for backup in session.backups:
-        console.print(f"   📄 {backup.original_path}")
+        size_kb = backup.file_size / 1024 if backup.file_size else 0
+        if size_kb > 1024:
+            size_str = f"{size_kb / 1024:.1f} MB"
+        else:
+            size_str = f"{size_kb:.1f} KB"
+        console.print(f"   📄 {backup.original_path} ({size_str})")
     
     console.print()
     
@@ -5669,6 +6292,8 @@ async def handle_restore_command(args: str):
             console.print("[green]✓[/] Индекс обновлён")
     else:
         print_info("Восстановление отменено")
+
+
 
 async def handle_changes_command(args: str):
     """Просмотр истории изменений файлов"""
@@ -6152,7 +6777,7 @@ async def main_menu_loop():
         try:
             choice = Prompt.ask(
                 "Выбор",
-                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
                 default="1"
             )
         except KeyboardInterrupt:
@@ -6264,8 +6889,15 @@ async def main_menu_loop():
         elif choice == "7":
             await toggle_type_checking()
         
-        # О программе
+                # NEW: Настройки Pre-filter
         elif choice == "8":
+            try:
+                await select_prefilter_settings()
+            except (BackException, BackToMenuException, QuitException):
+                pass
+
+        # О программе
+        elif choice == "9":
             print_about()
 
 # ============================================================================
@@ -6281,6 +6913,15 @@ async def initialize():
     except Exception as e:
         logger.error(f"Ошибка инициализации менеджера истории: {e}", exc_info=True)
         print_warning(f"История диалогов недоступна: {e}")
+    
+    # Загружаем и применяем пользовательские настройки (prefilter_mode, prefilter_model, generator_model и т.д.)
+    try:
+        saved_settings = load_user_settings()
+        apply_user_settings(saved_settings)
+        logger.info(f"User settings loaded and applied: prefilter_mode={state.prefilter_mode}, prefilter_model={state.prefilter_model}")
+        console.print(f"[dim]⚙️ Настройки загружены: PF режим={state.prefilter_mode}, PF модель={cfg.get_model_display_name(state.prefilter_model) if state.prefilter_model else 'Авто'}[/]")
+    except Exception as e:
+        logger.warning(f"Failed to load user settings, using defaults: {e}")
 
 
 async def shutdown():

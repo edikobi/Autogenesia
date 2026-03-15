@@ -16,9 +16,20 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from enum import Enum
+from app.tools.tool_definitions import ORCHESTRATOR_TOOLS
+from app.tools.tool_executor import ToolExecutor, parse_tool_call
+from app.llm.api_client import call_llm_with_tools, call_llm
+from app.llm.prompt_templates import (
+    _build_prefilter_analysis_system_prompt_normal,
+    _build_prefilter_analysis_system_prompt_advanced,
+    _build_prefilter_analysis_user_prompt,
+)
+
 
 from config.settings import cfg
 from app.llm.api_client import call_llm, get_model_for_role
@@ -27,6 +38,349 @@ from app.services.project_map_builder import get_project_map_for_prompt
 from app.utils.token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
+
+
+class PreFilterMode(Enum):
+    """Режимы работы Pre-filter агента"""
+    NORMAL = "normal"      # Обычный режим - только анализ на основе имеющихся данных
+    ADVANCED = "advanced"  # Продвинутый режим - с доступом к инструментам
+
+@dataclass
+class PreFilterAdvice:
+    """Результат анализа запроса Pre-filter агентом"""
+    clarified_query: str
+    possible_cause: str
+    recommended_actions: List[str]
+    files_to_check: List[str]
+    additional_context: str
+    tool_calls_made: int
+    raw_response: str
+
+def _get_prefilter_analysis_system_prompt(mode: PreFilterMode) -> str:
+    """Get system prompt for Pre-filter analysis based on mode."""
+    if mode == PreFilterMode.ADVANCED:
+        return _build_prefilter_analysis_system_prompt_advanced()
+    return _build_prefilter_analysis_system_prompt_normal()
+
+def _get_prefilter_analysis_user_prompt(
+    user_query: str,
+    project_map: str,
+    compact_index: str
+) -> str:
+    """Format user prompt for Pre-filter analysis with provided context."""
+    template = _build_prefilter_analysis_user_prompt()
+    return template.format(
+        user_query=user_query,
+        project_map=project_map or "[No project map available]",
+        compact_index=compact_index or "[No compact index available]"
+    )
+
+def _parse_prefilter_advice(raw_response: str) -> PreFilterAdvice:
+    """Parse Pre-filter response into PreFilterAdvice structure."""
+    # Default values
+    clarified_query = ""
+    possible_cause = ""
+    recommended_actions = []
+    files_to_check = []
+    additional_context = ""
+    
+    if not raw_response:
+        return PreFilterAdvice(
+            clarified_query=clarified_query,
+            possible_cause=possible_cause,
+            recommended_actions=recommended_actions,
+            files_to_check=files_to_check,
+            additional_context=additional_context,
+            tool_calls_made=0,
+            raw_response="",
+        )
+    
+    lines = raw_response.strip().split('\n')
+    current_section = None
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # Detect section headers
+        if line_stripped.startswith('CLARIFIED_QUERY:'):
+            current_section = 'clarified_query'
+            clarified_query = line_stripped.replace('CLARIFIED_QUERY:', '').strip()
+        elif line_stripped.startswith('POSSIBLE_CAUSE:'):
+            current_section = 'possible_cause'
+            possible_cause = line_stripped.replace('POSSIBLE_CAUSE:', '').strip()
+        elif line_stripped.startswith('RECOMMENDED_ACTIONS:'):
+            current_section = 'recommended_actions'
+        elif line_stripped.startswith('FILES_TO_CHECK:'):
+            current_section = 'files_to_check'
+        elif line_stripped.startswith('ADDITIONAL_CONTEXT:'):
+            current_section = 'additional_context'
+            additional_context = line_stripped.replace('ADDITIONAL_CONTEXT:', '').strip()
+        elif line_stripped.startswith('- '):
+            # List item
+            item = line_stripped[2:].strip()
+            if current_section == 'recommended_actions':
+                recommended_actions.append(item)
+            elif current_section == 'files_to_check':
+                files_to_check.append(item)
+        elif current_section == 'additional_context' and line_stripped:
+            # Continue additional context
+            if additional_context:
+                additional_context += ' ' + line_stripped
+            else:
+                additional_context = line_stripped
+    
+    return PreFilterAdvice(
+        clarified_query=clarified_query,
+        possible_cause=possible_cause,
+        recommended_actions=recommended_actions,
+        files_to_check=files_to_check,
+        additional_context=additional_context,
+        tool_calls_made=0,
+        raw_response=raw_response,
+    )
+
+
+
+async def analyze_query(
+    user_query: str,
+    project_map: str,
+    compact_index: str,
+    project_dir: str,
+    index: Dict[str, Any],
+    mode: PreFilterMode = PreFilterMode.NORMAL,
+    model: str = None,
+) -> PreFilterAdvice:
+    """Анализирует запрос пользователя и готовит рекомендации для Оркестратора.
+
+    Args:
+        user_query: Исходный запрос пользователя
+        project_map: Карта проекта с описаниями файлов
+        compact_index: Компактный индекс проекта
+        project_dir: Путь к директории проекта
+        index: Полный семантический индекс
+        mode: Режим работы (NORMAL или ADVANCED)
+        model: Модель для использования (если None, используется из конфига)
+
+    Returns:
+        PreFilterAdvice с анализом и рекомендациями
+    """
+    start_time = time.time()
+    
+    try:
+        # Получить модель если не указана
+        if model is None:
+            model = cfg.AGENT_MODELS.get("pre_filter") or cfg.MODEL_NORMAL
+        
+        logger.info(f"[PRE-FILTER] analyze_query called: mode={mode.value}, model={model}")
+        
+        # Сформировать системный промпт
+        system_prompt = _get_prefilter_analysis_system_prompt(mode)
+        
+        # Сформировать user промпт
+        user_prompt = _get_prefilter_analysis_user_prompt(
+            user_query=user_query,
+            project_map=project_map,
+            compact_index=compact_index
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        
+        logger.info(f"[PRE-FILTER] Sending request to LLM: model={model}, system_prompt_len={len(system_prompt)}, user_prompt_len={len(user_prompt)}")
+        
+        tool_calls_made = 0
+        raw_response = ""
+        
+        if mode == PreFilterMode.NORMAL:
+            # Обычный режим - без инструментов
+            raw_response = await call_llm(
+                model=model,
+                messages=messages,
+                temperature=0,
+                max_tokens=2000,
+            )
+            
+            elapsed = time.time() - start_time
+            logger.info(f"[PRE-FILTER] LLM response received in {elapsed:.1f}s, length={len(raw_response)} chars")
+            
+            advice = _parse_prefilter_advice(raw_response)
+            advice.tool_calls_made = 0
+            advice.raw_response = raw_response
+            return advice
+        
+        elif mode == PreFilterMode.ADVANCED:
+            # Продвинутый режим - с инструментами
+            tool_executor = ToolExecutor(project_dir=project_dir, index=index)
+            final_response, tool_calls_made = await _run_advanced_prefilter(
+                messages=messages,
+                model=model,
+                tool_executor=tool_executor,
+                max_tool_calls=10,
+            )
+            
+            elapsed = time.time() - start_time
+            logger.info(f"[PRE-FILTER] Advanced mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, response_len={len(final_response)} chars")
+            
+            advice = _parse_prefilter_advice(final_response)
+            advice.tool_calls_made = tool_calls_made
+            advice.raw_response = final_response
+            return advice
+        
+        else:
+            # Неизвестный режим
+            logger.warning(f"[PRE-FILTER] Unknown mode: {mode}")
+            return PreFilterAdvice(
+                clarified_query=user_query,
+                possible_cause="",
+                recommended_actions=[],
+                files_to_check=[],
+                additional_context="",
+                tool_calls_made=0,
+                raw_response="",
+            )
+    
+    except Exception as e:
+        elapsed = time.time() - start_time
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # Подробное логирование в файл
+        logger.error(
+            f"[PRE-FILTER] analyze_query FAILED after {elapsed:.1f}s: "
+            f"{error_type}: {error_msg}",
+            exc_info=True
+        )
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: выводим ошибку в консоль, чтобы пользователь видел причину
+        # Ранее ошибка проглатывалась молча и пользователь не понимал, почему Pre-filter не работает
+        print(f"\n⚠️  [PRE-FILTER ERROR] {error_type}: {error_msg}")
+        print(f"    Model: {model}, Mode: {mode.value if hasattr(mode, 'value') else mode}, Elapsed: {elapsed:.1f}s")
+        
+        return PreFilterAdvice(
+            clarified_query=user_query,
+            possible_cause="",
+            recommended_actions=[],
+            files_to_check=[],
+            additional_context="",
+            tool_calls_made=0,
+            raw_response="",
+        )
+
+async def _run_advanced_prefilter(
+    messages: List[Dict[str, str]],
+    model: str,
+    tool_executor: ToolExecutor,
+    max_tool_calls: int = 10,
+) -> tuple[str, int]:
+    """Запускает продвинутый режим Pre-filter с доступом к инструментам.
+
+    Args:
+        messages: Начальные сообщения (system + user)
+        model: Модель для использования
+        tool_executor: Экземпляр ToolExecutor
+        max_tool_calls: Максимальное количество вызовов инструментов
+
+    Returns:
+        Tuple[str, int]: (финальный ответ, количество вызовов инструментов)
+    """
+    tool_calls_count = 0
+    
+    try:
+        # Получить доступные инструменты (исключить run_project_tests)
+        available_tools = [
+            tool for tool in ORCHESTRATOR_TOOLS
+            if tool.get("function", {}).get("name") != "run_project_tests"
+        ]
+        
+        while tool_calls_count < max_tool_calls:
+            # Вызвать LLM с инструментами
+            response = await call_llm_with_tools(
+                model=model,
+                messages=messages,
+                tools=available_tools,
+                temperature=0,
+                max_tokens=4000,
+            )
+            
+            content = response.get("content", "")
+            tool_calls = response.get("tool_calls", [])
+            
+            # Если нет вызовов инструментов - вернуть ответ
+            if not tool_calls:
+                return content, tool_calls_count
+            
+            # Собираем assistant tool_calls и результаты для правильного формата сообщений
+            assistant_tool_calls = []
+            tool_results = []
+            
+            for tc in tool_calls:
+                if tool_calls_count >= max_tool_calls:
+                    break
+                
+                # Используем parse_tool_call для корректного извлечения данных
+                func_name, func_args, tc_id = parse_tool_call(tc)
+                
+                try:
+                    # ToolExecutor.execute() — СИНХРОННЫЙ метод
+                    result = tool_executor.execute(func_name, func_args)
+                    tool_calls_count += 1
+                except Exception as e:
+                    logger.error(f"Tool execution error in pre-filter: {e}", exc_info=True)
+                    result = f"Tool execution failed: {str(e)}"
+                    tool_calls_count += 1
+                
+                assistant_tool_calls.append(tc)
+                tool_results.append({
+                    "tool_call_id": tc_id,
+                    "name": func_name,
+                    "content": result,
+                })
+            
+            # Добавляем assistant message с tool_calls
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": assistant_tool_calls,
+            })
+            
+            # Добавляем результаты инструментов
+            for tr in tool_results:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "name": tr["name"],
+                    "content": tr["content"],
+                })
+            
+            if tool_calls_count >= max_tool_calls:
+                break
+        
+        # Если цикл завершился без финального ответа — запрашиваем его
+        messages.append({
+            "role": "user",
+            "content": "Please provide your final assessment now based on all the information you have gathered. Use the required output format with CLARIFIED_QUERY, POSSIBLE_CAUSE, RECOMMENDED_ACTIONS, FILES_TO_CHECK, and ADDITIONAL_CONTEXT sections.",
+        })
+        
+        final_response = await call_llm(
+            model=model,
+            messages=messages,
+            temperature=0,
+            max_tokens=2000,
+        )
+        
+        return final_response, tool_calls_count
+    
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(f"[PRE-FILTER] Advanced pre-filter error: {error_type}: {error_msg}", exc_info=True)
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: выводим ошибку в консоль
+        print(f"\n⚠️  [PRE-FILTER ADVANCED ERROR] {error_type}: {error_msg}")
+        
+        return "", tool_calls_count
 
 
 # ============================================================================

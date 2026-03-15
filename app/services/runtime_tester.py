@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Pattern
 from enum import Enum
+from app.services.language_adapter import AdapterManager
+
 
 FRAMEWORK_REGISTRY_PATH = "config/framework_registry.json"
 
@@ -70,6 +72,8 @@ class AppType(Enum):
     PACKAGE_MODULE = "package_module"  # Python package module (import only)
     UTILITY_SCRIPT = "utility_script"  # Standalone utility script with module-level execution
     CROSS_LANGUAGE = "cross_language"  # Python with non-Python dependencies
+    NON_PYTHON = "non_python"          # Non-Python files (JS/TS, Go, Java) - compile check only
+
 
 
 
@@ -312,6 +316,7 @@ class TimeoutCalculator:
         AppType.TESTING: 120,       # 120 seconds for testing frameworks (pytest/unittest)
         AppType.UTILITY_SCRIPT: 15, # 15 seconds — import-only for utility scripts
         AppType.CROSS_LANGUAGE: 60,
+        AppType.NON_PYTHON: 30,     # 30 seconds — compile check for JS/TS/Go/Java
         AppType.UNKNOWN: 60,        # 60 seconds
     }
     
@@ -1680,17 +1685,24 @@ except Exception as e:
         
         summary.analysis = analysis
         
+        # Define supported non-Python extensions
+        non_python_extensions = {'.js', '.jsx', '.mjs', '.ts', '.tsx', '.go', '.java'}
+        
         # Group files by type
         for file_path in files:
-            if not file_path.endswith('.py'):
-                continue
+            # Determine file type
+            file_ext = Path(file_path).suffix.lower()
+            is_python = file_path.endswith('.py')
+            is_non_python = file_ext in non_python_extensions
             
-            # Determine app type (with transitive detection)
-            app_type = self._detect_transitive_frameworks(file_path, analysis)
+            # Skip unsupported file types
+            if not is_python and not is_non_python:
+                continue
             
             # Check if we've exceeded total timeout
             elapsed = time.time() - start_time
             if elapsed > total_timeout:
+                app_type = AppType.NON_PYTHON if is_non_python else AppType.STANDARD
                 summary.add_result(TestResult(
                     file_path=file_path,
                     app_type=app_type,
@@ -1698,6 +1710,29 @@ except Exception as e:
                     message=f"Skipped: total timeout budget ({total_timeout}s) exceeded",
                 ))
                 continue
+            
+            # Handle non-Python files
+            if is_non_python:
+                file_timeout = TimeoutCalculator.get_timeout_for_type(AppType.NON_PYTHON)
+                remaining = total_timeout - elapsed
+                actual_timeout = min(file_timeout, int(remaining))
+                
+                if actual_timeout < 5:  # Less than 5 seconds left
+                    summary.add_result(TestResult(
+                        file_path=file_path,
+                        app_type=AppType.NON_PYTHON,
+                        status=TestStatus.SKIPPED,
+                        message="Skipped: insufficient time remaining",
+                    ))
+                    continue
+                
+                result = await self._test_non_python_file(file_path, temp_dir, actual_timeout)
+                summary.add_result(result)
+                continue
+            
+            # Handle Python files (existing logic)
+            # Determine app type (with transitive detection)
+            app_type = self._detect_transitive_frameworks(file_path, analysis)
             
             # Get appropriate timeout for this file type
             file_timeout = TimeoutCalculator.get_timeout_for_type(app_type)
@@ -2763,6 +2798,91 @@ except Exception as e:
                 duration_ms=(time.time() - start_time) * 1000,
             )
     
+    async def _test_non_python_file(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
+        """
+        Test non-Python file (JS/TS, Go, Java) using AdapterManager.compile_check().
+        
+        Validates syntax and compilation without execution.
+        
+        Args:
+            file_path: Relative file path
+            temp_dir: Temp directory with materialized VFS
+            timeout: Timeout for this file
+            
+        Returns:
+            TestResult
+        """
+        import time
+        start_time = time.time()
+        
+        full_path = Path(temp_dir) / file_path
+        
+        # Check if file exists
+        if not full_path.exists():
+            return TestResult(
+                file_path=file_path,
+                app_type=AppType.NON_PYTHON,
+                status=TestStatus.FAILED,
+                message=f"File not found: {file_path}",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+        
+        try:
+            # Read file content
+            content = full_path.read_text(encoding='utf-8', errors='replace')
+            
+            # Get AdapterManager instance
+            adapter_manager = AdapterManager.get_instance(Path(temp_dir))
+            
+            # Check if file type is supported
+            if not adapter_manager.is_supported(file_path):
+                extension = Path(file_path).suffix
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.NON_PYTHON,
+                    status=TestStatus.SKIPPED,
+                    message=f"No adapter available for extension: {extension}",
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+            
+            # Perform compile check
+            result = adapter_manager.compile_check(content, file_path)
+            
+            duration_ms = (time.time() - start_time) * 1000
+            language = result.get('language', 'unknown')
+            
+            if result.get('success', False):
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.NON_PYTHON,
+                    status=TestStatus.PASSED,
+                    message=f"{language.capitalize()} file compiled successfully",
+                    details=result.get('stdout', ''),
+                    duration_ms=duration_ms,
+                )
+            else:
+                stderr = result.get('stderr', 'Unknown compilation error')
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.NON_PYTHON,
+                    status=TestStatus.FAILED,
+                    message=f"{language.capitalize()} compilation failed",
+                    details=stderr[:2000] if stderr else None,
+                    duration_ms=duration_ms,
+                    suggestion=f"Fix syntax/compilation errors in {language} code",
+                )
+        
+        except Exception as e:
+            logger.error(f"Error testing non-Python file {file_path}: {e}", exc_info=True)
+            return TestResult(
+                file_path=file_path,
+                app_type=AppType.NON_PYTHON,
+                status=TestStatus.ERROR,
+                message=f"Compile check error: {type(e).__name__}: {e}",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+    
+    
     def _is_inside_package(self, file_path: str, temp_dir: str) -> bool:
         """
         Check if file is inside a Python package.
@@ -3483,6 +3603,9 @@ try:
     # Load module WITHOUT executing __main__ block
     spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
     module = importlib.util.module_from_spec(spec)
+    # CRITICAL: Register module in sys.modules BEFORE exec_module
+    # This prevents AttributeError in dataclasses._process_class()
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     
     print("POSTGRES_IMPORT_SUCCESS: Module imported successfully")
@@ -3708,32 +3831,36 @@ sys.path.insert(0, {safe_temp_dir}.strip('"'))
 import importlib.util
 
 try:
-    # Load module WITHOUT executing __main__ block
-    spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    
-    print("DAEMON_IMPORT_SUCCESS: Module imported successfully")
-    
-    # Try to find service-related classes
-    service_class_names = ['Service', 'Daemon', 'Monitor', 'Watcher', 'Handler', 
-                        'Observer', 'Scheduler', 'Worker', 'Runner', 'Manager']
-    
-    for name in dir(module):
-        obj = getattr(module, name)
-        if isinstance(obj, type) and not name.startswith('_'):
-            # Check if class name suggests service functionality
-            if any(svc_name.lower() in name.lower() for svc_name in service_class_names):
-                print(f"DAEMON_CLASS_FOUND: {{name}}")
-                break
-    
-    sys.exit(0)
-    
+# Load module WITHOUT executing __main__ block
+spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
+module = importlib.util.module_from_spec(spec)
+# CRITICAL: Register module in sys.modules BEFORE exec_module
+# This prevents AttributeError in dataclasses._process_class() which calls
+# sys.modules.get(cls.__module__).__dict__ — without registration, this returns None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+print("DAEMON_IMPORT_SUCCESS: Module imported successfully")
+
+# Try to find service-related classes
+service_class_names = ['Service', 'Daemon', 'Monitor', 'Watcher', 'Handler', 
+                    'Observer', 'Scheduler', 'Worker', 'Runner', 'Manager']
+
+for name in dir(module):
+    obj = getattr(module, name)
+    if isinstance(obj, type) and not name.startswith('_'):
+        # Check if class name suggests service functionality
+        if any(svc_name.lower() in name.lower() for svc_name in service_class_names):
+            print(f"DAEMON_CLASS_FOUND: {{name}}")
+            break
+
+sys.exit(0)
+
 except Exception as e:
-    print(f"DAEMON_ERROR: {{type(e).__name__}}: {{e}}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+print(f"DAEMON_ERROR: {{type(e).__name__}}: {{e}}")
+import traceback
+traceback.print_exc()
+sys.exit(1)
     '''
         
         try:
@@ -4244,6 +4371,9 @@ import importlib.util
 try:
     spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
     module = importlib.util.module_from_spec(spec)
+    # CRITICAL: Register module in sys.modules BEFORE exec_module
+    # Prevents AttributeError in dataclasses._process_class() 
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     print("IMPORT_SUCCESS")
     sys.exit(0)

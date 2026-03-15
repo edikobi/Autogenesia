@@ -1782,7 +1782,8 @@ class SemanticIndexer:
     
     def detect_changed_files(self) -> Dict[str, List]:
         """
-        [NEW] Сканирует директорию и определяет изменения относительно существующего индекса.
+        Сканирует директорию и определяет изменения относительно существующего индекса.
+        Поддерживает все языки: Python, JavaScript, TypeScript, Go, Java.
         
         Returns:
             Dict с ключами:
@@ -1795,12 +1796,18 @@ class SemanticIndexer:
         if self._existing_index is None:
             self._existing_index = self._load_existing_index()
         
-        # Собираем текущие файлы
-        current_files = self._collect_python_files()
-        current_paths = {
-            str(f.relative_to(self.root_path)).replace("\\", "/"): f 
-            for f in current_files
-        }
+        # Собираем ВСЕ файлы кода (все поддерживаемые языки)
+        all_code_files = self._collect_all_code_files()
+        
+        # Создаём словарь текущих файлов: относительный путь -> абсолютный путь
+        current_paths: Dict[str, Path] = {}
+        for language, files in all_code_files.items():
+            for f in files:
+                try:
+                    rel_path = str(f.relative_to(self.root_path)).replace("\\", "/")
+                    current_paths[rel_path] = f
+                except ValueError:
+                    continue
         
         # Получаем файлы из существующего индекса
         existing_files = self._existing_index.get("files", {}) if self._existing_index else {}
@@ -1846,10 +1853,12 @@ class SemanticIndexer:
         
         return result
     
+    
     async def update_single_file(self, file_path: Path, force: bool = False) -> bool:
         """
         [NEW] Инкрементально обновляет индекс для одного файла.
         Автоматически сохраняет обе индексные карты.
+        Поддерживает все языки: Python, JavaScript, TypeScript, Go, Java.
         
         Args:
             file_path: Абсолютный или относительный путь к файлу
@@ -1896,8 +1905,29 @@ class SemanticIndexer:
                 return True
             return False
         
-        # Индексируем файл
-        file_index = await self.index_file(file_path, force=force)
+        # Определяем язык по расширению
+        extension_to_language = {
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".go": "go",
+            ".java": "java"
+        }
+        
+        ext = file_path.suffix.lower()
+        language = extension_to_language.get(ext)
+        
+        if language is None:
+            logger.warning(f"Unsupported file type: {ext}")
+            return False
+        
+        # Индексируем файл в зависимости от языка
+        if language == "python":
+            file_index = await self.index_file(file_path, force=force)
+        else:
+            file_index = await self._index_non_python_file(file_path, language, force=force)
         
         if file_index is None:
             return False
@@ -1921,6 +1951,7 @@ class SemanticIndexer:
         
         logger.info(f"Updated index for: {relative_path}")
         return True
+    
     
     async def update_files_batch(self, file_paths: List[Path], force: bool = False) -> Dict[str, bool]:
         """
@@ -1956,8 +1987,9 @@ class SemanticIndexer:
     
     async def sync_index(self, force: bool = False) -> Dict[str, Any]:
         """
-        [NEW] Синхронизирует индекс с текущим состоянием файловой системы.
+        Синхронизирует индекс с текущим состоянием файловой системы.
         Обрабатывает добавленные, изменённые, удалённые и перемещённые файлы.
+        Поддерживает все языки: Python, JavaScript, TypeScript, Go, Java.
         
         Также обновляет сжатый индекс, если он существует.
         
@@ -2015,7 +2047,11 @@ class SemanticIndexer:
         files_to_index = changes['added'] + changes['modified']
         
         if force:
-            files_to_index = self._collect_python_files()
+            # При force собираем ВСЕ файлы всех языков
+            all_code_files = self._collect_all_code_files()
+            files_to_index = []
+            for language, files in all_code_files.items():
+                files_to_index.extend(files)
         
         total_to_process = len(files_to_index)
         
@@ -2027,11 +2063,22 @@ class SemanticIndexer:
                 self._existing_index["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self._save_both_indexes()
                 
-                # [NEW] Обновляем сжатый индекс, если он существует
+                # Обновляем сжатый индекс, если он существует
                 if self._compressed_index_exists():
                     self._update_compressed_index(changes)
             
             return stats
+        
+        # Определяем расширения для определения языка
+        extension_to_language = {
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".go": "go",
+            ".java": "java"
+        }
         
         # ============ ПАРАЛЛЕЛЬНАЯ ОБРАБОТКА С СЕМАФОРОМ ============
         semaphore = asyncio.Semaphore(self.max_concurrent)
@@ -2050,15 +2097,25 @@ class SemanticIndexer:
                         current = processed_count
                     self._report_progress(current, total_to_process, f"Indexing {file_path.name}")
                     
-                    # Индексируем через оригинальный index_file
-                    file_index = await self.index_file(file_path, force=True)
+                    # Определяем язык по расширению
+                    ext = file_path.suffix.lower()
+                    language = extension_to_language.get(ext)
+                    
+                    if language is None:
+                        return None
+                    
+                    # Индексируем в зависимости от языка
+                    if language == "python":
+                        file_index = await self.index_file(file_path, force=True)
+                    else:
+                        file_index = await self._index_non_python_file(file_path, language, force=True)
                     
                     if file_index:
                         rel_path = str(file_path.relative_to(self.root_path)).replace("\\", "/")
                         new_data = asdict(file_index) if hasattr(file_index, '__dataclass_fields__') else file_index
                         is_new = rel_path not in self._existing_index.get("files", {})
                         return (rel_path, new_data, is_new)
-                        
+                    
                 except Exception as e:
                     async with results_lock:
                         stats['errors'].append(f"{file_path}: {str(e)}")
@@ -2089,7 +2146,7 @@ class SemanticIndexer:
         # Сохраняем обе карты
         self._save_both_indexes()
         
-        # [NEW] Обновляем сжатый индекс, если он существует
+        # Обновляем сжатый индекс, если он существует
         if self._compressed_index_exists():
             self._update_compressed_index(changes)
         
@@ -2144,13 +2201,17 @@ class IndexFileWatcher:
         
         watcher = self
         
+        # Supported extensions for all languages
+        SUPPORTED_EXTENSIONS = {'.py', '.js', '.jsx', '.ts', '.tsx', '.go', '.java'}
+        
         class Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent):
                 if event.is_directory:
                     return
                 
-                # Фильтруем только Python файлы
-                if not event.src_path.endswith('.py'):
+                # Filter by supported code file extensions
+                file_ext = Path(event.src_path).suffix.lower()
+                if file_ext not in SUPPORTED_EXTENSIONS:
                     return
                 
                 # Проверяем, не в игнорируемой ли директории
@@ -2178,6 +2239,7 @@ class IndexFileWatcher:
         self._process_task = loop.create_task(self._process_changes_loop())
         
         logger.info(f"Started watching: {self.indexer.root_path}")
+    
     
     def stop(self):
         """Останавливает наблюдение"""
@@ -2225,8 +2287,19 @@ class IndexFileWatcher:
             await self._process_batch(changes)
     
     async def _process_batch(self, changes: Dict[str, str]):
-        """Обрабатывает батч изменений"""
+        """Обрабатывает батч изменений для всех поддерживаемых языков"""
         logger.info(f"Processing {len(changes)} file changes...")
+        
+        # Extension to language mapping
+        extension_to_language = {
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".go": "go",
+            ".java": "java"
+        }
         
         deleted = []
         modified = []
@@ -2237,7 +2310,10 @@ class IndexFileWatcher:
             if event_type == 'deleted' or not file_path.exists():
                 deleted.append(path)
             else:
-                modified.append(file_path)
+                # Check if it's a supported file type
+                ext = file_path.suffix.lower()
+                if ext in extension_to_language:
+                    modified.append((file_path, extension_to_language[ext]))
         
         # Обрабатываем удаления
         for path in deleted:
@@ -2250,21 +2326,37 @@ class IndexFileWatcher:
                 logger.error(f"Error removing {path}: {e}")
         
         # Обрабатываем изменения/добавления
-        for file_path in modified:
+        for file_path, language in modified:
             try:
-                await self.indexer.update_single_file(file_path)
+                if language == "python":
+                    await self.indexer.update_single_file(file_path)
+                else:
+                    # For non-Python files, use _index_non_python_file
+                    file_index = await self.indexer._index_non_python_file(file_path, language, force=True)
+                    if file_index:
+                        rel_path = str(file_path.relative_to(self.indexer.root_path)).replace("\\", "/")
+                        if self.indexer._existing_index is None:
+                            self.indexer._existing_index = self.indexer._load_existing_index() or {
+                                "version": "1.2",
+                                "files": {},
+                                "total_files": 0,
+                                "total_tokens": 0
+                            }
+                        from dataclasses import asdict
+                        self.indexer._existing_index["files"][rel_path] = asdict(file_index)
+                        logger.info(f"Indexed {language} file: {rel_path}")
             except Exception as e:
                 logger.error(f"Error updating {file_path}: {e}")
         
-        # Сохраняем если были удаления
-        if deleted and self.indexer._existing_index:
+        # Сохраняем если были изменения
+        if (deleted or modified) and self.indexer._existing_index:
             self.indexer._existing_index["total_files"] = len(self.indexer._existing_index["files"])
             self.indexer._recalculate_total_tokens()
+            from datetime import datetime, timezone
             self.indexer._existing_index["updated_at"] = datetime.now(timezone.utc).isoformat()
             self.indexer._save_both_indexes()
         
         logger.info(f"Processed: {len(modified)} updated, {len(deleted)} deleted")
-
 
 # ============== CONVENIENCE FUNCTIONS ==============
 

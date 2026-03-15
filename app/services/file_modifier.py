@@ -382,7 +382,8 @@ class FileModifier:
         "REPLACE_CONSTANT": ModifyMode.REPLACE_GLOBAL,  # Алиас
     }
     
-
+    # DIFF modes for non-Python languages (handled separately via apply_multilang_diff)
+    DIFF_MODES: set = {"DIFF_INSERT", "DIFF_REPLACE"}
 
     def __init__(self, default_indent: int = 4, project_python_path: Optional[str] = None):
         """
@@ -807,7 +808,8 @@ class FileModifier:
     def apply_code_block(self, existing_content: str, block: ParsedCodeBlock) -> ApplyResult:
         """
         Apply a single code block to content (VFS-aware).
-        Delegates actual modification logic to self.apply().
+        Delegates actual modification logic to self.apply() for Python modes,
+        or to self.apply_multilang_diff() for DIFF modes (non-Python languages).
         
         Args:
             existing_content: Current file content from VFS
@@ -826,9 +828,66 @@ class FileModifier:
             new_content=None
         )
         
+        # === HANDLE DIFF MODES FOR NON-PYTHON LANGUAGES ===
+        if block.mode in self.DIFF_MODES:
+            # Route to multi-language diff handler
+            try:
+                # Determine language from block or file extension
+                language = block.language
+                if not language:
+                    # Infer from file extension
+                    ext = Path(block.file_path).suffix.lower()
+                    ext_to_lang = {
+                        '.js': 'javascript',
+                        '.jsx': 'javascript',
+                        '.ts': 'typescript',
+                        '.tsx': 'typescript',
+                        '.go': 'go',
+                        '.java': 'java',
+                    }
+                    language = ext_to_lang.get(ext)
+                
+                if not language:
+                    result.message = f"Cannot determine language for DIFF mode. File: {block.file_path}"
+                    result.error_type = classify_staging_error(result.message, block.mode)
+                    return result
+                
+                # Create MultiLangDiffInstruction
+                diff_instruction = MultiLangDiffInstruction(
+                    file_path=block.file_path,
+                    language=language,
+                    code=block.code,
+                    target_class=block.target_class,
+                    target_method=block.target_method,
+                    target_function=block.target_function,
+                    insert_after=block.insert_after,
+                    insert_before=block.insert_before,
+                    replace_pattern=block.replace_pattern,
+                )
+                
+                # Apply multi-language diff
+                modify_result = self.apply_multilang_diff(existing_content, diff_instruction)
+                
+                # Map ModifyResult to ApplyResult
+                result.success = modify_result.success
+                result.message = modify_result.message
+                result.changes_made = modify_result.changes_made
+                result.new_content = modify_result.new_content
+                
+                if not result.success:
+                    result.error_type = classify_staging_error(result.message, block.mode)
+                
+                return result
+                
+            except Exception as e:
+                result.message = f"Failed to apply DIFF block: {str(e)}"
+                result.error_type = classify_staging_error(result.message, block.mode)
+                return result
+        
+        # === HANDLE STANDARD PYTHON MODES ===
         # Validate mode
         if block.mode not in self.MODE_MAPPING:
-            result.message = f"Unknown mode: {block.mode}. Valid modes: {', '.join(self.MODE_MAPPING.keys())}"
+            result.message = f"Unknown mode: {block.mode}. Valid modes: {', '.join(list(self.MODE_MAPPING.keys()) + list(self.DIFF_MODES))}"
             result.error_type = classify_staging_error(result.message, block.mode)
             return result
         
@@ -893,6 +952,54 @@ class FileModifier:
         # Читаем текущее содержимое через VFS
         existing_content = vfs.read_file(block.file_path) or ""
         
+        # === HANDLE DIFF MODES FOR NON-PYTHON LANGUAGES ===
+        if block.mode in self.DIFF_MODES:
+            # Determine language from block or file extension
+            language = block.language
+            if not language:
+                ext = Path(block.file_path).suffix.lower()
+                ext_to_lang = {
+                    '.js': 'javascript',
+                    '.jsx': 'javascript',
+                    '.ts': 'typescript',
+                    '.tsx': 'typescript',
+                    '.go': 'go',
+                    '.java': 'java',
+                }
+                language = ext_to_lang.get(ext)
+            
+            if not language:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Cannot determine language for DIFF mode. File: {block.file_path}",
+                )
+            
+            # Create MultiLangDiffInstruction
+            diff_instruction = MultiLangDiffInstruction(
+                file_path=block.file_path,
+                language=language,
+                code=block.code,
+                target_class=block.target_class,
+                target_method=block.target_method,
+                target_function=block.target_function,
+                insert_after=block.insert_after,
+                insert_before=block.insert_before,
+                replace_pattern=block.replace_pattern,
+            )
+            
+            # Apply multi-language diff
+            result = self.apply_multilang_diff(existing_content, diff_instruction)
+            
+            # Stage if successful
+            if result.success:
+                change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                vfs.stage_change(block.file_path, result.new_content, change_type)
+                logger.info(f"Staged DIFF modification to {block.file_path}")
+            
+            return result
+        
+        # === STANDARD PYTHON MODE HANDLING ===
         # Применяем модификацию
         result = self.apply_code_block(existing_content, block)
         
@@ -1003,13 +1110,24 @@ class FileModifier:
         
         return result
     
+    
     def apply_multilang_diff(self, existing_content: str, instruction: 'MultiLangDiffInstruction') -> ModifyResult:
         """
         Apply multi-language diffs for non-Python files (JS/TS, Go, Java).
         
         Supports two modes:
-        1. INSERT mode: insert_after or insert_before specified
-        2. REPLACE mode: replace_pattern specified
+        1. DIFF_INSERT mode: insert_after or insert_before specified
+        - Uses target (function/method name) to find insertion scope
+        - If target not found by name, searches for function with that name
+        - If unique function found, inserts there
+        
+        2. DIFF_REPLACE mode: replace_pattern specified
+        - Uses target + replace_pattern to find replacement location
+        - If target not found, falls back to searching by replace_pattern only
+        - If unique pattern found, replaces there
+        
+        CRITICAL: Each code block insertion is validated with tree-sitter.
+        If insertion breaks the syntax tree, staging is cancelled and error is returned.
         
         Args:
             existing_content: Current file content
@@ -1034,10 +1152,12 @@ class FileModifier:
             source_bytes = existing_content.encode('utf-8')
             lines = existing_content.split('\n')
             
-            # === MODE 1: INSERT ===
+            # === MODE 1: DIFF_INSERT ===
             if instruction.insert_after or instruction.insert_before:
                 # Find target element if specified
                 target_info = None
+                target_name = instruction.target_function or instruction.target_method
+                
                 if instruction.target_function or instruction.target_class or instruction.target_method:
                     target_info = self._find_multilang_target(
                         parser,
@@ -1048,11 +1168,25 @@ class FileModifier:
                         instruction.target_function
                     )
                     
+                    # Fallback: if target not found by full specification, try to find function by name
+                    if not target_info and target_name:
+                        # Search for any function with this name
+                        target_info = self._find_multilang_target(
+                            parser,
+                            source_bytes,
+                            instruction.language,
+                            None,  # No class constraint
+                            None,  # No method constraint
+                            target_name  # Search as function
+                        )
+                        if target_info:
+                            logger.info(f"DIFF_INSERT: Found function '{target_name}' as fallback target")
+                    
                     if not target_info:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Target not found: class={instruction.target_class}, method={instruction.target_method}, function={instruction.target_function}"
+                            message=f"DIFF_INSERT: Target not found: class={instruction.target_class}, method={instruction.target_method}, function={instruction.target_function}"
                         )
                 
                 # Find insertion point
@@ -1064,13 +1198,13 @@ class FileModifier:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Insert anchor not found: '{instruction.insert_after}'"
+                            message=f"DIFF_INSERT: Insert anchor not found: '{instruction.insert_after}'"
                         )
                     if not result['unique']:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_after}'"
+                            message=f"DIFF_INSERT: Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_after}'"
                         )
                     insert_line = result['line_number'] + 1
                     
@@ -1080,13 +1214,13 @@ class FileModifier:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Insert anchor not found: '{instruction.insert_before}'"
+                            message=f"DIFF_INSERT: Insert anchor not found: '{instruction.insert_before}'"
                         )
                     if not result['unique']:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_before}'"
+                            message=f"DIFF_INSERT: Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_before}'"
                         )
                     insert_line = result['line_number']
                     
@@ -1097,7 +1231,7 @@ class FileModifier:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
-                        message="No insertion point specified (no insert_after, insert_before, or target)"
+                        message="DIFF_INSERT: No insertion point specified (no insert_after, insert_before, or target)"
                     )
                 
                 # Calculate indentation from reference line
@@ -1119,27 +1253,28 @@ class FileModifier:
                 modified_lines = lines[:insert_line] + indented_lines + lines[insert_line:]
                 modified_content = '\n'.join(modified_lines)
                 
-                # Validate syntax
+                # === CRITICAL: Validate syntax with tree-sitter ===
                 is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                 if not is_valid:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
-                        message=f"Syntax validation failed after insertion: {'; '.join(errors[:3])}"
+                        message=f"DIFF_INSERT: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                     )
                 
                 return ModifyResult(
                     success=True,
                     new_content=modified_content,
-                    message=f"Inserted code for {instruction.language}",
+                    message=f"DIFF_INSERT: Inserted code for {instruction.language}",
                     changes_made=[f"Inserted code at line {insert_line}"]
                 )
             
-            # === MODE 2: REPLACE ===
+            # === MODE 2: DIFF_REPLACE ===
             elif instruction.replace_pattern:
                 # Find target scope if specified
                 search_start = 0
                 search_end = len(lines)
+                target_name = instruction.target_function or instruction.target_method
                 
                 if instruction.target_function or instruction.target_class or instruction.target_method:
                     target_info = self._find_multilang_target(
@@ -1152,7 +1287,7 @@ class FileModifier:
                     )
                     
                     if target_info:
-                        search_start = target_info['start_line']
+                        search_start = target_info['start_line'] - 1  # Convert to 0-indexed
                         search_end = target_info['end_line']
                 
                 # Try to find pattern in target scope
@@ -1165,46 +1300,47 @@ class FileModifier:
                     modified_lines[replace_line] = instruction.code
                     modified_content = '\n'.join(modified_lines)
                     
-                    # Validate syntax
+                    # === CRITICAL: Validate syntax with tree-sitter ===
                     is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                     if not is_valid:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Syntax validation failed after replacement: {'; '.join(errors[:3])}"
+                            message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                         )
                     
                     return ModifyResult(
                         success=True,
                         new_content=modified_content,
-                        message=f"Replaced code for {instruction.language}",
+                        message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
                         changes_made=[f"Replaced line {replace_line + 1}"]
                     )
                 
-                # Not found in target scope, try full file search
-                if instruction.target_function or instruction.target_class or instruction.target_method:
+                # Fallback: if target was specified but pattern not found in scope, search by replace_pattern only
+                if (instruction.target_function or instruction.target_class or instruction.target_method):
+                    # Search in full file by replace_pattern only
                     result = self._find_unique_anchor(lines, instruction.replace_pattern, 0, len(lines))
                     
                     if result['found'] and result['unique']:
-                        # Found in full file
+                        # Found unique pattern in full file
                         replace_line = result['line_number']
                         modified_lines = lines.copy()
                         modified_lines[replace_line] = instruction.code
                         modified_content = '\n'.join(modified_lines)
                         
-                        # Validate syntax
+                        # === CRITICAL: Validate syntax with tree-sitter ===
                         is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                         if not is_valid:
                             return ModifyResult(
                                 success=False,
                                 new_content=existing_content,
-                                message=f"Syntax validation failed after replacement: {'; '.join(errors[:3])}"
+                                message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                             )
                         
                         return ModifyResult(
                             success=True,
                             new_content=modified_content,
-                            message=f"Replaced code for {instruction.language}",
+                            message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
                             changes_made=[f"Replaced line {replace_line + 1} (outside target scope)"],
                             warnings=["Pattern found outside target scope"]
                         )
@@ -1213,13 +1349,13 @@ class FileModifier:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Replace pattern '{instruction.replace_pattern}' not found"
+                            message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' not found"
                         )
                     else:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
+                            message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
                         )
                 
                 else:
@@ -1228,25 +1364,23 @@ class FileModifier:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Replace pattern '{instruction.replace_pattern}' not found"
+                            message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' not found"
                         )
                     elif not result['unique']:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
+                            message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
                         )
             
             else:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
-                    message="No operation specified (no insert_after, insert_before, or replace_pattern)"
+                    message="DIFF_REPLACE: No operation specified (no insert_after, insert_before, or replace_pattern)"
                 )
         
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error in apply_multilang_diff: {e}", exc_info=True)
             return ModifyResult(
                 success=False,
@@ -1327,8 +1461,17 @@ class FileModifier:
         pattern: str,
         start_line: int = 0,
         end_line: Optional[int] = None
-    ) -> Tuple[bool, int, str]:
-        """Find a unique anchor pattern in lines. Returns (is_unique, line_index, error_message)."""
+    ) -> Dict[str, Any]:
+        """
+        Find a unique anchor pattern in lines.
+        
+        Returns:
+            Dict with keys:
+                - found: bool - whether pattern was found at all
+                - unique: bool - whether pattern is unique (exactly one match)
+                - line_number: int - line index of match (or -1 if not found/not unique)
+                - count: int - number of matches found
+        """
         if end_line is None:
             end_line = len(lines)
         
@@ -1339,12 +1482,13 @@ class FileModifier:
                 matches.append(i)
         
         if len(matches) == 0:
-            return (False, -1, f"Pattern '{pattern}' not found")
+            return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
         
         if len(matches) > 1:
-            return (False, -1, f"Pattern '{pattern}' is not unique, found {len(matches)} occurrences")
+            return {'found': True, 'unique': False, 'line_number': -1, 'count': len(matches)}
         
-        return (True, matches[0], "")
+        return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+    
     
     def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:
         """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""

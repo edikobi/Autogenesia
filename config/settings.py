@@ -18,6 +18,7 @@ class Config:
     # OpenRouter
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    # Эта модель делает индексную карту
     MODEL_QWEN = os.getenv("MODEL_QWEN")
     
     # GigaChat
@@ -329,6 +330,16 @@ class Config:
         "history_compressor": MODEL_GEMINI_2_FLASH,   # Gemini 2.0 Flash через OpenRouter
     }
     
+        # ============ НАСТРОЙКИ PRE-FILTER ============
+    # Режим Pre-filter: "normal" или "advanced"
+    # normal — анализ на основе имеющихся данных (быстрее, дешевле)
+    # advanced — с доступом к инструментам (глубже, но дороже)
+    PREFILTER_DEFAULT_MODE = "normal"
+    
+    # Модель Pre-filter по умолчанию (можно переопределить в user_settings.json)
+    PREFILTER_DEFAULT_MODEL = MODEL_NORMAL
+
+    
     # ============ НАСТРОЙКИ AI АГЕНТА ============
     PRE_FILTER_MAX_CHUNKS = 5
     PRE_FILTER_MAX_TOKENS = 75000  # Лимит 75k токенов
@@ -596,6 +607,15 @@ AVAILABLE_GENERATOR_MODELS = [
     ),
 ]
 
+AVAILABLE_PREFILTER_MODELS = [
+    ("1", Config.MODEL_DEEPSEEK_REASONER, "DeepSeek V 3.2", "Дешёвая модель. Хороший выбор для базового анализа."),
+    ("2", Config.MODEL_SONNET_4_5, "Claude Sonnet 4.5", "Глубокий анализ кода. Отличное понимание архитектуры."),
+    ("3", Config.MODEL_SONNET_4_6, "Claude Sonnet 4.6", "Новейшая версия Sonnet. Улучшенный анализ."),
+    ("4", Config.MODEL_GEMINI_3_PRO, "Gemini 3.1 Pro", "Огромное контекстное окно. Хорош для больших проектов."),
+    ("5", Config.MODEL_GPT_5_2_Codex, "GPT-5.2 Codex", "Мощная модель OpenAI для анализа кода."),
+    ("6", Config.MODEL_QWEN3_MAX_THINKING, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач."),
+]
+    
 
 # Создаем объект конфигурации
 cfg = Config()

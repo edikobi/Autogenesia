@@ -400,37 +400,39 @@ class ToolExecutor:
         )
 
     def _execute_list_installed_packages(self, arguments: Dict[str, Any]) -> str:
-        """Execute list_installed_packages tool with VFS python_path."""
+        """Execute list_installed_packages tool with VFS python_path and optional language filter."""
         python_path = None
-        
+        language = arguments.get("language")  # Optional: None means all languages
+
         if self.virtual_fs is not None:
             python_path = self.virtual_fs.get_project_python()
-        
+
         return list_installed_packages_tool(
             project_dir=self.project_dir,
+            language=language,
             python_path=python_path
         )
     
     
     
     def _execute_install_dependency(self, arguments: Dict[str, Any]) -> str:
-        """Execute install_dependency tool with VFS python_path."""
-        import_name = arguments.get("import_name")
+        """Execute install_dependency tool"""
+        package_name = arguments.get("package_name")
+        if not package_name:
+            return self._error_response("package_name is required")
         
-        if not import_name:
-            return self._format_error("Missing required argument: import_name")
-        
+        language = arguments.get("language")
         version = arguments.get("version")
-        python_path = None
+        python_path = arguments.get("python_path")
         
-        if self.virtual_fs is not None:
-            python_path = self.virtual_fs.get_project_python()
+        project_dir = str(self.project_root)
         
-        return install_dependency_tool(
-            project_dir=self.project_dir,
-            import_name=import_name,
+        return dependency_manager.install_dependency_tool(
+            project_dir=project_dir,
+            package_name=package_name,
+            language=language,
             version=version,
-            python_path=python_path
+            python_path=python_path,
         )
     
     

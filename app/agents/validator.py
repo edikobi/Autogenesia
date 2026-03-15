@@ -98,6 +98,7 @@ class AIValidator:
         self._total_approvals = 0
         self._total_tokens = 0
         self._fallback_count = 0  # счетчик fallback-ов
+        self._second_model_count = 0  # счетчик использования второй модели
     
     
     FALLBACK_ERROR_PATTERNS = [
@@ -107,6 +108,15 @@ class AIValidator:
         "access denied", "forbidden", "unauthorized",
         "model not found", "endpoint not found",
     ]    
+    
+    
+    def _is_empty_response(self, content: Optional[str]) -> bool:
+        """Check if LLM response content is empty, None, or whitespace-only."""
+        if content is None:
+            return True
+        if content.strip() == "":
+            return True
+        return False
     
     async def validate(
         self,
@@ -118,7 +128,7 @@ class AIValidator:
         proposed_code: Optional[str] = None,
         file_path: Optional[str] = None,
     ) -> AIValidationResult:
-        """Validate с механизмом fallback при ошибках Qwen/OpenRouter"""
+        """Validate с механизмом 3-уровневого fallback: primary → second → deepseek-chat"""
         start_time = time.time()
         
         # Обработка параметров (существующий код)
@@ -138,11 +148,19 @@ class AIValidator:
         # Определяем модели
         context_size = self._calculate_context_size(request)
         primary_model = cfg.get_ai_validator_model(context_size)
+        
+        # Вторая модель — противоположная от основной (small ↔ large)
+        small_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_small"]
+        large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]
+        second_model = large_model if primary_model == small_model else small_model
+        
+        # Финальный fallback — всегда deepseek-chat
         fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
         
         logger.info(
             f"AIValidator: Starting validation (context={context_size} tokens, "
-            f"primary_model={cfg.get_model_display_name(primary_model)})"
+            f"primary_model={cfg.get_model_display_name(primary_model)}, "
+            f"second_model={cfg.get_model_display_name(second_model)})"
         )
         
         # Подготавливаем промпты
@@ -159,7 +177,10 @@ class AIValidator:
             {"role": "user", "content": prompts["user"]},
         ]
         
+        # ----------------------------------------------------------------
         # Попытка 1: Основная модель
+        # ----------------------------------------------------------------
+        _skip_second_model = False
         try:
             response = await call_llm_full(
                 model=primary_model,
@@ -174,85 +195,163 @@ class AIValidator:
             if response.finish_reason == "length":
                 logger.warning(
                     f"⚠️ AIValidator: Primary model response TRUNCATED, "
-                    f"considering fallback to {cfg.get_model_display_name(fallback_model)}"
+                    f"trying second model {cfg.get_model_display_name(second_model)}"
                 )
-                raise LLMAPIError("Response truncated - trying fallback")
+                raise LLMAPIError("Response truncated - trying second model")
             
-            # Парсим успешный ответ
-            result = self._parse_response(
-                response=response.content,
-                model=primary_model,
-                duration_ms=duration_ms,
-            )
-            result.tokens_used = response.total_tokens
-            
-            # Обновляем статистику
-            self._update_stats(result)
-            
-            logger.info(
-                f"AIValidator: {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
-                f"(confidence={result.confidence:.2f}, time={duration_ms:.0f}ms)"
-            )
-            
-            return result
-            
+            # Проверяем пустой ответ
+            if self._is_empty_response(response.content):
+                logger.warning(
+                    f"⚠️ AIValidator: Primary model returned empty response, "
+                    f"trying second model {cfg.get_model_display_name(second_model)}"
+                )
+                # Переходим к попытке 2 (второй модели)
+            else:
+                # Парсим успешный ответ основной модели
+                result = self._parse_response(
+                    response=response.content,
+                    model=primary_model,
+                    duration_ms=duration_ms,
+                )
+                result.tokens_used = response.total_tokens
+                
+                # Обновляем статистику
+                self._update_stats(result)
+                
+                logger.info(
+                    f"AIValidator: {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
+                    f"(confidence={result.confidence:.2f}, time={duration_ms:.0f}ms)"
+                )
+                
+                return result
+                
         except Exception as e:
-            # Проверяем, нужно ли использовать fallback
             error_str = str(e).lower()
             should_fallback = any(pattern in error_str for pattern in self.FALLBACK_ERROR_PATTERNS)
             
-            if should_fallback and primary_model != fallback_model:
-                # Попытка 2: Fallback на DeepSeek
-                logger.warning(
-                    f"AIValidator: Primary model {primary_model} failed: {e}. "
-                    f"Falling back to {cfg.get_model_display_name(fallback_model)}"
-                )
-                
-                try:
-                    fallback_response = await call_llm_full(
-                        model=fallback_model,
-                        messages=messages,
-                        temperature=0,
-                        max_tokens=2500,
-                    )
-                    
-                    fallback_duration_ms = (time.time() - start_time) * 1000
-                    
-                    result = self._parse_response(
-                        response=fallback_response.content,
-                        model=fallback_model,
-                        duration_ms=fallback_duration_ms,
-                    )
-                    result.tokens_used = fallback_response.total_tokens
-                    result.model_used = fallback_model
-                    result.verdict = f"[Fallback] {result.verdict}"
-                    
-                    self._update_stats(result, is_fallback=True)
-                    
-                    logger.info(
-                        f"AIValidator: Fallback SUCCESSFUL - "
-                        f"{'✅ APPROVED' if result.approved else '❌ REJECTED'}"
-                    )
-                    
-                    return result
-                    
-                except Exception as fallback_error:
-                    # Fallback тоже не сработал
-                    logger.error(f"AIValidator: Fallback also failed: {fallback_error}")
-                    return self._create_error_result(
-                        error=fallback_error,
-                        duration_ms=(time.time() - start_time) * 1000,
-                        is_fallback_failure=True,
-                    )
-            else:
-                # Ошибка, но fallback не требуется
+            if not should_fallback:
+                # Ошибка без fallback — возвращаем ошибку сразу
                 duration_ms = (time.time() - start_time) * 1000
-                logger.error(f"AIValidator: Error (no fallback): {e}")
+                logger.error(f"AIValidator: Primary model error (no fallback): {e}")
                 return self._create_error_result(
                     error=e,
                     duration_ms=duration_ms,
                     is_fallback_failure=False,
-                )    
+                )
+            
+            # should_fallback=True → пропускаем вторую модель, сразу к deepseek fallback
+            logger.warning(
+                f"AIValidator: Primary model {primary_model} failed with fallback-eligible error: {e}. "
+                f"Skipping second model, falling back directly to {cfg.get_model_display_name(fallback_model)}"
+            )
+            # Переходим к попытке 3 (fallback deepseek)
+            # Устанавливаем флаг чтобы пропустить попытку 2
+            _skip_second_model = True
+
+        # ----------------------------------------------------------------
+        # Попытка 2: Вторая модель (только если primary вернула пустой ответ)
+        # ----------------------------------------------------------------
+        if not _skip_second_model:
+            try:
+                logger.info(
+                    f"AIValidator: Trying second model {cfg.get_model_display_name(second_model)}"
+                )
+                second_response = await call_llm_full(
+                    model=second_model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=2500,
+                )
+                
+                second_duration_ms = (time.time() - start_time) * 1000
+                
+                if self._is_empty_response(second_response.content):
+                    logger.warning(
+                        f"⚠️ AIValidator: Second model also returned empty response, "
+                        f"trying fallback {cfg.get_model_display_name(fallback_model)}"
+                    )
+                    # Переходим к попытке 3
+                else:
+                    # Успешный ответ от второй модели
+                    result = self._parse_response(
+                        response=second_response.content,
+                        model=second_model,
+                        duration_ms=second_duration_ms,
+                    )
+                    result.tokens_used = second_response.total_tokens
+                    result.model_used = second_model
+                    result.verdict = f"[Second model] {result.verdict}"
+                    
+                    self._second_model_count += 1
+                    self._update_stats(result)
+                    
+                    logger.info(
+                        f"AIValidator: Second model {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
+                        f"(confidence={result.confidence:.2f}, time={second_duration_ms:.0f}ms)"
+                    )
+                    
+                    return result
+                    
+            except Exception as e:
+                logger.warning(
+                    f"AIValidator: Second model failed: {e}. "
+                    f"Falling back to {cfg.get_model_display_name(fallback_model)}"
+                )
+                # Переходим к попытке 3
+
+        # ----------------------------------------------------------------
+        # Попытка 3: Fallback deepseek-chat
+        # ----------------------------------------------------------------
+        if primary_model != fallback_model:
+            try:
+                logger.info(
+                    f"AIValidator: Trying fallback {cfg.get_model_display_name(fallback_model)}"
+                )
+                fallback_response = await call_llm_full(
+                    model=fallback_model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=2500,
+                )
+                
+                fallback_duration_ms = (time.time() - start_time) * 1000
+                
+                result = self._parse_response(
+                    response=fallback_response.content,
+                    model=fallback_model,
+                    duration_ms=fallback_duration_ms,
+                )
+                result.tokens_used = fallback_response.total_tokens
+                result.model_used = fallback_model
+                result.verdict = f"[Fallback] {result.verdict}"
+                
+                self._update_stats(result, is_fallback=True)
+                
+                logger.info(
+                    f"AIValidator: Fallback SUCCESSFUL - "
+                    f"{'✅ APPROVED' if result.approved else '❌ REJECTED'}"
+                )
+                
+                return result
+                
+            except Exception as fallback_error:
+                # Fallback тоже не сработал
+                logger.error(f"AIValidator: Fallback also failed: {fallback_error}")
+                return self._create_error_result(
+                    error=fallback_error,
+                    duration_ms=(time.time() - start_time) * 1000,
+                    is_fallback_failure=True,
+                )
+        else:
+            # primary_model == fallback_model, нет смысла повторять
+            logger.error(
+                f"AIValidator: Primary model is already fallback model, cannot retry"
+            )
+            return self._create_error_result(
+                error=Exception("All models exhausted"),
+                duration_ms=(time.time() - start_time) * 1000,
+                is_fallback_failure=True,
+            )
     
     
     def _calculate_context_size(self, request: AIValidationRequest) -> int:

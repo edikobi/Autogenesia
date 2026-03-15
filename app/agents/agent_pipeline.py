@@ -708,6 +708,7 @@ class AgentPipeline:
         on_status: Optional[OnStatusCallback] = None,
         on_stage: Optional[OnStageCallback] = None,
         on_user_decision: Optional[OnUserDecisionCallback] = None,
+        prefilter_advice: str = "",
     ) -> PipelineResult:
         """
         Process a user request through the complete pipeline with feedback loops.
@@ -739,6 +740,7 @@ class AgentPipeline:
         self._on_status = on_status
         self._on_stage = on_stage
         self._on_user_decision = on_user_decision
+        self._prefilter_advice = prefilter_advice
         
         # Initialize result
         result = PipelineResult(
@@ -3211,15 +3213,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             routing = await route_request(user_request, self.project_index)
             model = routing.orchestrator_model
             logger.info(f"Pipeline: Router selected {cfg.get_model_display_name(model)} "
-                       f"(complexity: {routing.complexity_level})")
-        
-        # Pre-filter chunks
-        pre_filter_result = await pre_filter_chunks(
-            user_query=user_request,
-            index=self.project_index,
-            project_dir=self.project_dir,
-            orchestrator_model=model,
-        )
+                    f"(complexity: {routing.complexity_level})")
         
         # === ИСПРАВЛЕНИЕ: Загружаем compact_index.md вместо генерации JSON ===
         compact_index = _load_compact_index_md(self.project_dir)
@@ -3255,10 +3249,12 @@ Remember: You can override the validator if you believe the critique is incorrec
             
             return result
         
+        prefilter_advice = getattr(self, '_prefilter_advice', '') or ''
+        
         # Run orchestrator
         result = await orchestrate_agent(
             user_query=user_request,
-            selected_chunks=pre_filter_result.selected_chunks,
+            selected_chunks=[],
             compact_index=compact_index,
             history=history,
             orchestrator_model=model,
@@ -3266,6 +3262,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             index=self.project_index,
             project_map=project_map,
             tool_executor=tool_executor_with_callbacks,
+            prefilter_advice=prefilter_advice,
         )
         
         # Report thinking

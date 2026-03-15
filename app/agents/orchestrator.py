@@ -140,6 +140,7 @@ async def orchestrate(
     index: Dict[str, Any],
     project_map: str = "",
     tool_executor: Optional[Callable] = None,
+    prefilter_advice: str = "",
 ) -> OrchestratorResult:
     """
     Analyzes code and generates instructions for Code Generator.
@@ -198,7 +199,8 @@ async def orchestrate(
         project_map=project_map,
         remaining_web_searches=tool_usage.get_remaining_web_searches(),
         orchestrator_model_id=orchestrator_model,
-        conversation_summary=conversation_summary
+        conversation_summary=conversation_summary,
+        prefilter_advice=prefilter_advice,
     )
     
     # Build messages
@@ -408,7 +410,8 @@ async def orchestrate(
                 project_map=project_map,
                 remaining_web_searches=tool_usage.get_remaining_web_searches(),
                 orchestrator_model_id=orchestrator_model,
-                conversation_summary=conversation_summary
+                conversation_summary=conversation_summary,
+                prefilter_advice=prefilter_advice,
             )
             messages[0]["content"] = updated_prompts["system"]
             
@@ -1636,6 +1639,7 @@ async def orchestrate_agent(
     project_map: str = "",
     tool_executor: Optional[Callable] = None,
     is_new_project: bool = False,
+    prefilter_advice: str = "",
 ) -> OrchestratorResult:
     """
     Agent Mode orchestration with automatic context compression.
@@ -1698,7 +1702,8 @@ async def orchestrate_agent(
             project_map=project_map,
             remaining_web_searches=tool_usage.get_remaining_web_searches(),
             orchestrator_model_id=orchestrator_model,
-            conversation_summary=conversation_summary
+            conversation_summary=conversation_summary,
+            prefilter_advice=prefilter_advice,
         )
     
     messages = [{"role": "system", "content": prompts["system"]}]
@@ -1923,7 +1928,8 @@ async def orchestrate_agent(
                     project_map=project_map,
                     remaining_web_searches=tool_usage.get_remaining_web_searches(),
                     orchestrator_model_id=orchestrator_model,
-                    conversation_summary=conversation_summary
+                    conversation_summary=conversation_summary,
+                    prefilter_advice=prefilter_advice,
                 )
             messages[0]["content"] = updated_prompts["system"]
             

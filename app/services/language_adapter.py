@@ -147,18 +147,28 @@ class AdapterManager:
         '.java': 'java',
     }
     
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(self, project_root: Optional[Path] = None, vfs: Optional['VirtualFileSystem'] = None):
         self.project_root = project_root
+        self.vfs = vfs  # Store VFS reference for passing to adapters
         self._adapters: Dict[str, LanguageAdapter] = {}
         self._register_default_adapters()
     
+    
     @classmethod
-    def get_instance(cls, project_root: Optional[Path] = None) -> 'AdapterManager':
+    def get_instance(cls, project_root: Optional[Path] = None, vfs: Optional['VirtualFileSystem'] = None) -> 'AdapterManager':
         if cls._instance is None:
-            cls._instance = cls(project_root)
-        elif project_root is not None and cls._instance.project_root != project_root:
-            cls._instance.project_root = project_root
+            cls._instance = cls(project_root, vfs)
+        else:
+            # Update project_root if provided
+            if project_root is not None and cls._instance.project_root != project_root:
+                cls._instance.project_root = project_root
+            # Update VFS if provided (critical for staged file access)
+            if vfs is not None and cls._instance.vfs != vfs:
+                cls._instance.vfs = vfs
+                # Re-register adapters with new VFS
+                cls._instance._register_default_adapters()
         return cls._instance
+    
     
     @classmethod
     def reset_instance(cls) -> None:
@@ -167,38 +177,38 @@ class AdapterManager:
     
     def _register_default_adapters(self) -> None:
         """Register default language adapters."""
-        # JavaScript/TypeScript
+        # JavaScript/TypeScript - CRITICAL: Pass VFS for staged file access during compilation
         try:
             from app.services.js_ts_adapter import JsTsAdapter
-            adapter = JsTsAdapter(project_root=self.project_root)
+            adapter = JsTsAdapter(project_root=self.project_root, vfs=self.vfs)
             if adapter.is_available():
                 self._adapters['javascript'] = adapter
                 self._adapters['typescript'] = adapter
-                logger.info("JsTsAdapter registered for javascript/typescript")
+                logger.info(f"JsTsAdapter registered for javascript/typescript (vfs={'yes' if self.vfs else 'no'})")
         except ImportError as e:
             logger.debug(f"JsTsAdapter not available: {e}")
         except Exception as e:
             logger.warning(f"Failed to register JsTsAdapter: {e}")
         
-        # Go
+        # Go - CRITICAL: Pass VFS for staged file access during compilation
         try:
             from app.services.go_adapter import GoAdapter
-            adapter = GoAdapter(project_root=self.project_root)
+            adapter = GoAdapter(project_root=self.project_root, vfs=self.vfs)
             if adapter.is_available():
                 self._adapters['go'] = adapter
-                logger.info("GoAdapter registered for go")
+                logger.info(f"GoAdapter registered for go (vfs={'yes' if self.vfs else 'no'})")
         except ImportError as e:
             logger.debug(f"GoAdapter not available: {e}")
         except Exception as e:
             logger.warning(f"Failed to register GoAdapter: {e}")
         
-        # Java
+        # Java - CRITICAL: Pass VFS for staged file access during compilation
         try:
             from app.services.java_adapter import JavaAdapter
-            adapter = JavaAdapter(project_root=self.project_root)
+            adapter = JavaAdapter(project_root=self.project_root, vfs=self.vfs)
             if adapter.is_available():
                 self._adapters['java'] = adapter
-                logger.info("JavaAdapter registered for java")
+                logger.info(f"JavaAdapter registered for java (vfs={'yes' if self.vfs else 'no'})")
         except ImportError as e:
             logger.debug(f"JavaAdapter not available: {e}")
         except Exception as e:
@@ -303,16 +313,32 @@ class AdapterManager:
             Dict with keys: success, stdout, stderr, exit_code, language
         """
         adapter = self.get_adapter_for_file(file_path)
+        language = self.get_language_for_file(file_path) or 'unknown'
+        
         if adapter is None:
+            # CRITICAL: Return failure when no adapter is available
+            # This ensures non-Python files are not silently skipped
+            logger.warning(f"No adapter available for {file_path} (language: {language})")
             return {
-                'success': True,
+                'success': False,
                 'stdout': '',
-                'stderr': '',
-                'exit_code': 0,
-                'language': 'unknown'
+                'stderr': f'No adapter available for language: {language}. Install required tools (node/tsc for JS/TS, go for Go, javac for Java).',
+                'exit_code': -1,
+                'language': language
             }
         
         try:
+            # Check if adapter tools are available
+            if not adapter.is_available():
+                tool_name = adapter.get_language_name()
+                return {
+                    'success': False,
+                    'stdout': '',
+                    'stderr': f'{tool_name} compiler/interpreter not available. Please install required tools.',
+                    'exit_code': -1,
+                    'language': language
+                }
+            
             # Pass project_root to adapter
             result = adapter.compile_check(code, file_path, project_root=self.project_root)
             result['language'] = adapter.get_language_name()
@@ -324,8 +350,9 @@ class AdapterManager:
                 'stdout': '',
                 'stderr': str(e),
                 'exit_code': -1,
-                'language': adapter.get_language_name() if adapter else 'unknown'
+                'language': language
             }
+
             
     def compile_check_with_deps(self, files: List[Tuple[str, str, Optional[str]]]) -> Dict[str, Any]:
         """

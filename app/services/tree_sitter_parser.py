@@ -600,6 +600,9 @@ class MultiLanguageParser:
         config = self.LANGUAGE_CONFIGS[language]
 
         try:
+            # Import tree_sitter Parser class
+            from tree_sitter import Language, Parser
+            
             # Import the tree-sitter language module
             module_name = config['module']
             module = __import__(module_name)
@@ -607,14 +610,14 @@ class MultiLanguageParser:
             # Get the language object
             if 'attr' in config:
                 # For TypeScript, need to access specific attribute
-                lang_obj = getattr(module, config['attr'])
+                lang_func = getattr(module, config['attr'])
+                lang_obj = Language(lang_func())
             else:
                 # For others, use default language attribute
-                lang_obj = module.language
+                lang_obj = Language(module.language())
 
             # Create parser
-            parser = Parser()
-            parser.set_language(lang_obj)
+            parser = Parser(lang_obj)
 
             # Cache for future use
             self._parsers[language] = parser
@@ -626,6 +629,8 @@ class MultiLanguageParser:
             raise ValueError(f"Tree-sitter language module not installed for {language}: {e}")
         except Exception as e:
             raise ValueError(f"Failed to initialize parser for {language}: {e}")
+
+
 
     def get_language_for_file(self, file_path: str) -> Optional[str]:
         """Detect language from file extension"""
