@@ -215,16 +215,24 @@ class AIValidator:
                 )
                 result.tokens_used = response.total_tokens
                 
-                # Обновляем статистику
-                self._update_stats(result)
-                
-                logger.info(
-                    f"AIValidator: {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
-                    f"(confidence={result.confidence:.2f}, time={duration_ms:.0f}ms)"
-                )
-                
-                return result
-                
+                # Проверяем parse_error — если парсер не смог извлечь JSON, пробуем вторую модель
+                if result.parse_error:
+                    logger.warning(
+                        f"⚠️ AIValidator: Primary model response could not be parsed: {result.parse_error}. "
+                        f"Trying second model {cfg.get_model_display_name(second_model)}"
+                    )
+                    # Переходим к попытке 2 (второй модели) — НЕ возвращаем результат
+                else:
+                    # Обновляем статистику
+                    self._update_stats(result)
+                    
+                    logger.info(
+                        f"AIValidator: {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
+                        f"(confidence={result.confidence:.2f}, time={duration_ms:.0f}ms)"
+                    )
+                    
+                    return result
+                    
         except Exception as e:
             error_str = str(e).lower()
             should_fallback = any(pattern in error_str for pattern in self.FALLBACK_ERROR_PATTERNS)
@@ -249,7 +257,7 @@ class AIValidator:
             _skip_second_model = True
 
         # ----------------------------------------------------------------
-        # Попытка 2: Вторая модель (только если primary вернула пустой ответ)
+        # Попытка 2: Вторая модель (только если primary вернула пустой ответ или parse_error)
         # ----------------------------------------------------------------
         if not _skip_second_model:
             try:
@@ -282,16 +290,24 @@ class AIValidator:
                     result.model_used = second_model
                     result.verdict = f"[Second model] {result.verdict}"
                     
-                    self._second_model_count += 1
-                    self._update_stats(result)
-                    
-                    logger.info(
-                        f"AIValidator: Second model {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
-                        f"(confidence={result.confidence:.2f}, time={second_duration_ms:.0f}ms)"
-                    )
-                    
-                    return result
-                    
+                    # Проверяем parse_error — если парсер не смог извлечь JSON, пробуем fallback
+                    if result.parse_error:
+                        logger.warning(
+                            f"⚠️ AIValidator: Second model response could not be parsed: {result.parse_error}. "
+                            f"Trying fallback {cfg.get_model_display_name(fallback_model)}"
+                        )
+                        # Переходим к попытке 3 (fallback) — НЕ возвращаем результат
+                    else:
+                        self._second_model_count += 1
+                        self._update_stats(result)
+                        
+                        logger.info(
+                            f"AIValidator: Second model {'✅ APPROVED' if result.approved else '❌ REJECTED'} "
+                            f"(confidence={result.confidence:.2f}, time={second_duration_ms:.0f}ms)"
+                        )
+                        
+                        return result
+                        
             except Exception as e:
                 logger.warning(
                     f"AIValidator: Second model failed: {e}. "
@@ -333,7 +349,7 @@ class AIValidator:
                 )
                 
                 return result
-                
+                    
             except Exception as fallback_error:
                 # Fallback тоже не сработал
                 logger.error(f"AIValidator: Fallback also failed: {fallback_error}")

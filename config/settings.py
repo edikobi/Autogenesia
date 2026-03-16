@@ -219,7 +219,7 @@ class Config:
             "provider_name": "OpenRouter (Zhipu)",
             "extra_params": {
                 "reasoning": {
-                    "effort": "none"
+                    "effort": "low"
                 }
             }
         },
@@ -381,7 +381,7 @@ class Config:
         "test_output_limit": 2000,
         
         # --- AI Validator Model Selection ---
-        "ai_validator_token_threshold": 25000,
+        "ai_validator_token_threshold": 300000,
         "ai_validator_model_small": MODEL_GEMINI_FLASH_LITE,
         "ai_validator_model_large": "deepseek-chat",
         
