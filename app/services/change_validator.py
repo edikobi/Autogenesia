@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
-from app.tools.dependency_manager import IMPORT_TO_PACKAGE, get_import_to_package_mapping, DependencyManager
+from app.tools.dependency_manager import IMPORT_TO_PACKAGE, get_import_to_package_mapping, DependencyManager, InstallResult
 from app.services.runtime_tester import RuntimeTester, RuntimeTestSummary, TestStatus, AppType
 from app.services.language_adapter import AdapterManager
 
@@ -594,7 +594,22 @@ class ChangeValidator:
         # ========================================================================
         
         adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root, vfs=self.vfs)
-        dependency_manager = DependencyManager(project_root=self.vfs.project_root)
+        dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
+        
+        # ========================================================================
+        # PRE-INSTALL: Install dependencies from config files (pom.xml, package.json, go.mod)
+        # This ensures dependencies are available before compilation
+        # ========================================================================
+        try:
+            config_install_results = dependency_manager.install_all_dependencies_from_config(vfs=self.vfs)
+            for lang, install_result in config_install_results.items():
+                if install_result is not None:
+                    if install_result.all_success:
+                        logger.info(f"[SYNTAX] Pre-installed {lang} dependencies: {install_result.successful} packages")
+                    elif install_result.failed > 0:
+                        logger.warning(f"[SYNTAX] Some {lang} dependencies failed to install: {install_result.failed} failed")
+        except Exception as e:
+            logger.warning(f"[SYNTAX] Failed to pre-install dependencies from config files: {e}")
         
         # Collect non-Python files that have adapters
         non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
@@ -687,12 +702,12 @@ class ChangeValidator:
                         for package in missing_deps:
                             try:
                                 logger.info(f"[SYNTAX] Installing missing dependency: {package} for {language}")
-                                success = dependency_manager.install_dependency_for_language(package, language)
-                                if success:
+                                install_result = dependency_manager.install_dependency_for_language(package, language)
+                                if install_result.status == InstallResult.SUCCESS:
                                     logger.info(f"[SYNTAX] Successfully installed {package}")
                                     any_installed = True
                                 else:
-                                    logger.warning(f"[SYNTAX] Failed to install {package}")
+                                    logger.warning(f"[SYNTAX] Failed to install {package}: {install_result.message}")
                             except Exception as e:
                                 logger.warning(f"[SYNTAX] Error installing {package}: {e}")
                         
@@ -2019,13 +2034,15 @@ exclude =
                 )
             
             # ========================================================================
+            
+            # ========================================================================
             # NON-PYTHON FILE COMPILATION CHECKS (JS/TS, Go, Java)
             # Uses compile_check_with_deps for grouped compilation with dependencies
             # ========================================================================
             if non_py_files:
                 logger.info(f"RUNTIME: Checking {len(non_py_files)} non-Python files with language adapters")
                 
-                dependency_manager = DependencyManager(project_root=self.vfs.project_root)
+                dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
                 
                 # Group files by language for batch compilation
                 files_by_language: Dict[str, List[Tuple[str, str]]] = {}
@@ -2083,14 +2100,14 @@ exclude =
                                 for package in missing_deps:
                                     try:
                                         logger.info(f"[RUNTIME] Installing missing dependency: {package} for {language}")
-                                        success = dependency_manager.install_dependency_for_language(package, language)
+                                        install_result = dependency_manager.install_dependency_for_language(package, language)
                                         
-                                        if success:
+                                        if install_result.status == InstallResult.SUCCESS:
                                             logger.info(f"[RUNTIME] Successfully installed {package}")
                                             any_installed = True
                                         else:
-                                            logger.warning(f"[RUNTIME] Failed to install {package}")
-                                    
+                                            logger.warning(f"[RUNTIME] Failed to install {package}: {install_result.message}")
+                                        
                                     except Exception as e:
                                         logger.warning(f"[RUNTIME] Error installing {package}: {e}")
                                 

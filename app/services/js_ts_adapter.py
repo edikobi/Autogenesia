@@ -571,107 +571,132 @@ class JsTsAdapter(LanguageAdapter):
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 
     def compile_check_with_deps(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
-        """
-        Check JavaScript/TypeScript code compilation for multiple files together.
-        TypeScript files are compiled together with tsc, JavaScript files are checked individually.
+            """
+            Check JavaScript/TypeScript code compilation for multiple files together.
+            TypeScript files are compiled together with tsc, JavaScript files are checked individually.
         
-        CRITICAL: For JS/TS projects, we must include ALL project source files,
-        not just the changed files. This is because TypeScript/JavaScript modules
-        may import other project files that need to be present during compilation.
+            CRITICAL: For JS/TS projects, we must include ALL project source files,
+            not just the changed files. This is because TypeScript/JavaScript modules
+            may import other project files that need to be present during compilation.
         
-        Args:
-            files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
-            project_root: Optional project root path
+            Args:
+                files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
+                project_root: Optional project root path
             
-        Returns:
-            Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
-        """
-        if not files:
-            return {
-                'success': True,
-                'results': [],
-                'stderr': '',
-                'stdout': '',
-                'exit_code': 0,
-            }
+            Returns:
+                Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
+            """
+            if not files:
+                return {
+                    'success': True,
+                    'results': [],
+                    'stderr': '',
+                    'stdout': '',
+                    'exit_code': 0,
+                }
         
-        effective_root = project_root or self.project_root
-        temp_dir = None
+            effective_root = project_root or self.project_root
+            temp_dir = None
         
-        try:
-            temp_dir = tempfile.mkdtemp(prefix='js_ts_check_deps_')
+            try:
+                temp_dir = tempfile.mkdtemp(prefix='js_ts_check_deps_')
             
-            # Build a map of staged files: file_path -> code
-            # These are the files with NEW content that should override project files
-            staged_files_map: Dict[str, str] = {}
-            for code, file_path in files:
-                # Normalize path for comparison
-                normalized_path = str(Path(file_path)).replace('\\', '/')
-                staged_files_map[normalized_path] = code
-                # Also store with original path
-                staged_files_map[file_path] = code
+                # Build a map of staged files with MULTIPLE path formats for robust lookup
+                # This ensures we can match paths regardless of separator style
+                staged_files_map: Dict[str, str] = {}
+                staged_paths_normalized: set = set()
             
-            # Separate TypeScript and JavaScript files from staged files
-            ts_staged_files = []  # List of (code, file_path)
-            js_staged_files = []  # List of (code, file_path)
-            
-            for code, file_path in files:
-                if file_path.endswith('.ts') or file_path.endswith('.tsx'):
-                    ts_staged_files.append((code, file_path))
-                else:
-                    js_staged_files.append((code, file_path))
-            
-            # ================================================================
-            # STEP 1: Copy ALL JS/TS files from project to temp directory
-            # This ensures all dependencies are available for compilation
-            # ================================================================
-            all_ts_files_in_temp = []
-            all_js_files_in_temp = []
-            
-            if effective_root and Path(effective_root).exists():
-                # Define extensions to copy
-                extensions = ('*.ts', '*.tsx', '*.js', '*.jsx', '*.mjs', '*.cjs')
+                for code, file_path in files:
+                    # Store with multiple path formats for robust matching
+                    # Format 1: Original path
+                    staged_files_map[file_path] = code
                 
-                for ext in extensions:
-                    for source_file in Path(effective_root).rglob(ext):
+                    # Format 2: Forward slashes (Unix-style)
+                    forward_slash_path = file_path.replace('\\', '/')
+                    staged_files_map[forward_slash_path] = code
+                
+                    # Format 3: Backslashes (Windows-style)
+                    back_slash_path = file_path.replace('/', '\\')
+                    staged_files_map[back_slash_path] = code
+                
+                    # Format 4: Normalized via Path
+                    normalized_path = str(Path(file_path)).replace('\\', '/')
+                    staged_files_map[normalized_path] = code
+                
+                    # Track all normalized paths for quick lookup
+                    staged_paths_normalized.add(forward_slash_path)
+                    staged_paths_normalized.add(normalized_path)
+            
+                # Separate TypeScript and JavaScript files from staged files
+                ts_staged_files = []  # List of (code, file_path)
+                js_staged_files = []  # List of (code, file_path)
+            
+                for code, file_path in files:
+                    if file_path.endswith('.ts') or file_path.endswith('.tsx'):
+                        ts_staged_files.append((code, file_path))
+                    else:
+                        js_staged_files.append((code, file_path))
+            
+                # ================================================================
+                # STEP 1: Copy ALL JS/TS files from project to temp directory
+                # This ensures all dependencies are available for compilation
+                # ================================================================
+                all_ts_files_in_temp = []
+                all_js_files_in_temp = []
+                processed_rel_paths: set = set()  # Track which relative paths we've processed
+            
+                if effective_root and Path(effective_root).exists():
+                    for source_file in Path(effective_root).rglob('*'):
+                        # Check if it's a JS/TS file
+                        if not (source_file.suffix in ('.js', '.jsx', '.ts', '.tsx')):
+                            continue
+                    
                         try:
                             rel_path = source_file.relative_to(effective_root)
                             rel_path_str = str(rel_path).replace('\\', '/')
-                            
-                            # Skip node_modules, hidden folders, dist, build
+                        
+                            # Skip node_modules, hidden folders, and build directories
                             parts = rel_path.parts
-                            if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage', '.next', '__pycache__') for p in parts):
+                            if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
                                 continue
-                            
+                        
+                            # Mark this path as processed
+                            processed_rel_paths.add(rel_path_str)
+                        
                             # Determine content: use staged version if available, otherwise read via VFS/disk
                             content = None
-                            
+                        
                             # Check if this file has staged content (explicitly passed to this method)
+                            # Use normalized path for comparison
                             if rel_path_str in staged_files_map:
                                 content = staged_files_map[rel_path_str]
                                 logger.debug(f"Using explicitly staged content for {rel_path_str}")
                             elif str(rel_path) in staged_files_map:
                                 content = staged_files_map[str(rel_path)]
                                 logger.debug(f"Using explicitly staged content for {rel_path}")
+                            elif rel_path_str in staged_paths_normalized:
+                                # Double-check with normalized set
+                                content = staged_files_map.get(rel_path_str)
+                                logger.debug(f"Using staged content (normalized match) for {rel_path_str}")
                             else:
                                 # Read file content via VFS (if available) or disk
-                                # This ensures we get VFS-staged content for files not in our explicit list
+                                # CRITICAL: Only use VFS/disk if file is NOT in our staged list
+                                # This prevents reading stale VFS content when we have fresh staged content
                                 content = self._read_file_content(source_file, rel_path_str)
-                            
+                        
                             if content is None:
                                 continue
-                            
+                        
                             # Write to temp directory preserving structure
                             temp_file = Path(temp_dir) / rel_path
                             temp_file.parent.mkdir(parents=True, exist_ok=True)
                             temp_file.write_text(content, encoding='utf-8')
-                            
-                            # Track by file type
-                            if ext in ('*.ts', '*.tsx'):
+                        
+                            if source_file.suffix in ('.ts', '.tsx'):
                                 all_ts_files_in_temp.append(str(temp_file))
                             else:
                                 all_js_files_in_temp.append(str(temp_file))
-                            
+                        
                         except ValueError:
                             # File is not under effective_root
                             continue
@@ -679,166 +704,266 @@ class JsTsAdapter(LanguageAdapter):
                             logger.warning(f"Error processing {source_file}: {e}")
                             continue
                 
-                # Copy tsconfig.json if it exists
-                tsconfig_path = Path(effective_root) / 'tsconfig.json'
-                if tsconfig_path.exists():
-                    shutil.copy(str(tsconfig_path), str(Path(temp_dir) / 'tsconfig.json'))
+                    # Copy tsconfig.json if it exists
+                    tsconfig_path = Path(effective_root) / 'tsconfig.json'
+                    if tsconfig_path.exists():
+                        shutil.copy(str(tsconfig_path), str(Path(temp_dir) / 'tsconfig.json'))
                 
-                # Copy package.json if it exists
-                package_json_path = Path(effective_root) / 'package.json'
-                if package_json_path.exists():
-                    shutil.copy(str(package_json_path), str(Path(temp_dir) / 'package.json'))
-            
-            # ================================================================
-            # STEP 2: Write any staged files that don't exist in project yet
-            # (new files being created)
-            # ================================================================
-            for code, file_path in files:
-                rel_path = Path(file_path)
-                if rel_path.is_absolute() and effective_root:
-                    try:
-                        rel_path = rel_path.relative_to(effective_root)
-                    except ValueError:
-                        pass
+                    # ================================================================
+                    # STEP 1.1: Copy package.json and install npm dependencies
+                    # This ensures external libraries are available for compilation
+                    # ================================================================
+                    package_json_copied = False
+                    package_json_path = Path(effective_root) / 'package.json'
                 
-                temp_file = Path(temp_dir) / rel_path
+                    # Check VFS for package.json first (might be staged)
+                    package_json_content = None
+                    if self.vfs is not None:
+                        package_json_content = self.vfs.read_file('package.json')
                 
-                if not temp_file.exists():
-                    # This is a new file, write it
-                    temp_file.parent.mkdir(parents=True, exist_ok=True)
-                    temp_file.write_text(code, encoding='utf-8')
-                    
-                    if file_path.endswith('.ts') or file_path.endswith('.tsx'):
-                        all_ts_files_in_temp.append(str(temp_file))
-                    else:
-                        all_js_files_in_temp.append(str(temp_file))
-                    
-                    logger.debug(f"Wrote new staged file: {rel_path}")
-            
-            # ================================================================
-            # STEP 3: Compile TypeScript files if any exist
-            # ================================================================
-            individual_results = []
-            ts_compilation_success = True
-            ts_stderr = ''
-            ts_stdout = ''
-            
-            if all_ts_files_in_temp and self._tsc_available:
-                logger.debug(f"Compiling {len(all_ts_files_in_temp)} TypeScript files together")
+                    if package_json_content is not None:
+                        # Write package.json from VFS to temp dir
+                        temp_package_json = Path(temp_dir) / 'package.json'
+                        temp_package_json.write_text(package_json_content, encoding='utf-8')
+                        package_json_copied = True
+                        logger.debug(f"Copied package.json from VFS to {temp_dir}")
+                    elif package_json_path.exists():
+                        # Copy package.json from disk to temp dir
+                        shutil.copy(str(package_json_path), str(Path(temp_dir) / 'package.json'))
+                        package_json_copied = True
+                        logger.debug(f"Copied package.json from disk to {temp_dir}")
                 
-                result = subprocess.run(
-                    ['tsc', '--noEmit', '--skipLibCheck'],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=60,
-                    cwd=temp_dir,
-                )
+                    # Copy package-lock.json if it exists (for faster/deterministic installs)
+                    package_lock_path = Path(effective_root) / 'package-lock.json'
+                    if package_lock_path.exists():
+                        shutil.copy(str(package_lock_path), str(Path(temp_dir) / 'package-lock.json'))
+                        logger.debug(f"Copied package-lock.json to {temp_dir}")
                 
-                ts_compilation_success = result.returncode == 0
-                ts_stderr = result.stderr
-                ts_stdout = result.stdout
-                
-                # Add results for TypeScript staged files
-                for code, file_path in ts_staged_files:
-                    individual_results.append({
-                        'file_path': file_path,
-                        'success': ts_compilation_success,
-                        'stderr': ts_stderr if not ts_compilation_success else '',
-                        'stdout': ts_stdout,
-                        'exit_code': result.returncode,
-                    })
-            else:
-                # Add results for TypeScript staged files (no tsc available)
-                for code, file_path in ts_staged_files:
-                    individual_results.append({
-                        'file_path': file_path,
-                        'success': True,
-                        'stderr': '',
-                        'stdout': 'TypeScript compiler not available',
-                        'exit_code': 0,
-                    })
-            
-            # ================================================================
-            # STEP 4: Check JavaScript files individually
-            # ================================================================
-            for code, file_path in js_staged_files:
-                js_success = True
-                js_stderr = ''
-                js_stdout = ''
-                
-                if self._eslint_available:
-                    # Find the temp file for this JS file
-                    rel_path = Path(file_path)
-                    if rel_path.is_absolute() and effective_root:
+                    # Run npm install if package.json was copied and npm is available
+                    npm_available = shutil.which('npm') is not None
+                    if package_json_copied and npm_available:
                         try:
-                            rel_path = rel_path.relative_to(effective_root)
-                        except ValueError:
-                            pass
-                    
-                    temp_js_file = Path(temp_dir) / rel_path
-                    
-                    if temp_js_file.exists():
-                        try:
-                            result = subprocess.run(
-                                ['eslint', str(temp_js_file)],
+                            logger.info(f"Installing npm dependencies in {temp_dir}")
+                        
+                            # Use npm ci if package-lock.json exists (faster), otherwise npm install
+                            npm_cmd = [shutil.which('npm') or 'npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'] \
+                                if (Path(temp_dir) / 'package-lock.json').exists() \
+                                else [shutil.which('npm') or 'npm', 'install', '--ignore-scripts', '--no-audit', '--no-fund']
+                        
+                            npm_result = subprocess.run(
+                                npm_cmd,
                                 capture_output=True,
                                 text=True,
                                 encoding='utf-8',
                                 errors='replace',
-                                timeout=30,
+                                timeout=120,
                                 cwd=temp_dir,
                             )
+                        
+                            if npm_result.returncode == 0:
+                                logger.info("npm dependencies installed successfully")
+                            else:
+                                logger.warning(f"npm install failed: {npm_result.stderr[:300]}")
                             
-                            js_success = result.returncode == 0
-                            js_stderr = result.stderr
-                            js_stdout = result.stdout
                         except subprocess.TimeoutExpired:
-                            js_success = False
-                            js_stderr = 'eslint timed out'
+                            logger.warning("npm install timed out after 120 seconds")
                         except Exception as e:
-                            logger.warning(f"eslint check failed for {file_path}: {e}")
-                            js_success = False
-                            js_stderr = str(e)
+                            logger.warning(f"Error running npm install: {e}")
+            
+                # ================================================================
+                # STEP 1.5: Include VFS-staged JS/TS files that don't exist on disk
+                # This handles newly created files that only exist in VFS
+                # ================================================================
+                if self.vfs is not None:
+                    try:
+                        affected_files = self.vfs.get_affected_files()
+                        for vfs_rel_path in affected_files:
+                            # Only process JS/TS files
+                            if not any(vfs_rel_path.endswith(ext) for ext in ('.js', '.jsx', '.ts', '.tsx')):
+                                continue
+                        
+                            # Normalize path for comparison
+                            vfs_path_normalized = vfs_rel_path.replace('\\', '/')
+                        
+                            # Skip if already processed from disk scan
+                            if vfs_path_normalized in processed_rel_paths:
+                                continue
+                        
+                            # Skip node_modules, dist, build, coverage, and hidden directories
+                            parts = Path(vfs_rel_path).parts
+                            if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
+                                continue
+                        
+                            # ============================================================
+                            # CRITICAL: Check staged_files_map FIRST (authoritative source)
+                            # Only fall back to VFS if file is NOT in staged_files_map
+                            # ============================================================
+                            content = None
+                        
+                            if vfs_path_normalized in staged_files_map:
+                                content = staged_files_map[vfs_path_normalized]
+                                logger.debug(f"Using AUTHORITATIVE staged content for VFS file {vfs_path_normalized}")
+                            else:
+                                # File is not in authoritative list - read from VFS
+                                content = self.vfs.read_file(vfs_rel_path)
+                                if content is not None:
+                                    logger.debug(f"Read VFS-only file from VFS: {vfs_rel_path}")
+                        
+                            if content is None:
+                                continue
+                        
+                            # Write to temp directory preserving structure
+                            temp_file = Path(temp_dir) / vfs_rel_path
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(content, encoding='utf-8')
+                        
+                            # Add to appropriate list based on extension
+                            if vfs_rel_path.endswith('.ts') or vfs_rel_path.endswith('.tsx'):
+                                all_ts_files_in_temp.append(str(temp_file))
+                            else:
+                                all_js_files_in_temp.append(str(temp_file))
+                        
+                            processed_rel_paths.add(vfs_path_normalized)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error scanning VFS for additional JS/TS files: {e}")
+            
+                # ================================================================
+                # STEP 2: Write any staged files that don't exist in project yet
+                # (new files being created)
+                # ================================================================
+                all_paths = [file_path for _, file_path in files]
+            
+                for code, file_path in files:
+                    # Check if we already wrote this file
+                    rel_path = self._normalize_path_for_temp(code, file_path, effective_root, all_paths)
+                    rel_path_str = str(rel_path).replace('\\', '/')
                 
-                individual_results.append({
-                    'file_path': file_path,
-                    'success': js_success,
-                    'stderr': js_stderr,
-                    'stdout': js_stdout,
-                    'exit_code': 0 if js_success else 1,
-                })
+                    # Skip if already processed
+                    if rel_path_str in processed_rel_paths:
+                        continue
+                
+                    temp_file = Path(temp_dir) / rel_path
+                
+                    if not temp_file.exists():
+                        # This is a new file, write it
+                        temp_file.parent.mkdir(parents=True, exist_ok=True)
+                        temp_file.write_text(code, encoding='utf-8')
+                    
+                        if file_path.endswith('.ts') or file_path.endswith('.tsx'):
+                            all_ts_files_in_temp.append(str(temp_file))
+                        else:
+                            all_js_files_in_temp.append(str(temp_file))
+                    
+                        processed_rel_paths.add(rel_path_str)
+                        logger.debug(f"Wrote new staged file: {rel_path}")
             
-            # Overall success is true only if all checks passed
-            overall_success = all(r['success'] for r in individual_results) if individual_results else True
+                # ================================================================
+                # STEP 3: Compile TypeScript files if any
+                # ================================================================
+                individual_results = []
             
-            return {
-                'success': overall_success,
-                'results': individual_results,
-                'stderr': ts_stderr,
-                'stdout': ts_stdout,
-                'exit_code': 0 if overall_success else 1,
-            }
+                if all_ts_files_in_temp and self._tsc_available:
+                    logger.debug(f"Compiling {len(all_ts_files_in_temp)} TypeScript files together")
+                
+                    result = subprocess.run(
+                        [shutil.which('tsc') or 'tsc', '--noEmit', '--skipLibCheck'] + all_ts_files_in_temp,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=60,
+                        cwd=temp_dir,
+                    )
+                
+                    # Build results for TypeScript staged files
+                    for code, file_path in ts_staged_files:
+                        individual_results.append({
+                            'file_path': file_path,
+                            'success': result.returncode == 0,
+                            'stderr': result.stderr if result.returncode != 0 else '',
+                            'stdout': result.stdout,
+                            'exit_code': result.returncode,
+                        })
+                elif ts_staged_files and not self._tsc_available:
+                    # TypeScript files but tsc not available
+                    for code, file_path in ts_staged_files:
+                        individual_results.append({
+                            'file_path': file_path,
+                            'success': False,
+                            'stderr': 'TypeScript compiler (tsc) not available',
+                            'stdout': '',
+                            'exit_code': -1,
+                        })
+            
+                # ================================================================
+                # STEP 4: Check JavaScript files individually
+                # ================================================================
+                if all_js_files_in_temp and self._eslint_available:
+                    logger.debug(f"Checking {len(all_js_files_in_temp)} JavaScript files")
+                
+                    for js_file in all_js_files_in_temp:
+                        result = subprocess.run(
+                            [shutil.which('eslint') or 'eslint', '--no-eslintrc', js_file],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            timeout=30,
+                            cwd=temp_dir,
+                        )
+                    
+                        # Find corresponding staged file
+                        for code, file_path in js_staged_files:
+                            if file_path in js_file or js_file.endswith(Path(file_path).name):
+                                individual_results.append({
+                                    'file_path': file_path,
+                                    'success': result.returncode == 0,
+                                    'stderr': result.stderr if result.returncode != 0 else '',
+                                    'stdout': result.stdout,
+                                    'exit_code': result.returncode,
+                                })
+                                break
+                elif js_staged_files:
+                    # No linter available for JS files
+                    for code, file_path in js_staged_files:
+                        individual_results.append({
+                            'file_path': file_path,
+                            'success': True,
+                            'stderr': '',
+                            'stdout': 'No JavaScript linter available',
+                            'exit_code': 0,
+                        })
+            
+                # Determine overall success
+                overall_success = all(r['success'] for r in individual_results) if individual_results else True
+            
+                return {
+                    'success': overall_success,
+                    'results': individual_results,
+                    'stderr': '',
+                    'stdout': '',
+                    'exit_code': 0 if overall_success else 1,
+                }
         
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': 'compilation timed out', 'exit_code': -1} for _, fp in files],
-                'stderr': 'compilation timed out',
-                'stdout': '',
-                'exit_code': -1,
-            }
-        except Exception as e:
-            logger.error(f"JS/TS compilation error: {e}", exc_info=True)
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
-                'stderr': str(e),
-                'stdout': '',
-                'exit_code': -1,
-            }
-        finally:
-            if temp_dir and Path(temp_dir).exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            except subprocess.TimeoutExpired:
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': 'Compilation timed out', 'exit_code': -1} for _, fp in files],
+                    'stderr': 'Compilation timed out',
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            except Exception as e:
+                logger.error(f"JS/TS compilation error: {e}", exc_info=True)
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
+                    'stderr': str(e),
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            finally:
+                if temp_dir and Path(temp_dir).exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 

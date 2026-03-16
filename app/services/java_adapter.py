@@ -389,7 +389,7 @@ class JavaAdapter(LanguageAdapter):
             temp_file.write_text(code, encoding='utf-8')
             
             # Build javac command
-            cmd = ['javac']
+            cmd = [shutil.which('javac') or 'javac']
             
             # Add classpath if project root has pom.xml (Maven project)
             if effective_root:
@@ -439,209 +439,357 @@ class JavaAdapter(LanguageAdapter):
                 
                 
     def compile_check_with_deps(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
-        """
-        Check Java code compilation for multiple files together.
-        Java supports multi-file compilation with javac.
+            """
+            Check Java code compilation for multiple files together.
+            Java supports multi-file compilation with javac.
         
-        CRITICAL: For Java projects, we must compile ALL project Java files together,
-        not just the changed files. This is because Java requires all dependencies
-        to be present during compilation.
+            CRITICAL: For Java projects, we must compile ALL project Java files together,
+            not just the changed files. This is because Java requires all dependencies
+            to be present during compilation.
         
-        Args:
-            files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
-            project_root: Optional project root path
-            
-        Returns:
-            Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
-        """
-        if not self._javac_available:
-            return {
-                'success': False,
-                'results': [],
-                'stderr': 'javac compiler not available',
-                'stdout': '',
-                'exit_code': -1,
-            }
+            IMPORTANT: The `files` parameter contains the AUTHORITATIVE version of the code.
+            When a file path matches one in `files`, we MUST use the code from `files`,
+            not from VFS or disk. This prevents false positives when Code Generator
+            produces multiple versions of a file in one iteration.
         
-        if not files:
-            return {
-                'success': True,
-                'results': [],
-                'stderr': '',
-                'stdout': '',
-                'exit_code': 0,
-            }
+            Args:
+                files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
+                project_root: Optional project root path
+            
+            Returns:
+                Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
+            """
+            if not self._javac_available:
+                return {
+                    'success': False,
+                    'results': [],
+                    'stderr': 'javac compiler not available',
+                    'stdout': '',
+                    'exit_code': -1,
+                }
         
-        effective_root = project_root or self.project_root
-        temp_dir = None
-        
-        try:
-            temp_dir = tempfile.mkdtemp(prefix='java_check_deps_')
-            written_files = []
-            
-            # Build a map of staged files: file_path -> code
-            # These are the files with NEW content that should override project files
-            staged_files_map: Dict[str, str] = {}
-            for code, file_path in files:
-                # Normalize path for comparison
-                normalized_path = str(Path(file_path)).replace('\\', '/')
-                staged_files_map[normalized_path] = code
-                # Also store with original path
-                staged_files_map[file_path] = code
-            
-            # ================================================================
-            # STEP 1: Copy ALL Java files from project to temp directory
-            # This ensures all dependencies are available for compilation
-            # ================================================================
-            all_java_files_in_temp = []
-            
-            if effective_root and Path(effective_root).exists():
-                for java_file in Path(effective_root).rglob('*.java'):
-                    try:
-                        rel_path = java_file.relative_to(effective_root)
-                        rel_path_str = str(rel_path).replace('\\', '/')
-                        
-                        # Skip build directories and hidden folders
-                        parts = rel_path.parts
-                        if any(p.startswith('.') or p in ('target', 'build', 'out', 'bin') for p in parts):
-                            continue
-                        
-                        # Determine content: use staged version if available, otherwise read via VFS/disk
-                        content = None
-                        
-                        # Check if this file has staged content (explicitly passed to this method)
-                        if rel_path_str in staged_files_map:
-                            content = staged_files_map[rel_path_str]
-                            logger.debug(f"Using explicitly staged content for {rel_path_str}")
-                        elif str(rel_path) in staged_files_map:
-                            content = staged_files_map[str(rel_path)]
-                            logger.debug(f"Using explicitly staged content for {rel_path}")
-                        else:
-                            # Read file content via VFS (if available) or disk
-                            # This ensures we get VFS-staged content for files not in our explicit list
-                            content = self._read_file_content(java_file, rel_path_str)
-                        
-                        if content is None:
-                            continue
-                        
-                        # Write to temp directory preserving structure
-                        temp_file = Path(temp_dir) / rel_path
-                        temp_file.parent.mkdir(parents=True, exist_ok=True)
-                        temp_file.write_text(content, encoding='utf-8')
-                        all_java_files_in_temp.append(str(temp_file))
-                        
-                    except ValueError:
-                        # File is not under effective_root
-                        continue
-                    except Exception as e:
-                        logger.warning(f"Error processing {java_file}: {e}")
-                        continue
-            
-            # ================================================================
-            # STEP 2: Write any staged files that don't exist in project yet
-            # (new files being created)
-            # ================================================================
-            for code, file_path in files:
-                # Check if we already wrote this file
-                rel_path = self._normalize_path_for_temp(code, file_path, effective_root)
-                temp_file = Path(temp_dir) / rel_path
-                
-                if not temp_file.exists():
-                    # This is a new file, write it
-                    temp_file.parent.mkdir(parents=True, exist_ok=True)
-                    temp_file.write_text(code, encoding='utf-8')
-                    all_java_files_in_temp.append(str(temp_file))
-                    logger.debug(f"Wrote new staged file: {rel_path}")
-            
-            if not all_java_files_in_temp:
+            if not files:
                 return {
                     'success': True,
                     'results': [],
                     'stderr': '',
-                    'stdout': 'No Java files to compile',
+                    'stdout': '',
                     'exit_code': 0,
                 }
+        
+            effective_root = project_root or self.project_root
+            temp_dir = None
+        
+            try:
+                temp_dir = tempfile.mkdtemp(prefix='java_check_deps_')
             
-            # ================================================================
-            # STEP 3: Build classpath and compile ALL files together
-            # ================================================================
-            classpath_parts = []
+                # ================================================================
+                # CRITICAL: Build authoritative map from explicitly passed files
+                # These are the DEFINITIVE versions that MUST be used for compilation
+                # ================================================================
+                authoritative_code_map: Dict[str, str] = {}
+                authoritative_paths_normalized: set = set()
             
-            # Add project JAR files
-            if self._jar_files:
-                classpath_parts.extend([str(jar) for jar in self._jar_files])
-            
-            # Add Maven target/classes if exists
-            if effective_root:
-                maven_classes = Path(effective_root) / 'target' / 'classes'
-                if maven_classes.exists():
-                    classpath_parts.append(str(maven_classes))
+                for code, file_path in files:
+                    # Normalize path in multiple formats for robust matching
+                    forward_slash_path = file_path.replace('\\', '/')
+                    back_slash_path = file_path.replace('/', '\\')
+                    normalized_path = str(Path(file_path)).replace('\\', '/')
                 
-                # Also add target/test-classes for test dependencies
-                test_classes = Path(effective_root) / 'target' / 'test-classes'
-                if test_classes.exists():
-                    classpath_parts.append(str(test_classes))
+                    # Store with all path formats
+                    authoritative_code_map[file_path] = code
+                    authoritative_code_map[forward_slash_path] = code
+                    authoritative_code_map[back_slash_path] = code
+                    authoritative_code_map[normalized_path] = code
+                
+                    # Track normalized paths
+                    authoritative_paths_normalized.add(forward_slash_path)
+                    authoritative_paths_normalized.add(normalized_path)
             
-            # Build javac command
-            cmd = ['javac', '-d', temp_dir]
+                logger.debug(f"Authoritative files ({len(files)}): {list(authoritative_paths_normalized)[:5]}")
             
-            if classpath_parts:
-                classpath = os.pathsep.join(classpath_parts)
-                cmd.extend(['-cp', classpath])
+                # ================================================================
+                # STEP 1: Copy ALL Java files from project to temp directory
+                # For files in authoritative_code_map, use that code instead of VFS/disk
+                # ================================================================
+                all_java_files_in_temp = []
+                processed_rel_paths: set = set()
             
-            # Add ALL Java files for compilation
-            cmd.extend(all_java_files_in_temp)
+                if effective_root and Path(effective_root).exists():
+                    for java_file in Path(effective_root).rglob('*.java'):
+                        try:
+                            rel_path = java_file.relative_to(effective_root)
+                            rel_path_str = str(rel_path).replace('\\', '/')
+                        
+                            # Skip build directories and hidden folders
+                            parts = rel_path.parts
+                            if any(p.startswith('.') or p in ('target', 'build', 'out', 'bin') for p in parts):
+                                continue
+                        
+                            # Mark this path as processed
+                            processed_rel_paths.add(rel_path_str)
+                        
+                            # ============================================================
+                            # CRITICAL: Check authoritative map FIRST
+                            # If file is in authoritative_code_map, use THAT code
+                            # This ensures we compile the exact code that was passed to us
+                            # ============================================================
+                            content = None
+                        
+                            if rel_path_str in authoritative_code_map:
+                                content = authoritative_code_map[rel_path_str]
+                                logger.debug(f"Using AUTHORITATIVE code for {rel_path_str}")
+                            elif str(rel_path) in authoritative_code_map:
+                                content = authoritative_code_map[str(rel_path)]
+                                logger.debug(f"Using AUTHORITATIVE code for {rel_path}")
+                            else:
+                                # File is NOT in authoritative list - read from VFS/disk
+                                content = self._read_file_content(java_file, rel_path_str)
+                        
+                            if content is None:
+                                continue
+                        
+                            # Write to temp directory preserving structure
+                            temp_file = Path(temp_dir) / rel_path
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(content, encoding='utf-8')
+                            all_java_files_in_temp.append(str(temp_file))
+                        
+                        except ValueError:
+                            # File is not under effective_root
+                            continue
+                        except Exception as e:
+                            logger.warning(f"Error processing {java_file}: {e}")
+                            continue
             
-            logger.debug(f"Compiling {len(all_java_files_in_temp)} Java files together")
+                # ================================================================
+                # STEP 1.5: Include VFS-staged Java files that don't exist on disk
+                # This handles newly created files that only exist in VFS
+                # ================================================================
+                if self.vfs is not None:
+                    try:
+                        affected_files = self.vfs.get_affected_files()
+                        for vfs_rel_path in affected_files:
+                            # Only process Java files
+                            if not vfs_rel_path.endswith('.java'):
+                                continue
+                        
+                            # Normalize path for comparison
+                            vfs_path_normalized = vfs_rel_path.replace('\\', '/')
+                        
+                            # Skip if already processed from disk scan
+                            if vfs_path_normalized in processed_rel_paths:
+                                continue
+                        
+                            # Skip build directories
+                            parts = Path(vfs_rel_path).parts
+                            if any(p.startswith('.') or p in ('target', 'build', 'out', 'bin') for p in parts):
+                                continue
+                        
+                            # Check authoritative map first, then VFS
+                            if vfs_path_normalized in authoritative_code_map:
+                                content = authoritative_code_map[vfs_path_normalized]
+                                logger.debug(f"Using AUTHORITATIVE code for VFS file {vfs_path_normalized}")
+                            else:
+                                content = self.vfs.read_file(vfs_rel_path)
+                        
+                            if content is None:
+                                continue
+                        
+                            # Write to temp directory preserving structure
+                            temp_file = Path(temp_dir) / vfs_rel_path
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(content, encoding='utf-8')
+                            all_java_files_in_temp.append(str(temp_file))
+                            processed_rel_paths.add(vfs_path_normalized)
+                            logger.debug(f"Added VFS-only file to compilation: {vfs_rel_path}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Error scanning VFS for additional Java files: {e}")
             
-            # Run javac to compile all Java files together
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=60,
-                cwd=temp_dir,
-            )
+                # ================================================================
+                # STEP 2: Write any staged files that don't exist in project yet
+                # (new files being created)
+                # ================================================================
+                for code, file_path in files:
+                    # Check if we already wrote this file
+                    rel_path = self._normalize_path_for_temp(code, file_path, effective_root)
+                    rel_path_str = str(rel_path).replace('\\', '/')
+                
+                    # Skip if already processed
+                    if rel_path_str in processed_rel_paths:
+                        continue
+                
+                    temp_file = Path(temp_dir) / rel_path
+                
+                    if not temp_file.exists():
+                        # This is a new file, write it
+                        temp_file.parent.mkdir(parents=True, exist_ok=True)
+                        temp_file.write_text(code, encoding='utf-8')
+                        all_java_files_in_temp.append(str(temp_file))
+                        processed_rel_paths.add(rel_path_str)
+                        logger.debug(f"Wrote new staged file: {rel_path}")
             
-            # Build individual results for the STAGED files only
-            # (these are the files the caller cares about)
-            individual_results = []
-            for code, file_path in files:
-                individual_results.append({
-                    'file_path': file_path,
+                if not all_java_files_in_temp:
+                    return {
+                        'success': True,
+                        'results': [],
+                        'stderr': '',
+                        'stdout': 'No Java files to compile',
+                        'exit_code': 0,
+                    }
+            
+                # ================================================================
+                # STEP 2.5: Copy pom.xml and resolve Maven dependencies
+                # This ensures external libraries are available for compilation
+                # ================================================================
+                classpath_parts = []
+                maven_available = shutil.which('mvn') is not None
+            
+                if effective_root:
+                    pom_xml_path = Path(effective_root) / 'pom.xml'
+                
+                    # Also check VFS for pom.xml (might be staged)
+                    pom_content = None
+                    if self.vfs is not None:
+                        pom_content = self.vfs.read_file('pom.xml')
+                
+                    if pom_content is not None:
+                        # Write pom.xml from VFS to temp dir
+                        temp_pom = Path(temp_dir) / 'pom.xml'
+                        temp_pom.write_text(pom_content, encoding='utf-8')
+                        logger.debug(f"Copied pom.xml from VFS to {temp_dir}")
+                    elif pom_xml_path.exists():
+                        # Copy pom.xml from disk to temp dir
+                        shutil.copy(str(pom_xml_path), str(Path(temp_dir) / 'pom.xml'))
+                        logger.debug(f"Copied pom.xml from disk to {temp_dir}")
+                
+                    # If pom.xml exists in temp dir, resolve dependencies
+                    temp_pom_path = Path(temp_dir) / 'pom.xml'
+                    if temp_pom_path.exists() and maven_available:
+                        try:
+                            # Run mvn dependency:resolve to download dependencies
+                            logger.info(f"Resolving Maven dependencies in {temp_dir}")
+                            resolve_result = subprocess.run(
+                                [shutil.which('mvn') or 'mvn', 'dependency:resolve', '-q'],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=120,
+                                cwd=temp_dir,
+                            )
+                        
+                            if resolve_result.returncode == 0:
+                                logger.info("Maven dependencies resolved successfully")
+                            else:
+                                logger.warning(f"Maven dependency resolution failed: {resolve_result.stderr[:200]}")
+                        
+                            # Get classpath from Maven
+                            cp_result = subprocess.run(
+                                [shutil.which('mvn') or 'mvn', 'dependency:build-classpath', '-Dmdep.outputFile=cp.txt', '-q'],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=60,
+                                cwd=temp_dir,
+                            )
+                        
+                            cp_file = Path(temp_dir) / 'cp.txt'
+                            if cp_file.exists():
+                                maven_classpath = cp_file.read_text(encoding='utf-8').strip()
+                                if maven_classpath:
+                                    # Split by path separator and add to classpath_parts
+                                    for cp_entry in maven_classpath.split(os.pathsep):
+                                        if cp_entry.strip():
+                                            classpath_parts.append(cp_entry.strip())
+                                    logger.debug(f"Added {len(classpath_parts)} Maven dependencies to classpath")
+                        
+                        except subprocess.TimeoutExpired:
+                            logger.warning("Maven dependency resolution timed out")
+                        except Exception as e:
+                            logger.warning(f"Error resolving Maven dependencies: {e}")
+            
+                # ================================================================
+                # STEP 3: Build classpath and compile ALL files together
+                # ================================================================
+            
+                # Add project JAR files
+                if self._jar_files:
+                    classpath_parts.extend([str(jar) for jar in self._jar_files])
+            
+                # Add Maven target/classes if exists
+                if effective_root:
+                    maven_classes = Path(effective_root) / 'target' / 'classes'
+                    if maven_classes.exists():
+                        classpath_parts.append(str(maven_classes))
+                
+                    # Also add target/test-classes for test dependencies
+                    test_classes = Path(effective_root) / 'target' / 'test-classes'
+                    if test_classes.exists():
+                        classpath_parts.append(str(test_classes))
+            
+                # Build javac command
+                cmd = [shutil.which('javac') or 'javac', '-d', temp_dir]
+            
+                if classpath_parts:
+                    classpath = os.pathsep.join(classpath_parts)
+                    cmd.extend(['-cp', classpath])
+            
+                # Add ALL Java files for compilation
+                cmd.extend(all_java_files_in_temp)
+            
+                logger.debug(f"Compiling {len(all_java_files_in_temp)} Java files together")
+            
+                # Run javac to compile all Java files together
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=60,
+                    cwd=temp_dir,
+                )
+            
+                # Build individual results for the STAGED files only
+                # (these are the files the caller cares about)
+                individual_results = []
+                for code, file_path in files:
+                    individual_results.append({
+                        'file_path': file_path,
+                        'success': result.returncode == 0,
+                        'stderr': result.stderr if result.returncode != 0 else '',
+                        'stdout': result.stdout,
+                        'exit_code': result.returncode,
+                    })
+            
+                return {
                     'success': result.returncode == 0,
-                    'stderr': result.stderr if result.returncode != 0 else '',
+                    'results': individual_results,
+                    'stderr': result.stderr,
                     'stdout': result.stdout,
                     'exit_code': result.returncode,
-                })
-            
-            return {
-                'success': result.returncode == 0,
-                'results': individual_results,
-                'stderr': result.stderr,
-                'stdout': result.stdout,
-                'exit_code': result.returncode,
-            }
+                }
         
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': 'javac compilation timed out', 'exit_code': -1} for _, fp in files],
-                'stderr': 'javac compilation timed out',
-                'stdout': '',
-                'exit_code': -1,
-            }
-        except Exception as e:
-            logger.error(f"Java compilation error: {e}", exc_info=True)
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
-                'stderr': str(e),
-                'stdout': '',
-                'exit_code': -1,
-            }
-        finally:
-            if temp_dir and Path(temp_dir).exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            except subprocess.TimeoutExpired:
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': 'javac compilation timed out', 'exit_code': -1} for _, fp in files],
+                    'stderr': 'javac compilation timed out',
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            except Exception as e:
+                logger.error(f"Java compilation error: {e}", exc_info=True)
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
+                    'stderr': str(e),
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            finally:
+                if temp_dir and Path(temp_dir).exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)

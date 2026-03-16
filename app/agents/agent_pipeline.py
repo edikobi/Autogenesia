@@ -3922,6 +3922,9 @@ Remember: You can override the validator if you believe the critique is incorrec
         Run AI Validator to check if code addresses the request.
         
         Supports multiple files by combining all code blocks with clear markers.
+        
+        UPDATED: Now shows VFS content for files created in previous iterations,
+        so AI Validator sees the same file state as Orchestrator.
         """
         if not code_blocks:
             # Edge case: no code blocks
@@ -3943,20 +3946,39 @@ Remember: You can override the validator if you believe the critique is incorrec
             )
         combined_code = "\n\n".join(combined_code_parts)
         
-        # === Combine original content for all files ===
+        # === Combine original/previous content for all files ===
+        # FIXED: For files created in previous iterations, show VFS content
+        # so AI Validator sees the same state as Orchestrator
         original_parts = []
         for block in code_blocks:
+            # First, try to get original content from disk
             original = self.vfs.read_file_original(block.file_path)
+            
             if original:
+                # File existed on disk before this session
                 original_parts.append(
                     f"### FILE: {block.file_path}\n"
                     f"```python\n{original}\n```"
                 )
             else:
-                original_parts.append(
-                    f"### FILE: {block.file_path}\n"
-                    f"[NEW FILE - no original content]"
-                )
+                # File didn't exist on disk — check if it exists in VFS
+                # (created in a previous iteration of this session)
+                vfs_content = self.vfs.read_file(block.file_path)
+                
+                if vfs_content and vfs_content != block.code:
+                    # File exists in VFS with different content than current block
+                    # This means it was created/modified in a previous iteration
+                    original_parts.append(
+                        f"### FILE: {block.file_path}\n"
+                        f"[CREATED IN PREVIOUS ITERATION - showing current VFS state]\n"
+                        f"```python\n{vfs_content}\n```"
+                    )
+                else:
+                    # Truly new file (no disk content, no different VFS content)
+                    original_parts.append(
+                        f"### FILE: {block.file_path}\n"
+                        f"[NEW FILE - no original content]"
+                    )
         combined_original = "\n\n".join(original_parts)
         
         # === Build file_path as summary ===
@@ -3978,7 +4000,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             file_path=file_path_str,
         )
         
-        return result    
+        return result
     
     
     async def _get_orchestrator_decision_on_ai_feedback(

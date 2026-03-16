@@ -478,192 +478,333 @@ class GoAdapter(LanguageAdapter):
                 
                 
     def compile_check_with_deps(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
-        """
-        Check Go code compilation for multiple files together.
-        Go supports multi-file compilation in the same package.
+            """
+            Check Go code compilation for multiple files together.
+            Go supports multi-file compilation in the same package.
         
-        CRITICAL: For Go projects, we must compile ALL project Go files together,
-        not just the changed files. This is because Go requires all package files
-        to be present during compilation.
+            CRITICAL: For Go projects, we must compile ALL project Go files together,
+            not just the changed files. This is because Go requires all package files
+            to be present during compilation.
         
-        Args:
-            files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
-            project_root: Optional project root path
+            Args:
+                files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
+                project_root: Optional project root path
             
-        Returns:
-            Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
-        """
-        if not self._go_available:
-            return {
-                'success': False,
-                'results': [],
-                'stderr': 'go compiler not available',
-                'stdout': '',
-                'exit_code': -1,
-            }
+            Returns:
+                Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
+            """
+            if not self._go_available:
+                return {
+                    'success': False,
+                    'results': [],
+                    'stderr': 'go compiler not available',
+                    'stdout': '',
+                    'exit_code': -1,
+                }
         
-        if not files:
-            return {
-                'success': True,
-                'results': [],
-                'stderr': '',
-                'stdout': '',
-                'exit_code': 0,
-            }
-        
-        effective_root = project_root or self.project_root
-        temp_dir = None
-        
-        try:
-            temp_dir = tempfile.mkdtemp(prefix='go_check_deps_')
-            
-            # Build a map of staged files: file_path -> code
-            # These are the files with NEW content that should override project files
-            staged_files_map: Dict[str, str] = {}
-            for code, file_path in files:
-                # Normalize path for comparison
-                normalized_path = str(Path(file_path)).replace('\\', '/')
-                staged_files_map[normalized_path] = code
-                # Also store with original path
-                staged_files_map[file_path] = code
-            
-            # ================================================================
-            # STEP 1: Copy ALL Go files from project to temp directory
-            # This ensures all dependencies are available for compilation
-            # ================================================================
-            all_go_files_in_temp = []
-            
-            if effective_root and Path(effective_root).exists():
-                for go_file in Path(effective_root).rglob('*.go'):
-                    try:
-                        rel_path = go_file.relative_to(effective_root)
-                        rel_path_str = str(rel_path).replace('\\', '/')
-                        
-                        # Skip vendor, hidden folders, and test cache
-                        parts = rel_path.parts
-                        if any(p.startswith('.') or p in ('vendor', 'testdata') for p in parts):
-                            continue
-                        
-                        # Determine content: use staged version if available, otherwise read via VFS/disk
-                        content = None
-                        
-                        # Check if this file has staged content (explicitly passed to this method)
-                        if rel_path_str in staged_files_map:
-                            content = staged_files_map[rel_path_str]
-                            logger.debug(f"Using explicitly staged content for {rel_path_str}")
-                        elif str(rel_path) in staged_files_map:
-                            content = staged_files_map[str(rel_path)]
-                            logger.debug(f"Using explicitly staged content for {rel_path}")
-                        else:
-                            # Read file content via VFS (if available) or disk
-                            # This ensures we get VFS-staged content for files not in our explicit list
-                            content = self._read_file_content(go_file, rel_path_str)
-                        
-                        if content is None:
-                            continue
-                        
-                        # Write to temp directory preserving structure
-                        temp_file = Path(temp_dir) / rel_path
-                        temp_file.parent.mkdir(parents=True, exist_ok=True)
-                        temp_file.write_text(content, encoding='utf-8')
-                        all_go_files_in_temp.append(str(temp_file))
-                        
-                    except ValueError:
-                        # File is not under effective_root
-                        continue
-                    except Exception as e:
-                        logger.warning(f"Error processing {go_file}: {e}")
-                        continue
-                
-                # Copy go.mod and go.sum if they exist
-                go_mod_path = Path(effective_root) / 'go.mod'
-                if go_mod_path.exists():
-                    shutil.copy(str(go_mod_path), str(Path(temp_dir) / 'go.mod'))
-                
-                go_sum_path = Path(effective_root) / 'go.sum'
-                if go_sum_path.exists():
-                    shutil.copy(str(go_sum_path), str(Path(temp_dir) / 'go.sum'))
-            
-            # ================================================================
-            # STEP 2: Write any staged files that don't exist in project yet
-            # (new files being created)
-            # ================================================================
-            all_paths = [file_path for _, file_path in files]
-            
-            for code, file_path in files:
-                # Check if we already wrote this file
-                rel_path = self._normalize_path_for_temp(code, file_path, effective_root, all_paths)
-                temp_file = Path(temp_dir) / rel_path
-                
-                if not temp_file.exists():
-                    # This is a new file, write it
-                    temp_file.parent.mkdir(parents=True, exist_ok=True)
-                    temp_file.write_text(code, encoding='utf-8')
-                    all_go_files_in_temp.append(str(temp_file))
-                    logger.debug(f"Wrote new staged file: {rel_path}")
-            
-            if not all_go_files_in_temp:
+            if not files:
                 return {
                     'success': True,
                     'results': [],
                     'stderr': '',
-                    'stdout': 'No Go files to compile',
+                    'stdout': '',
                     'exit_code': 0,
                 }
+        
+            effective_root = project_root or self.project_root
+            temp_dir = None
+        
+            try:
+                temp_dir = tempfile.mkdtemp(prefix='go_check_deps_')
             
-            # ================================================================
-            # STEP 3: Run go build ./... to compile ALL Go files together
-            # ================================================================
-            logger.debug(f"Compiling {len(all_go_files_in_temp)} Go files together")
+                # Build a map of staged files with MULTIPLE path formats for robust lookup
+                # This ensures we can match paths regardless of separator style
+                staged_files_map: Dict[str, str] = {}
+                staged_paths_normalized: set = set()
             
-            result = subprocess.run(
-                ['go', 'build', './...'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=60,
-                cwd=temp_dir,
-            )
+                for code, file_path in files:
+                    # Store with multiple path formats for robust matching
+                    # Format 1: Original path
+                    staged_files_map[file_path] = code
+                
+                    # Format 2: Forward slashes (Unix-style)
+                    forward_slash_path = file_path.replace('\\', '/')
+                    staged_files_map[forward_slash_path] = code
+                
+                    # Format 3: Backslashes (Windows-style)
+                    back_slash_path = file_path.replace('/', '\\')
+                    staged_files_map[back_slash_path] = code
+                
+                    # Format 4: Normalized via Path
+                    normalized_path = str(Path(file_path)).replace('\\', '/')
+                    staged_files_map[normalized_path] = code
+                
+                    # Track all normalized paths for quick lookup
+                    staged_paths_normalized.add(forward_slash_path)
+                    staged_paths_normalized.add(normalized_path)
             
-            # Build individual results for the STAGED files only
-            # (these are the files the caller cares about)
-            individual_results = []
-            for code, file_path in files:
-                individual_results.append({
-                    'file_path': file_path,
+                # ================================================================
+                # STEP 1: Copy ALL Go files from project to temp directory
+                # This ensures all dependencies are available for compilation
+                # ================================================================
+                all_go_files_in_temp = []
+                processed_rel_paths: set = set()  # Track which relative paths we've processed
+            
+                if effective_root and Path(effective_root).exists():
+                    for go_file in Path(effective_root).rglob('*.go'):
+                        try:
+                            rel_path = go_file.relative_to(effective_root)
+                            rel_path_str = str(rel_path).replace('\\', '/')
+                        
+                            # Skip vendor, hidden folders, and test cache
+                            parts = rel_path.parts
+                            if any(p.startswith('.') or p in ('vendor', 'testdata') for p in parts):
+                                continue
+                        
+                            # Mark this path as processed
+                            processed_rel_paths.add(rel_path_str)
+                        
+                            # Determine content: use staged version if available, otherwise read via VFS/disk
+                            content = None
+                        
+                            # Check if this file has staged content (explicitly passed to this method)
+                            # Use normalized path for comparison
+                            if rel_path_str in staged_files_map:
+                                content = staged_files_map[rel_path_str]
+                                logger.debug(f"Using explicitly staged content for {rel_path_str}")
+                            elif str(rel_path) in staged_files_map:
+                                content = staged_files_map[str(rel_path)]
+                                logger.debug(f"Using explicitly staged content for {rel_path}")
+                            elif rel_path_str in staged_paths_normalized:
+                                # Double-check with normalized set
+                                content = staged_files_map.get(rel_path_str)
+                                logger.debug(f"Using staged content (normalized match) for {rel_path_str}")
+                            else:
+                                # Read file content via VFS (if available) or disk
+                                # CRITICAL: Only use VFS/disk if file is NOT in our staged list
+                                # This prevents reading stale VFS content when we have fresh staged content
+                                content = self._read_file_content(go_file, rel_path_str)
+                        
+                            if content is None:
+                                continue
+                        
+                            # Write to temp directory preserving structure
+                            temp_file = Path(temp_dir) / rel_path
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(content, encoding='utf-8')
+                            all_go_files_in_temp.append(str(temp_file))
+                        
+                        except ValueError:
+                            # File is not under effective_root
+                            continue
+                        except Exception as e:
+                            logger.warning(f"Error processing {go_file}: {e}")
+                            continue
+                
+                    # ================================================================
+                    # STEP 1.1: Copy go.mod/go.sum and download Go module dependencies
+                    # This ensures external libraries are available for compilation
+                    # ================================================================
+                    go_mod_copied = False
+                    go_mod_path = Path(effective_root) / 'go.mod'
+                    go_sum_path = Path(effective_root) / 'go.sum'
+                
+                    # Check VFS for go.mod first (might be staged)
+                    go_mod_content = None
+                    if self.vfs is not None:
+                        go_mod_content = self.vfs.read_file('go.mod')
+                
+                    if go_mod_content is not None:
+                        # Write go.mod from VFS to temp dir
+                        temp_go_mod = Path(temp_dir) / 'go.mod'
+                        temp_go_mod.write_text(go_mod_content, encoding='utf-8')
+                        go_mod_copied = True
+                        logger.debug(f"Copied go.mod from VFS to {temp_dir}")
+                    elif go_mod_path.exists():
+                        # Copy go.mod from disk to temp dir
+                        shutil.copy(str(go_mod_path), str(Path(temp_dir) / 'go.mod'))
+                        go_mod_copied = True
+                        logger.debug(f"Copied go.mod from disk to {temp_dir}")
+                
+                    # Check VFS for go.sum first (might be staged)
+                    go_sum_content = None
+                    if self.vfs is not None:
+                        go_sum_content = self.vfs.read_file('go.sum')
+                
+                    if go_sum_content is not None:
+                        # Write go.sum from VFS to temp dir
+                        temp_go_sum = Path(temp_dir) / 'go.sum'
+                        temp_go_sum.write_text(go_sum_content, encoding='utf-8')
+                        logger.debug(f"Copied go.sum from VFS to {temp_dir}")
+                    elif go_sum_path.exists():
+                        # Copy go.sum from disk to temp dir
+                        shutil.copy(str(go_sum_path), str(Path(temp_dir) / 'go.sum'))
+                        logger.debug(f"Copied go.sum from disk to {temp_dir}")
+                
+                    # Run go mod download if go.mod was copied
+                    if go_mod_copied:
+                        try:
+                            logger.info(f"Downloading Go module dependencies in {temp_dir}")
+                        
+                            download_result = subprocess.run(
+                                [shutil.which('go') or 'go', 'mod', 'download'],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=120,
+                                cwd=temp_dir,
+                            )
+                        
+                            if download_result.returncode == 0:
+                                logger.info("Go module dependencies downloaded successfully")
+                            else:
+                                logger.warning(f"go mod download failed: {download_result.stderr[:300]}")
+                            
+                        except subprocess.TimeoutExpired:
+                            logger.warning("go mod download timed out after 120 seconds")
+                        except Exception as e:
+                            logger.warning(f"Error running go mod download: {e}")
+            
+                # ================================================================
+                # STEP 1.5: Include VFS-staged Go files that don't exist on disk
+                # This handles newly created files that only exist in VFS
+                # ================================================================
+                if self.vfs is not None:
+                    try:
+                        affected_files = self.vfs.get_affected_files()
+                        for vfs_rel_path in affected_files:
+                            # Only process Go files
+                            if not vfs_rel_path.endswith('.go'):
+                                continue
+                        
+                            # Normalize path for comparison
+                            vfs_path_normalized = vfs_rel_path.replace('\\', '/')
+                        
+                            # Skip if already processed from disk scan
+                            if vfs_path_normalized in processed_rel_paths:
+                                continue
+                        
+                            # Skip vendor, testdata, and hidden directories
+                            parts = Path(vfs_rel_path).parts
+                            if any(p.startswith('.') or p in ('vendor', 'testdata') for p in parts):
+                                continue
+                        
+                            # ============================================================
+                            # CRITICAL: Check staged_files_map FIRST (authoritative source)
+                            # Only fall back to VFS if file is NOT in staged_files_map
+                            # ============================================================
+                            content = None
+                        
+                            if vfs_path_normalized in staged_files_map:
+                                content = staged_files_map[vfs_path_normalized]
+                                logger.debug(f"Using AUTHORITATIVE staged content for VFS file {vfs_path_normalized}")
+                            else:
+                                # File is not in authoritative list - read from VFS
+                                content = self.vfs.read_file(vfs_rel_path)
+                                if content is not None:
+                                    logger.debug(f"Read VFS-only file from VFS: {vfs_rel_path}")
+                        
+                            if content is None:
+                                continue
+                        
+                            # Write to temp directory preserving structure
+                            temp_file = Path(temp_dir) / vfs_rel_path
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(content, encoding='utf-8')
+                            all_go_files_in_temp.append(str(temp_file))
+                            processed_rel_paths.add(vfs_path_normalized)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error scanning VFS for additional Go files: {e}")
+            
+                # ================================================================
+                # STEP 2: Write any staged files that don't exist in project yet
+                # (new files being created)
+                # ================================================================
+                all_paths = [file_path for _, file_path in files]
+            
+                for code, file_path in files:
+                    # Check if we already wrote this file
+                    rel_path = self._normalize_path_for_temp(code, file_path, effective_root, all_paths)
+                    rel_path_str = str(rel_path).replace('\\', '/')
+                
+                    # Skip if already processed
+                    if rel_path_str in processed_rel_paths:
+                        continue
+                
+                    temp_file = Path(temp_dir) / rel_path
+                
+                    if not temp_file.exists():
+                        # This is a new file, write it
+                        temp_file.parent.mkdir(parents=True, exist_ok=True)
+                        temp_file.write_text(code, encoding='utf-8')
+                        all_go_files_in_temp.append(str(temp_file))
+                        processed_rel_paths.add(rel_path_str)
+                        logger.debug(f"Wrote new staged file: {rel_path}")
+            
+                if not all_go_files_in_temp:
+                    return {
+                        'success': True,
+                        'results': [],
+                        'stderr': '',
+                        'stdout': 'No Go files to compile',
+                        'exit_code': 0,
+                    }
+            
+                # ================================================================
+                # STEP 3: Run go build ./... to compile ALL Go files together
+                # ================================================================
+                logger.debug(f"Compiling {len(all_go_files_in_temp)} Go files together")
+            
+                result = subprocess.run(
+                    [shutil.which('go') or 'go', 'build', './...'],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=60,
+                    cwd=temp_dir,
+                )
+            
+                # Build individual results for the STAGED files only
+                # (these are the files the caller cares about)
+                individual_results = []
+                for code, file_path in files:
+                    individual_results.append({
+                        'file_path': file_path,
+                        'success': result.returncode == 0,
+                        'stderr': result.stderr if result.returncode != 0 else '',
+                        'stdout': result.stdout,
+                        'exit_code': result.returncode,
+                    })
+            
+                return {
                     'success': result.returncode == 0,
-                    'stderr': result.stderr if result.returncode != 0 else '',
+                    'results': individual_results,
+                    'stderr': result.stderr,
                     'stdout': result.stdout,
                     'exit_code': result.returncode,
-                })
-            
-            return {
-                'success': result.returncode == 0,
-                'results': individual_results,
-                'stderr': result.stderr,
-                'stdout': result.stdout,
-                'exit_code': result.returncode,
-            }
+                }
         
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': 'go build timed out', 'exit_code': -1} for _, fp in files],
-                'stderr': 'go build timed out',
-                'stdout': '',
-                'exit_code': -1,
-            }
-        except Exception as e:
-            logger.error(f"Go compilation error: {e}", exc_info=True)
-            return {
-                'success': False,
-                'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
-                'stderr': str(e),
-                'stdout': '',
-                'exit_code': -1,
-            }
-        finally:
-            if temp_dir and Path(temp_dir).exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            except subprocess.TimeoutExpired:
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': 'go build timed out', 'exit_code': -1} for _, fp in files],
+                    'stderr': 'go build timed out',
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            except Exception as e:
+                logger.error(f"Go compilation error: {e}", exc_info=True)
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
+                    'stderr': str(e),
+                    'stdout': '',
+                    'exit_code': -1,
+                }
+            finally:
+                if temp_dir and Path(temp_dir).exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 

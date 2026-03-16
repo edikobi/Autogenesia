@@ -3831,36 +3831,36 @@ sys.path.insert(0, {safe_temp_dir}.strip('"'))
 import importlib.util
 
 try:
-# Load module WITHOUT executing __main__ block
-spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
-module = importlib.util.module_from_spec(spec)
-# CRITICAL: Register module in sys.modules BEFORE exec_module
-# This prevents AttributeError in dataclasses._process_class() which calls
-# sys.modules.get(cls.__module__).__dict__ — without registration, this returns None
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+    # Load module WITHOUT executing __main__ block
+    spec = importlib.util.spec_from_file_location("test_module", {safe_full_path}.strip('"'))
+    module = importlib.util.module_from_spec(spec)
+    # CRITICAL: Register module in sys.modules BEFORE exec_module
+    # This prevents AttributeError in dataclasses._process_class() which calls
+    # sys.modules.get(cls.__module__).__dict__ — without registration, this returns None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
 
-print("DAEMON_IMPORT_SUCCESS: Module imported successfully")
+    print("DAEMON_IMPORT_SUCCESS: Module imported successfully")
 
-# Try to find service-related classes
-service_class_names = ['Service', 'Daemon', 'Monitor', 'Watcher', 'Handler', 
-                    'Observer', 'Scheduler', 'Worker', 'Runner', 'Manager']
+    # Try to find service-related classes
+    service_class_names = ['Service', 'Daemon', 'Monitor', 'Watcher', 'Handler', 
+                        'Observer', 'Scheduler', 'Worker', 'Runner', 'Manager']
 
-for name in dir(module):
-    obj = getattr(module, name)
-    if isinstance(obj, type) and not name.startswith('_'):
-        # Check if class name suggests service functionality
-        if any(svc_name.lower() in name.lower() for svc_name in service_class_names):
-            print(f"DAEMON_CLASS_FOUND: {{name}}")
-            break
+    for name in dir(module):
+        obj = getattr(module, name)
+        if isinstance(obj, type) and not name.startswith('_'):
+            # Check if class name suggests service functionality
+            if any(svc_name.lower() in name.lower() for svc_name in service_class_names):
+                print(f"DAEMON_CLASS_FOUND: {{name}}")
+                break
 
-sys.exit(0)
+    sys.exit(0)
 
 except Exception as e:
-print(f"DAEMON_ERROR: {{type(e).__name__}}: {{e}}")
-import traceback
-traceback.print_exc()
-sys.exit(1)
+    print(f"DAEMON_ERROR: {{type(e).__name__}}: {{e}}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
     '''
         
         try:

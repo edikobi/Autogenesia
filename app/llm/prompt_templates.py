@@ -3455,17 +3455,31 @@ def _get_language_specific_examples(languages: Set) -> str:
     """Build language-specific examples based on requested languages."""
     parts = []
     
+    if not languages:
+        logger.debug("No non-Python languages detected, skipping language-specific injections")
+        return ""
+    
+    logger.info(f"Injecting language-specific prompts for: {languages}")
+    
     if 'javascript' in languages:
         parts.append(_get_javascript_prompt_injection())
         parts.append("")
+        logger.debug("Added JavaScript/TypeScript prompt injection")
 
     if 'java' in languages:
         parts.append(_get_java_prompt_injection())
         parts.append("")
+        logger.debug("Added Java/Kotlin prompt injection")
 
     if 'go' in languages:
         parts.append(_get_go_prompt_injection())
         parts.append("")
+        logger.debug("Added Go prompt injection")
+
+    if 'sql' in languages:
+        parts.append(_get_sql_prompt_injection())
+        parts.append("")
+        logger.debug("Added SQL prompt injection")
 
     return "\n".join(parts)
 
@@ -4914,6 +4928,14 @@ def _build_orchestrator_system_prompt_new_project_agent() -> str:
     prompt_parts.append('• Pipeline will create folders you specify before generating code')
     prompt_parts.append('')
     
+    # новодел
+    prompt_parts.append('')
+    prompt_parts.append('LANGUAGE SELECTION:')
+    prompt_parts.append('You can design projects in multiple programming languages: Python, JavaScript/TypeScript, Go, Java.')
+    prompt_parts.append('Choose the language(s) based on the project’s technical requirements, the user’s stated preferences, and the overall context.')
+    prompt_parts.append('If the user does not specify a language, select the most appropriate one for the task, considering factors like performance, ecosystem, and ease of implementation.')
+    prompt_parts.append('You may also combine multiple languages if the project naturally separates into distinct components (e.g., backend in Java, frontend in TypeScript).')
+    prompt_parts.append('')    
     
     # === ENVIRONMENT & DEPENDENCIES ===
     prompt_parts.append('')
@@ -5328,7 +5350,16 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("Prioritize precise implementation over interpretation of requirements.")
     prompt_parts.append("")
     
-
+    
+    prompt_parts.append("")
+    prompt_parts.append("📋 ADDITIONAL GUIDELINES FOR INSTRUCTION EXECUTION")
+    prompt_parts.append("")
+    prompt_parts.append("• **File scope:** Do not modify or create any files that are not explicitly listed in the instruction. All changes must be limited to the files mentioned.")
+    prompt_parts.append("")
+    prompt_parts.append("• **Handling missing details:** If the instruction lacks some specifics, you may fill them in based on the context, but only what is needed to complete the task.")    
+    prompt_parts.append("")
+    prompt_parts.append("• **Deletions:** If the instruction asks to remove code, use `DIFF_REPLACE` to replace the targeted line(s) with a commented‑out version using the language's comment syntax (e.g., `//` in Java). This implements the soft‑delete policy.")
+    prompt_parts.append("")
     
     prompt_parts.append("```")
     prompt_parts.append("### CODE_BLOCK")
@@ -5377,7 +5408,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     
     
-    prompt_parts.append("MODE DESCRIPTIONS")
+    prompt_parts.append("MODE DESCRIPTIONS (Python Files)")
     prompt_parts.append("-" * 20)
     
     # File Level
@@ -5564,11 +5595,13 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     prompt_parts.append("1. OUTPUT ONLY CODE_BLOCK SECTIONS — no explanations, no markdown headers")
     prompt_parts.append("2. ONE CODE_BLOCK per logical change (method, function, import block)")
-    prompt_parts.append("3. FULL CODE — write complete methods/functions, not snippets or diffs")
-    prompt_parts.append("4. INCLUDE DOCSTRINGS — every function/method needs a docstring")
-    prompt_parts.append("5. PRESERVE EXISTING — don't remove code that should stay")
-    prompt_parts.append("6. MATCH STYLE — follow the existing code style in the file")
-    prompt_parts.append("7. USE THE CORRECT PROGRAMMING LANGUAGE — generate code in the language appropriate for each file (Python, JavaScript, TypeScript, Java, Go).")
+    prompt_parts.append("3. FULL CODE — write complete methods/functions, not snippets")
+    # 4 пункт это новодел (нужно, чтобы и для мультиязычных он не переписывал файл, когда не надо)
+    prompt_parts.append("4. ONE CODE_BLOCK per ACTION in the instruction — if the instruction contains multiple actions for the same file, you must output a separate CODE_BLOCK for each action. Do not merge them into one.")
+    prompt_parts.append("5. INCLUDE DOCSTRINGS — every function/method needs a docstring")
+    prompt_parts.append("6. PRESERVE EXISTING — don't remove code that should stay")
+    prompt_parts.append("7. MATCH STYLE — follow the existing code style in the file")
+    prompt_parts.append("8. USE THE CORRECT PROGRAMMING LANGUAGE — generate code in the language appropriate for each file (Python, JavaScript, TypeScript, Java, Go).")
     prompt_parts.append("")
     prompt_parts.append("=" * 60)
     prompt_parts.append("⚠️ INDENTATION RULES (CRITICAL)")
@@ -5802,6 +5835,52 @@ def _detect_languages_from_files(file_paths: List[str]) -> Set[str]:
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ext_to_lang:
             detected.add(ext_to_lang[ext])
+            logger.debug(f"Language detection: {file_path} -> {ext_to_lang[ext]}")
+    
+    if detected:
+        logger.info(f"Detected non-Python languages: {detected}")
+    
+    return detected
+
+def _detect_languages_from_instruction(instruction: str) -> Set[str]:
+    """Detect non-Python languages from file paths mentioned in instruction text.
+    
+    This catches cases where Orchestrator mentions files that don't exist yet
+    (new files to be created), which wouldn't be in file_contents.
+    """
+    ext_to_lang = {
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "javascript",
+        ".tsx": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".go": "go",
+        ".java": "java",
+        ".kt": "java",
+        ".kts": "java",
+        ".sql": "sql",
+    }
+    
+    detected = set()
+    
+    # Pattern to find file paths in instruction
+    # Matches: FILE: path.ext, `path.ext`, "path.ext", path/to/file.ext
+    file_patterns = [
+        r'FILE:\s*[`"]?([^\s`"]+\.[a-z]+)',
+        r'`([^\s`]+\.[a-z]+)`',
+        r'"([^\s"]+\.[a-z]+)"',
+        r'(?:path|file)[\s:]*([^\s,\]]+\.[a-z]+)',
+    ]
+    
+    for pattern in file_patterns:
+        matches = re.finditer(pattern, instruction, re.IGNORECASE)
+        for match in matches:
+            file_path = match.group(1)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ext_to_lang:
+                detected.add(ext_to_lang[ext])
+                logger.debug(f"Language detection from instruction: {file_path} -> {ext_to_lang[ext]}")
     
     return detected
 
@@ -5810,6 +5889,19 @@ def _get_javascript_prompt_injection() -> str:
     parts = []
     parts.append("")
     
+    parts.append("")
+    parts.append("**Interpreting Orchestrator Actions:**")
+    parts.append("The Orchestrator uses action names like UPDATE_IMPORTS, ADD_METHOD, MODIFY_METHOD to describe the intended change. These are **not** the mode you should output; they indicate the type of change. You must map them to the appropriate diff mode for this language:")
+    parts.append("")
+    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT**. Provide only the code to be inserted, and use the location markers (INSERT_AFTER or INSERT_BEFORE) from the instruction to place it correctly. Do not include surrounding code.")
+    parts.append("")
+    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE**. Provide only the new code that replaces the old, and use REPLACE_PATTERN to identify what to replace. The instruction may specify whether it's a full method replacement or a surgical change inside a method; follow that guidance.")
+    parts.append("")
+    parts.append("- The only exception is **REPLACE_FILE**, which means replace the entire file content. Use this only when explicitly requested.")
+    parts.append("")
+    parts.append("**Crucially:** Never output the entire file content for non-Python files unless the instruction says REPLACE_FILE. Always generate a minimal CODE_BLOCK with just the added or replaced code, using the appropriate diff mode and the anchors provided. This ensures precise, surgical updates.")
+    parts.append("")    
+        
     # === MANDATORY DIFF MODE ENFORCEMENT ===
     parts.append("╔══════════════════════════════════════════════════════════════╗")
     parts.append("║  🚨 JAVASCRIPT/TYPESCRIPT: MANDATORY DIFF MODE               ║")
@@ -5831,6 +5923,8 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("")
     parts.append("If you see this injection, switch to DIFF modes immediately.")
     parts.append("")
+    
+    
     
     # === EXISTING CONTENT BELOW ===
     parts.append("=" * 60)
@@ -5961,6 +6055,19 @@ def _get_go_prompt_injection() -> str:
     parts.append("If you see this injection, switch to DIFF modes immediately.")
     parts.append("")
     
+    parts.append("")
+    parts.append("**Interpreting Orchestrator Actions:**")
+    parts.append("The Orchestrator uses action names like UPDATE_IMPORTS, ADD_METHOD, MODIFY_METHOD to describe the intended change. These are **not** the mode you should output; they indicate the type of change. You must map them to the appropriate diff mode for this language:")
+    parts.append("")
+    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT**. Provide only the code to be inserted, and use the location markers (INSERT_AFTER or INSERT_BEFORE) from the instruction to place it correctly. Do not include surrounding code.")
+    parts.append("")
+    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE**. Provide only the new code that replaces the old, and use REPLACE_PATTERN to identify what to replace. The instruction may specify whether it's a full method replacement or a surgical change inside a method; follow that guidance.")
+    parts.append("")
+    parts.append("- The only exception is **REPLACE_FILE**, which means replace the entire file content. Use this only when explicitly requested.")
+    parts.append("")
+    parts.append("**Crucially:** Never output the entire file content for non-Python files unless the instruction says REPLACE_FILE. Always generate a minimal CODE_BLOCK with just the added or replaced code, using the appropriate diff mode and the anchors provided. This ensures precise, surgical updates.")
+    parts.append("")        
+   
     # === EXISTING CONTENT BELOW ===
     parts.append("=" * 60)
     parts.append("GO LANGUAGE GUIDE")
@@ -6086,6 +6193,17 @@ def _get_java_prompt_injection() -> str:
     parts.append("If you see this injection, switch to DIFF modes immediately.")
     parts.append("")
     
+    parts.append("")
+    parts.append("**Interpreting Orchestrator Actions:**")
+    parts.append("The Orchestrator uses action names like UPDATE_IMPORTS, ADD_METHOD, MODIFY_METHOD to describe the intended change. These are **not** the mode you should output; they indicate the type of change. You must map them to the appropriate diff mode for this language:")
+    parts.append("")
+    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT**. Provide only the code to be inserted, and use the location markers (INSERT_AFTER or INSERT_BEFORE) from the instruction to place it correctly. Do not include surrounding code.")
+    parts.append("")
+    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE**. Provide only the new code that replaces the old, and use REPLACE_PATTERN to identify what to replace. The instruction may specify whether it's a full method replacement or a surgical change inside a method; follow that guidance.")
+    parts.append("")
+    parts.append("**Crucially:** Never output the entire file content for non-Python files unless the instruction says REPLACE_FILE. Always generate a minimal CODE_BLOCK with just the added or replaced code, using the appropriate diff mode and the anchors provided. This ensures precise, surgical updates.")
+    parts.append("")    
+    
     # === EXISTING CONTENT BELOW ===
     parts.append("=" * 60)
     parts.append("JAVA / KOTLIN LANGUAGE GUIDE")
@@ -6101,7 +6219,6 @@ def _get_java_prompt_injection() -> str:
     parts.append("• Follow Java naming conventions: PascalCase for classes, camelCase for methods")
     parts.append("• Handle checked exceptions appropriately (throws clause or try-catch)")
     parts.append("• Use @Override annotation when overriding parent methods")
-    parts.append("• Each code block is validated with tree-sitter — ensure syntactically correct code")
     parts.append("")
     parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     parts.append("TWO DIFF MODES FOR JAVA/KOTLIN FILES:")
@@ -6188,6 +6305,91 @@ def _get_java_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    
+    parts.append("")
+    parts.append("📌 DELETING CODE IN JAVA:")
+    parts.append("If the instruction requires removing a line or a block, use DIFF_REPLACE with a REPLACE_PATTERN that matches the exact line(s) to remove. Provide a replacement that comments out the line(s) with \"//\". This keeps the code in the file but effectively disables it, aligning with the deletion policy (soft delete).")
+    parts.append("")
+    return "\n".join(parts)
+
+def _get_sql_prompt_injection() -> str:
+    """Return language-specific prompt injection for SQL files with CODE_BLOCK examples."""
+    parts = []
+    parts.append("")
+    
+    # === MANDATORY DIFF MODE ENFORCEMENT ===
+    parts.append("╔══════════════════════════════════════════════════════════════╗")
+    parts.append("║  🚨 SQL: MANDATORY DIFF MODE                                 ║")
+    parts.append("╚══════════════════════════════════════════════════════════════╝")
+    parts.append("")
+    parts.append("You are working with SQL files (non-Python).")
+    parts.append("For these files, you MUST use DIFF-based modification modes.")
+    parts.append("")
+    parts.append("✅ ALLOWED MODES for SQL:")
+    parts.append("   • DIFF_INSERT — Insert new SQL statements at a specific location")
+    parts.append("   • DIFF_REPLACE — Replace existing SQL statements")
+    parts.append("   • REPLACE_FILE — Replace entire file content (for new files or full rewrites)")
+    parts.append("")
+    parts.append("❌ FORBIDDEN MODES (will cause staging errors):")
+    parts.append("   • REPLACE_METHOD — Python-only, will fail on SQL")
+    parts.append("   • REPLACE_FUNCTION — Python-only, will fail on SQL")
+    parts.append("   • REPLACE_CLASS — Python-only, will fail on SQL")
+    parts.append("   • ADD_METHOD — Python-only, will fail on SQL")
+    parts.append("")
+    parts.append("If you see this injection, switch to DIFF modes immediately.")
+    parts.append("")
+    
+    # === SQL GUIDE ===
+    parts.append("=" * 60)
+    parts.append("SQL LANGUAGE GUIDE")
+    parts.append("=" * 60)
+    parts.append("")
+    parts.append("When working with .sql files, use ```sql in code fences.")
+    parts.append("")
+    parts.append("⚠️ SYNTAX RULES FOR SQL:")
+    parts.append("• Use proper SQL formatting with consistent indentation")
+    parts.append("• End statements with semicolons")
+    parts.append("• Use uppercase for SQL keywords (SELECT, FROM, WHERE, etc.)")
+    parts.append("• Include proper comments using -- for single line or /* */ for multi-line")
+    parts.append("• Each code block is validated — ensure syntactically correct SQL")
+    parts.append("")
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("SQL EXAMPLES:")
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("")
+    parts.append("**Example 1: DIFF_INSERT — Add new table after existing one**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: migrations/001_create_tables.sql")
+    parts.append("MODE: DIFF_INSERT")
+    parts.append("INSERT_AFTER: CREATE TABLE users")
+    parts.append("")
+    parts.append("```sql")
+    parts.append("CREATE TABLE user_sessions (")
+    parts.append("    id SERIAL PRIMARY KEY,")
+    parts.append("    user_id INTEGER REFERENCES users(id),")
+    parts.append("    token VARCHAR(255) NOT NULL,")
+    parts.append("    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    parts.append(");")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
+    parts.append("**Example 2: REPLACE_FILE — Create new SQL migration**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: migrations/002_add_indexes.sql")
+    parts.append("MODE: REPLACE_FILE")
+    parts.append("")
+    parts.append("```sql")
+    parts.append("-- Migration: Add performance indexes")
+    parts.append("CREATE INDEX idx_users_email ON users(email);")
+    parts.append("CREATE INDEX idx_sessions_user ON user_sessions(user_id);")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
     return "\n".join(parts)
 
 
@@ -6222,6 +6424,13 @@ def format_code_generator_prompt_agent(
     # Detect non-Python languages from file paths
     file_paths = list(file_contents.keys()) if file_contents else []
     detected_languages = _detect_languages_from_files(file_paths)
+    
+    # NEW: Also detect languages from instruction text (for new files not yet in file_contents)
+    instruction_languages = _detect_languages_from_instruction(orchestrator_instruction)
+    detected_languages = detected_languages.union(instruction_languages)
+    
+    if detected_languages:
+        logger.info(f"Code Generator prompt: detected languages {detected_languages} for injection")
     
     # Build system prompt with optional language injections
     system_prompt = _build_code_generator_system_prompt_agent()
