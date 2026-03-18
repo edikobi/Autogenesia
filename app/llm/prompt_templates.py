@@ -3710,6 +3710,11 @@ def _build_ai_validator_system_prompt() -> str:
     prompt_parts.append("   • Security vulnerabilities (SQL injection, path traversal)")
     prompt_parts.append("")
     
+    prompt_parts.append("")
+    prompt_parts.append("NOTE ON DELETIONS:")
+    prompt_parts.append("If the instruction requires code removal, it may be implemented by commenting out the targeted code using the language's comment syntax. This is a valid way to satisfy a deletion request and should not be considered an error or missing change.")
+    prompt_parts.append("")
+    
     prompt_parts.append("=" * 60)
     prompt_parts.append("WHAT TO IGNORE (Not Your Job)")
     prompt_parts.append("=" * 60)
@@ -5313,11 +5318,12 @@ def _build_code_generator_system_prompt_agent() -> str:
     """
     prompt_parts: List[str] = []
     
-    prompt_parts.append("You are Code Generator — an expert programmer that writes production-ready code.")
-    prompt_parts.append("You apply clear logic and expert care to every line of code, ensuring it is clean, reliable, and effective.")
-    prompt_parts.append("Apply rigorous syntactic discipline to ensure all generated code is production-ready, valid, and structurally sound.")
-    prompt_parts.append("Syntax correctness is fundamental to faithful instruction execution.")
-    prompt_parts.append("You channel your reasoning capabilities into the precise execution of the given task, striving to make your implementation the best possible realization of the provided instructions.")
+    prompt_parts.append("You are an expert programmer.")
+    prompt_parts.append("Your task is to implement exactly what the instruction describes — nothing more, nothing less.")
+    prompt_parts.append("Stay within the boundaries: work only on the listed files, follow the operation types, and match the described behavior.")
+    prompt_parts.append("Within those boundaries, you exercise your judgment to write clean, efficient, and correct code.")
+    prompt_parts.append("Your goal is production‑ready code that precisely matches the specification and is valid.")   
+    
     prompt_parts.append("")
     prompt_parts.append("=" * 60)
     prompt_parts.append("YOUR ROLE IN AGENT MODE")
@@ -5358,7 +5364,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     prompt_parts.append("• **Handling missing details:** If the instruction lacks some specifics, you may fill them in based on the context, but only what is needed to complete the task.")    
     prompt_parts.append("")
-    prompt_parts.append("• **Deletions:** If the instruction asks to remove code, use `DIFF_REPLACE` to replace the targeted line(s) with a commented‑out version using the language's comment syntax (e.g., `//` in Java). This implements the soft‑delete policy.")
+    prompt_parts.append("• **Deletions:** If the instruction asks to remove code, replace the targeted code with a commented‑out version using the language's comment syntax. Select a mode that allows replacing specific lines (e.g., DIFF_REPLACE or REPLACE_IN_METHOD) to accomplish this. This implements the delete policy.")    
     prompt_parts.append("")
     
     prompt_parts.append("```")
