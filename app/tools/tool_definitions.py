@@ -378,50 +378,6 @@ GET_ADVICE_TOOL: Dict[str, Any] = {
 # RUN PROJECT TESTS TOOL
 # ============================================================================
 
-RUN_PROJECT_TESTS_TOOL: Dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "run_project_tests",
-        "description": (
-            "Run unittest tests on staged code changes (VirtualFileSystem) for analysis. "
-            "Tests run in isolated environment, NOT on real files. "
-            "Use to verify code changes before committing. "
-            "Can run entire test file or specific test class/method. "
-            "⚠️ LIMIT: Maximum 5 calls per session. Use strategically! "
-            "⚠️ TIMEOUT: 30 seconds max per call."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "test_path": {
-                    "type": "string",
-                    "description": (
-                        "Path to test file relative to project root. "
-                        "Example: 'tests/test_auth.py' or 'tests/unit/test_user.py'"
-                    )
-                },
-                "chunk_name": {
-                    "type": "string",
-                    "description": (
-                        "Optional. Run only specific test class or method. "
-                        "Examples: 'TestUserAuth' (class), 'TestUserAuth.test_login' (method). "
-                        "If omitted, runs all tests in the file."
-                    )
-                },
-                "timeout_sec": {
-                    "type": "integer",
-                    "description": (
-                        "Maximum execution time in seconds. Default: 30. Max: 60. "
-                        "Use shorter timeout for quick sanity checks."
-                    ),
-                    "default": 30,
-                    "maximum": 60
-                }
-            },
-            "required": ["test_path"]
-        }
-    }
-}
 
 
 # ============================================================================
@@ -702,7 +658,6 @@ ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
     FILE_RELATIONS_TOOL,
     WEB_SEARCH_TOOL,
     GET_ADVICE_TOOL,
-    RUN_PROJECT_TESTS_TOOL,
     # NEW: Dependency management
     LIST_INSTALLED_PACKAGES_TOOL,
     INSTALL_DEPENDENCY_TOOL,
@@ -729,7 +684,6 @@ def get_tool_by_name(name: str) -> Dict[str, Any]:
         "web_search": WEB_SEARCH_TOOL,
         "general_web_search": GENERAL_WEB_SEARCH_TOOL,
         "get_advice": GET_ADVICE_TOOL,
-        "run_project_tests": RUN_PROJECT_TESTS_TOOL,
         "list_installed_packages": LIST_INSTALLED_PACKAGES_TOOL,
         "install_dependency": INSTALL_DEPENDENCY_TOOL,
         "search_pypi": SEARCH_PYPI_TOOL,
@@ -755,7 +709,6 @@ def get_tool_names() -> List[str]:
         "web_search",
         "general_web_search",
         "get_advice",
-        "run_project_tests",
         "list_installed_packages",
         "install_dependency",
         "search_pypi",

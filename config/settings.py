@@ -68,12 +68,14 @@ class Config:
     
     MODEL_QWEN_3_5_Plus = "qwen/qwen3.5-plus-02-15"    
 
+    MODEL_Kimi_K_2_5 = "moonshotai/kimi-k2.5"
 
     # ============ НОВЫЕ МОДЕЛИ ГЕНЕРАТОРА (OpenRouter) ============
     MODEL_GLM_4_7 = "z-ai/glm-4.7"                # GLM 4.7
     MODEL_HAIKU_4_5 = "anthropic/claude-haiku-4.5" # Claude Haiku 4.5
     MODEL_GEMINI_3_FLASH = "google/gemini-3-flash-preview"
     MODEL_GPT_5_1_Codex_MINI = "openai/gpt-5.1-codex-mini"
+    MODEL_QWEN_3_5 = "qwen/qwen3.5-397b-a17b"
 
     # ============ ПЕРЕКЛЮЧАТЕЛЬ ГЕНЕРАТОРА ============
     # Чтобы сменить модель, просто раскомментируйте нужную строку ниже:
@@ -145,6 +147,32 @@ class Config:
             }
         },
         
+        "moonshotai/kimi-k2.5": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "extra_params": {
+                "reasoning": {
+                    "effort": "medium"
+                }
+            }
+        },
+        
+        
+# === ГРУППА ГЕНЕРАТОРОВ (OPENROUTER) ===
+        # Qwen3.5 397B A17B
+        "qwen/qwen3.5-397b-a17b": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "extra_params": {
+                "reasoning": {
+                    "effort": "medium"
+                }
+            }
+        },
+        
+        
         "anthropic/claude-opus-4.5": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
@@ -154,7 +182,15 @@ class Config:
         "anthropic/claude-opus-4.6": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
-            "provider_name": "OPENROUTER"
+            "provider_name": "OPENROUTER",
+            
+            # Extended thinking для Opus 4.6 (оптимальный бюджет для средних задач)
+            "extra_params": {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 45000  # Сбалансированный бюджет: достаточно для анализа, не избыточно
+                }
+            }
         },
 
         # Claude Sonnet 4.5 - для средних задач (multi-component, business logic)
@@ -212,24 +248,29 @@ class Config:
         
         
 # === ГРУППА ГЕНЕРАТОРОВ (OPENROUTER) ===
-        # GLM 4.7 (Thinking ВЫКЛЮЧЕН)
+        # GLM 4.7 (Thinking В)
         "z-ai/glm-4.7": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Zhipu)",
             "extra_params": {
                 "reasoning": {
-                    "effort": "low"
+                    "effort": "medium"
                 }
             }
         },
         
-        # Claude Haiku 4.5 (Thinking ВЫКЛЮЧЕН)
+        # Claude Haiku 4.5 (Thinking)
         "anthropic/claude-haiku-4.5": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Anthropic)",
-            "extra_params": {} # Явно пустой, без reasoning
+            "extra_params": {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 6500  # Сбалансированный бюджет: достаточно для анализа, не избыточно
+                }
+            }
         },
 
 
@@ -473,6 +514,7 @@ class Config:
             cls.MODEL_DEEPSEEK_REASONER,
             cls.MODEL_QWEN3_MAX_THINKING,
             cls.MODEL_QWEN_3_5_Plus,
+            cls.MODEL_Kimi_K_2_5,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
         ]
     
@@ -512,6 +554,7 @@ class Config:
             cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
+            cls.MODEL_Kimi_K_2_5: "Kimi K2.5",
             # Модели генератора
             cls.MODEL_GLM_4_7: "GLM 4.7 (OpenRouter)",
             cls.MODEL_HAIKU_4_5: "Claude Haiku 4.5 (OpenRouter)",
@@ -605,6 +648,13 @@ AVAILABLE_GENERATOR_MODELS = [
         "GPT-5.1-Codex-Mini",
         "Младшая модель CODEX от OpenAI, мнимально думающая и быстрая, потом это надо иметь в виду"
     ),
+    
+    (
+        "6",
+        "qwen/qwen3.5-397b-a17b",
+        "Qwen3.5 397B A17B",
+        "Китайская ИИ с большим контекстным окном."
+    ),
 ]
 
 AVAILABLE_PREFILTER_MODELS = [
@@ -613,7 +663,7 @@ AVAILABLE_PREFILTER_MODELS = [
     ("3", Config.MODEL_SONNET_4_6, "Claude Sonnet 4.6", "Новейшая версия Sonnet. Улучшенный анализ."),
     ("4", Config.MODEL_GEMINI_3_PRO, "Gemini 3.1 Pro", "Огромное контекстное окно. Хорош для больших проектов."),
     ("5", Config.MODEL_GPT_5_2_Codex, "GPT-5.2 Codex", "Мощная модель OpenAI для анализа кода."),
-    ("6", Config.MODEL_QWEN3_MAX_THINKING, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач."),
+    ("6", Config.MODEL_QWEN3_MAX_THINKING, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач.")
 ]
     
 

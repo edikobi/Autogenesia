@@ -15,7 +15,6 @@ from app.advice.advice_loader import execute_get_advice
 from app.tools.read_file import read_file_tool
 from app.tools.search_code import search_code_tool
 from app.tools.web_search import web_search_tool
-from app.tools.run_project_tests import run_project_tests  # NEW
 from app.tools.grep_search import grep_search_tool
 from app.tools.file_relations import show_file_relations_tool
 from app.services.python_chunker import SmartPythonChunker
@@ -145,9 +144,6 @@ class ToolExecutor:
             
             elif tool_name == "get_advice":
                 return self._execute_get_advice(arguments)
-
-            elif tool_name == "run_project_tests":  # NEW
-                return self._execute_run_project_tests(arguments)
             
             elif tool_name == "list_installed_packages":
                 return self._execute_list_installed_packages(arguments)
@@ -378,26 +374,6 @@ class ToolExecutor:
             return self._format_error("advice_ids parameter is required")
         return execute_get_advice(advice_ids)
     
-    def _execute_run_project_tests(self, arguments: Dict[str, Any]) -> str:
-        """
-        Execute run_project_tests tool.
-        
-        NEW: Runs unittest tests on VirtualFileSystem staged files.
-        """
-        test_path = arguments.get("test_path", "")
-        chunk_name = arguments.get("chunk_name")
-        timeout_sec = min(arguments.get("timeout_sec", 30), 60)  # Cap at 60 sec
-        
-        if not test_path:
-            return self._format_error("test_path is required")
-        
-        return run_project_tests(
-            project_dir=self.project_dir,
-            test_path=test_path,
-            virtual_fs=self.virtual_fs,
-            chunk_name=chunk_name,
-            timeout_sec=timeout_sec,
-        )
 
     def _execute_list_installed_packages(self, arguments: Dict[str, Any]) -> str:
         """Execute list_installed_packages tool with VFS python_path and optional language filter."""
@@ -419,20 +395,27 @@ class ToolExecutor:
         """Execute install_dependency tool"""
         package_name = arguments.get("package_name")
         if not package_name:
-            return self._error_response("package_name is required")
+            return self._format_error("package_name is required")
         
         language = arguments.get("language")
         version = arguments.get("version")
         python_path = arguments.get("python_path")
         
-        project_dir = str(self.project_root)
+        # Get python_path from VFS if not provided
+        if python_path is None and self.virtual_fs is not None:
+            python_path = self.virtual_fs.get_project_python()
         
-        return dependency_manager.install_dependency_tool(
+        project_dir = str(self.project_dir)
+        
+        # Pass VFS to install_dependency_tool so it can materialize config files
+        # (pom.xml, package.json, go.mod) from staging before running package managers
+        return install_dependency_tool(
             project_dir=project_dir,
             package_name=package_name,
             language=language,
             version=version,
             python_path=python_path,
+            vfs=self.virtual_fs,
         )
     
     
