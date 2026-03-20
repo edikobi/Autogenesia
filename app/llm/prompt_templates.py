@@ -6031,6 +6031,14 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    parts.append("")
+    parts.append("**When to use each mode:**")
+    parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
+    parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
+    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
+    parts.append("")    
+    
     return "\n".join(parts)
 
 
@@ -6170,6 +6178,14 @@ def _get_go_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    parts.append("")
+    parts.append("**When to use each mode:**")
+    parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
+    parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
+    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
+    parts.append("")    
+    
     return "\n".join(parts)
 
 def _get_java_prompt_injection() -> str:
@@ -6312,11 +6328,18 @@ def _get_java_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
+    parts.append("")
+    parts.append("**When to use each mode:**")
+    parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
+    parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
+    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
+    parts.append("")    
     
     parts.append("")
     parts.append("📌 DELETING CODE IN JAVA:")
     parts.append("If the instruction requires removing a line or a block, use DIFF_REPLACE with a REPLACE_PATTERN that matches the exact line(s) to remove. Provide a replacement that comments out the line(s) with \"//\". This keeps the code in the file but effectively disables it, aligning with the deletion policy (soft delete).")
     parts.append("")
+    
     return "\n".join(parts)
 
 def _get_sql_prompt_injection() -> str:
