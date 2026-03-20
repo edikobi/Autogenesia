@@ -97,6 +97,21 @@
       "when_to_use": "When generated code repeatedly violates explicit requirements (scope, preserve-list, output format), produces partial changes, ignores ordering, or introduces unrelated modifications despite clear instructions"
     },
 
+    {
+      "id": "ADV-G11",
+      "name": "Java Development Best Practices",
+      "category": "general",
+      "description": "General recommendations for writing robust Java code: type safety, exception handling, immutability, resource management, and performance awareness.",
+      "when_to_use": "When working on Java projects that require reliability and maintainability, regardless of project age or scale."
+    },
+
+    {
+      "id": "ADV-G12",
+      "name": "Java Multithreading & Concurrency",
+      "category": "general",
+      "description": "Framework for designing multithreaded applications: selecting concurrency models, managing shared state, ensuring visibility, preventing deadlocks, and testing concurrent code.",
+      "when_to_use": "When adding concurrency to a new or existing Java project, or when debugging concurrency‑related issues."
+    },    
     
     {
       "id": "ADV-E01",
