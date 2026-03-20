@@ -153,22 +153,34 @@ class AdapterManager:
         self._adapters: Dict[str, LanguageAdapter] = {}
         self._register_default_adapters()
     
-    
     @classmethod
     def get_instance(cls, project_root: Optional[Path] = None, vfs: Optional['VirtualFileSystem'] = None) -> 'AdapterManager':
+        """
+        Get the singleton instance of AdapterManager.
+    
+        If the instance doesn't exist, it's created with the provided parameters.
+        If it exists and project_root or vfs have changed, they are updated and 
+        adapters are re-registered to ensure they use the correct paths and VFS.
+        """
         if cls._instance is None:
             cls._instance = cls(project_root, vfs)
         else:
-            # Update project_root if provided
+            changed = False
+            # Update project_root if provided and different
             if project_root is not None and cls._instance.project_root != project_root:
                 cls._instance.project_root = project_root
-            # Update VFS if provided (critical for staged file access)
+                changed = True
+        
+            # Update VFS if provided and different
             if vfs is not None and cls._instance.vfs != vfs:
                 cls._instance.vfs = vfs
-                # Re-register adapters with new VFS
+                changed = True
+            
+            # Re-register adapters if any core dependency changed
+            if changed:
                 cls._instance._register_default_adapters()
+            
         return cls._instance
-    
     
     @classmethod
     def reset_instance(cls) -> None:
@@ -213,7 +225,6 @@ class AdapterManager:
             logger.debug(f"JavaAdapter not available: {e}")
         except Exception as e:
             logger.warning(f"Failed to register JavaAdapter: {e}")
-    
     
     def register_adapter(self, language: str, adapter: LanguageAdapter) -> None:
         """Register a language adapter."""
@@ -297,7 +308,6 @@ class AdapterManager:
             logger.error(f"Linting failed for {file_path}: {e}", exc_info=True)
             return original_code, []
     
-    
     def format_file(self, code: str, file_path: str) -> str:
         """Format a file using the appropriate adapter."""
         adapter = self.get_adapter_for_file(file_path)
@@ -353,16 +363,16 @@ class AdapterManager:
                 'language': language
             }
 
-            
-    def compile_check_with_deps(self, files: List[Tuple[str, str, Optional[str]]]) -> Dict[str, Any]:
+    def compile_check_with_deps(self, files: List[Tuple[str, str, Optional[str]]], project_root: Optional[Path] = None) -> Dict[str, Any]:
         """
         Check compilation of multiple files, grouping by language.
         Each tuple is (code, file_path, language_hint).
-        
+
         Args:
             files: List of (code, file_path, language_hint) tuples.
                 language_hint is optional and can be None.
-            
+            project_root: Optional project root path to use for compilation.
+    
         Returns:
             Dict with keys:
             - 'success': bool (True if all files compiled successfully)
@@ -372,51 +382,54 @@ class AdapterManager:
         """
         # Group files by language
         files_by_language: Dict[str, List[Tuple[str, str]]] = {}
-        
+
         for item in files:
             code, file_path = item[0], item[1]
             language_hint = item[2] if len(item) > 2 else None
-            
+    
             try:
                 # Determine language from hint or file extension
                 language = language_hint
                 if not language:
                     language = self.get_language_for_file(file_path)
-                
+        
                 if not language:
                     logger.warning(f"Cannot determine language for {file_path}, skipping")
                     continue
-                
+        
                 if language not in files_by_language:
                     files_by_language[language] = []
-                
+        
                 files_by_language[language].append((code, file_path))
-            
+    
             except Exception as e:
                 logger.warning(f"Error grouping file {file_path}: {e}")
-        
+
         # Compile each language group
         all_results: Dict[str, Dict[str, Any]] = {}
         all_stderr = []
         failed_files = []
         overall_success = True
-        
+
+        # Use provided project_root or fallback to instance default
+        effective_root = project_root or self.project_root
+
         for language, language_files in files_by_language.items():
             try:
                 adapter = self.get_adapter(language)
-                
+        
                 if adapter:
                     # Use multi-file compilation if available
-                    result = adapter.compile_check_with_deps(language_files, self.project_root)
+                    result = adapter.compile_check_with_deps(language_files, effective_root)
                     all_results[language] = result
-                    
+            
                     if not result.get('success', False):
                         overall_success = False
                         # Collect failed files
                         for file_result in result.get('results', []):
                             if not file_result.get('success', False):
                                 failed_files.append(file_result.get('file_path', 'unknown'))
-                    
+            
                     if result.get('stderr'):
                         all_stderr.append(f"[{language}]\n{result['stderr']}")
                 else:
@@ -426,14 +439,14 @@ class AdapterManager:
                         failed_files.append(file_path)
                     overall_success = False
                     all_stderr.append(f"[{language}] No adapter available")
-            
+    
             except Exception as e:
                 logger.error(f"Error compiling {language} files: {e}")
                 overall_success = False
                 all_stderr.append(f"[{language}] Error: {str(e)}")
                 for code, file_path in language_files:
                     failed_files.append(file_path)
-        
+
         return {
             'success': overall_success,
             'by_language': all_results,

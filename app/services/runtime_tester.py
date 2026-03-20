@@ -2799,88 +2799,94 @@ except Exception as e:
             )
     
     async def _test_non_python_file(self, file_path: str, temp_dir: str, timeout: int) -> TestResult:
-        """
-        Test non-Python file (JS/TS, Go, Java) using AdapterManager.compile_check().
-        
-        Validates syntax and compilation without execution.
-        
-        Args:
-            file_path: Relative file path
-            temp_dir: Temp directory with materialized VFS
-            timeout: Timeout for this file
-            
-        Returns:
-            TestResult
-        """
-        import time
-        start_time = time.time()
-        
-        full_path = Path(temp_dir) / file_path
-        
-        # Check if file exists
-        if not full_path.exists():
-            return TestResult(
-                file_path=file_path,
-                app_type=AppType.NON_PYTHON,
-                status=TestStatus.FAILED,
-                message=f"File not found: {file_path}",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-        
-        try:
-            # Read file content
-            content = full_path.read_text(encoding='utf-8', errors='replace')
-            
-            # Get AdapterManager instance
-            adapter_manager = AdapterManager.get_instance(Path(temp_dir))
-            
-            # Check if file type is supported
-            if not adapter_manager.is_supported(file_path):
-                extension = Path(file_path).suffix
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.NON_PYTHON,
-                    status=TestStatus.SKIPPED,
-                    message=f"No adapter available for extension: {extension}",
-                    duration_ms=(time.time() - start_time) * 1000,
-                )
-            
-            # Perform compile check
-            result = adapter_manager.compile_check(content, file_path)
-            
-            duration_ms = (time.time() - start_time) * 1000
-            language = result.get('language', 'unknown')
-            
-            if result.get('success', False):
-                return TestResult(
-                    file_path=file_path,
-                    app_type=AppType.NON_PYTHON,
-                    status=TestStatus.PASSED,
-                    message=f"{language.capitalize()} file compiled successfully",
-                    details=result.get('stdout', ''),
-                    duration_ms=duration_ms,
-                )
-            else:
-                stderr = result.get('stderr', 'Unknown compilation error')
+            """
+            Test non-Python file (JS/TS, Go, Java) using AdapterManager.compile_check_with_deps().
+
+            Validates syntax and compilation with dependencies in the materialized VFS.
+
+            Args:
+                file_path: Relative file path
+                temp_dir: Temp directory with materialized VFS
+                timeout: Timeout for this file
+    
+            Returns:
+                TestResult
+            """
+            import time
+            start_time = time.time()
+
+            full_path = Path(temp_dir) / file_path
+
+            # Check if file exists
+            if not full_path.exists():
                 return TestResult(
                     file_path=file_path,
                     app_type=AppType.NON_PYTHON,
                     status=TestStatus.FAILED,
-                    message=f"{language.capitalize()} compilation failed",
-                    details=stderr[:2000] if stderr else None,
-                    duration_ms=duration_ms,
-                    suggestion=f"Fix syntax/compilation errors in {language} code",
+                    message=f"File not found: {file_path}",
+                    duration_ms=(time.time() - start_time) * 1000,
                 )
-        
-        except Exception as e:
-            logger.error(f"Error testing non-Python file {file_path}: {e}", exc_info=True)
-            return TestResult(
-                file_path=file_path,
-                app_type=AppType.NON_PYTHON,
-                status=TestStatus.ERROR,
-                message=f"Compile check error: {type(e).__name__}: {e}",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
+
+            try:
+                # Read file content
+                content = full_path.read_text(encoding='utf-8', errors='replace')
+    
+                # Get AdapterManager instance with VFS to ensure adapters can read staged files
+                adapter_manager = AdapterManager.get_instance(project_root=Path(temp_dir), vfs=self.vfs)
+    
+                # Check if file type is supported
+                if not adapter_manager.is_supported(file_path):
+                    extension = Path(file_path).suffix
+                    return TestResult(
+                        file_path=file_path,
+                        app_type=AppType.NON_PYTHON,
+                        status=TestStatus.SKIPPED,
+                        message=f"No adapter available for extension: {extension}",
+                        duration_ms=(time.time() - start_time) * 1000,
+                    )
+    
+                language = adapter_manager.get_language_for_file(file_path)
+    
+                # Perform compile check with dependencies
+                # This ensures Java files are compiled with correct names and project context
+                result = adapter_manager.compile_check_with_deps(
+                    files=[(content, file_path, language)],
+                    project_root=Path(temp_dir)
+                )
+    
+                duration_ms = (time.time() - start_time) * 1000
+                display_lang = language.capitalize() if language else 'Non-Python'
+    
+                if result.get('success', False):
+                    return TestResult(
+                        file_path=file_path,
+                        app_type=AppType.NON_PYTHON,
+                        status=TestStatus.PASSED,
+                        message=f"{display_lang} file compiled successfully (with dependencies)",
+                        details=result.get('stdout', ''),
+                        duration_ms=duration_ms,
+                    )
+                else:
+                    stderr = result.get('stderr', 'Unknown compilation error')
+                    return TestResult(
+                        file_path=file_path,
+                        app_type=AppType.NON_PYTHON,
+                        status=TestStatus.FAILED,
+                        message=f"{display_lang} compilation failed",
+                        details=stderr[:2000] if stderr else None,
+                        duration_ms=duration_ms,
+                        suggestion=f"Fix syntax/compilation errors in {language or 'code'}",
+                    )
+
+            except Exception as e:
+                logger.error(f"Error testing non-Python file {file_path}: {e}", exc_info=True)
+                return TestResult(
+                    file_path=file_path,
+                    app_type=AppType.NON_PYTHON,
+                    status=TestStatus.ERROR,
+                    message=f"Compile check error: {type(e).__name__}: {e}",
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
     
     
     def _is_inside_package(self, file_path: str, temp_dir: str) -> bool:

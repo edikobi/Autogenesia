@@ -505,292 +505,420 @@ class ChangeValidator:
     # ========================================================================
     
     async def _check_syntax(self, files: List[str], result: Optional[ValidationResult] = None) -> List[ValidationIssue]:
-        """Проверяет синтаксис Python файлов и выполняет linting/компиляцию для других языков."""
-        issues = []
-        
-        # Initialize stats if result object is provided
-        if result is not None and "tools" not in result.auto_format_stats:
-            checker = self.syntax_checker
-            result.auto_format_stats = {
-                "tools": {
-                    "black": getattr(checker, "_black_available", False),
-                    "autopep8": getattr(checker, "_autopep8_available", False),
-                    "isort": getattr(checker, "_isort_available", False),
-                    "yapf": getattr(checker, "_yapf_available", False),
-                },
-                "stats": {
-                    "checked": 0,
-                    "with_errors": 0,
-                    "fixed": 0,
-                    "failed": 0
-                },
-                "fixed_files": [],
-                "failed_files": []  # NEW: Track failures
-            }
-        
-        # ========================================================================
-        # PYTHON FILE VALIDATION
-        # ========================================================================
-        for file_path in files:
-            if not file_path.endswith('.py'):
-                continue
-            
-            if result:
-                result.auto_format_stats["stats"]["checked"] += 1
-            
-            content = self.vfs.read_file(file_path)
-            if content is None:
-                continue
-            
-            check_result = self.syntax_checker.check_python(content, auto_fix=True)
-            
-            # === LOGIC FOR STATS ===
-            if check_result.was_auto_fixed:
-                # Success
-                logger.info(f"[VALIDATION] Auto-formatted {file_path}: {check_result.applied_fixes}")
+            """Проверяет синтаксис Python файлов и выполняет linting/компиляцию для других языков."""
+            issues = []
+
+            # Initialize stats if result object is provided
+            if result is not None and "tools" not in result.auto_format_stats:
+                checker = self.syntax_checker
+                result.auto_format_stats = {
+                    "tools": {
+                        "black": getattr(checker, "_black_available", False),
+                        "autopep8": getattr(checker, "_autopep8_available", False),
+                        "isort": getattr(checker, "_isort_available", False),
+                        "yapf": getattr(checker, "_yapf_available", False),
+                    },
+                    "stats": {
+                        "checked": 0,
+                        "with_errors": 0,
+                        "fixed": 0,
+                        "failed": 0
+                    },
+                    "fixed_files": [],
+                    "failed_files": []  # NEW: Track failures
+                }
+
+            # ========================================================================
+            # PYTHON FILE VALIDATION
+            # ========================================================================
+            for file_path in files:
+                if not file_path.endswith('.py'):
+                    continue
+    
                 if result:
-                    result.auto_format_stats["stats"]["fixed"] += 1
-                    result.auto_format_stats["stats"]["with_errors"] += 1
-                    result.auto_format_stats["fixed_files"].append({
-                        "file": file_path,
-                        "fixes": check_result.applied_fixes
-                    })
-            elif not check_result.is_valid:
-                # Failure
-                logger.warning(f"[VALIDATION] Syntax errors in {file_path} could not be auto-fixed.")
-                if result:
-                    result.auto_format_stats["stats"]["failed"] += 1
-                    result.auto_format_stats["stats"]["with_errors"] += 1
-                    result.auto_format_stats["failed_files"].append({
-                        "file": file_path,
-                        "attempts": getattr(check_result, "attempted_fixes", []),
-                        "errors": [i.message for i in check_result.issues[:2]]
-                    })
-            
-            # === COLLECT ISSUES ===
-            if not check_result.is_valid:
-                for issue in check_result.issues:
-                    issues.append(ValidationIssue(
-                        level=ValidationLevel.SYNTAX,
-                        severity=IssueSeverity.ERROR,
-                        file_path=file_path,
-                        message=issue.message,
-                        line=issue.line,
-                        column=issue.column,
-                        suggestion=issue.suggestion,
-                        language="python",
-                    ))
-            
-            # === STAGE VALID CHANGES ===
-            if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
-                logger.info(f"[VALIDATION] Staging auto-fixed content for {file_path}")
-                self.vfs.stage_change(file_path, check_result.fixed_content)
-        
-        # ========================================================================
-        # NON-PYTHON FILE VALIDATION (JS/TS, Go, Java)
-        # Uses two-phase approach:
-        # 1. Auto-fix phase: Apply fixes to individual files
-        # 2. Grouped validation phase: Compile files together to resolve dependencies
-        # ========================================================================
-        
-        adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root, vfs=self.vfs)
-        dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
-        
-        # ========================================================================
-        # PRE-INSTALL: Install dependencies from config files (pom.xml, package.json, go.mod)
-        # This ensures dependencies are available before compilation
-        # ========================================================================
-        try:
-            config_install_results = dependency_manager.install_all_dependencies_from_config(vfs=self.vfs)
-            for lang, install_result in config_install_results.items():
-                if install_result is not None:
-                    if install_result.all_success:
-                        logger.info(f"[SYNTAX] Pre-installed {lang} dependencies: {install_result.successful} packages")
-                    elif install_result.failed > 0:
-                        logger.warning(f"[SYNTAX] Some {lang} dependencies failed to install: {install_result.failed} failed")
-        except Exception as e:
-            logger.warning(f"[SYNTAX] Failed to pre-install dependencies from config files: {e}")
-        
-        # Collect non-Python files that have adapters
-        non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
-        
-        if not non_py_files:
-            return issues
-        
-        logger.info(f"[SYNTAX] Processing {len(non_py_files)} non-Python files with grouped validation")
-        
-        # ========================================================================
-        # PHASE 1: Auto-fix individual files (formatting, simple fixes)
-        # ========================================================================
-        for file_path in non_py_files:
-            if result:
-                result.auto_format_stats["stats"]["checked"] += 1
-            
-            content = self.vfs.read_file(file_path)
-            if content is None:
-                continue
-            
-            file_language = adapter_manager.get_language_for_file(file_path) or "unknown"
-            original_content = content
-            
-            # Try auto-fix for formatting issues
-            try:
-                fixed_code, _ = adapter_manager.lint_file(content, file_path, fix=True)
-                
-                # Stage fixed code if it changed (we'll validate it in phase 2)
-                if fixed_code != content and fixed_code.strip():
-                    logger.info(f"[SYNTAX] Auto-formatted {file_path} ({file_language})")
-                    self.vfs.stage_change(file_path, fixed_code)
+                    result.auto_format_stats["stats"]["checked"] += 1
+    
+                content = self.vfs.read_file(file_path)
+                if content is None:
+                    continue
+    
+                check_result = self.syntax_checker.check_python(content, auto_fix=True)
+    
+                # === LOGIC FOR STATS ===
+                if check_result.was_auto_fixed:
+                    # Success
+                    logger.info(f"[VALIDATION] Auto-formatted {file_path}: {check_result.applied_fixes}")
                     if result:
                         result.auto_format_stats["stats"]["fixed"] += 1
+                        result.auto_format_stats["stats"]["with_errors"] += 1
                         result.auto_format_stats["fixed_files"].append({
                             "file": file_path,
-                            "fixes": [f"Auto-format applied ({file_language})"]
+                            "fixes": check_result.applied_fixes
                         })
-            except Exception as e:
-                logger.warning(f"[SYNTAX] Auto-fix failed for {file_path}: {e}")
-        
-        # ========================================================================
-        # PHASE 2: Grouped compilation check (resolves inter-file dependencies)
-        # ========================================================================
-        
-        # Group files by language for batch compilation
-        files_by_language: Dict[str, List[Tuple[str, str]]] = {}
-        
-        for file_path in non_py_files:
-            # Read the latest content (may have been auto-fixed in phase 1)
-            content = self.vfs.read_file(file_path)
-            if content is None:
-                continue
-            
-            language = adapter_manager.get_language_for_file(file_path) or "unknown"
-            
-            if language not in files_by_language:
-                files_by_language[language] = []
-            
-            files_by_language[language].append((content, file_path))
-        
-        # Compile each language group together
-        for language, language_files in files_by_language.items():
-            if not language_files:
-                continue
-            
-            logger.info(f"[SYNTAX] Batch compiling {len(language_files)} {language} files together")
-            
+                elif not check_result.is_valid:
+                    # Failure
+                    logger.warning(f"[VALIDATION] Syntax errors in {file_path} could not be auto-fixed.")
+                    if result:
+                        result.auto_format_stats["stats"]["failed"] += 1
+                        result.auto_format_stats["stats"]["with_errors"] += 1
+                        result.auto_format_stats["failed_files"].append({
+                            "file": file_path,
+                            "attempts": getattr(check_result, "attempted_fixes", []),
+                            "errors": [i.message for i in check_result.issues[:2]]
+                        })
+    
+                # === COLLECT ISSUES ===
+                if not check_result.is_valid:
+                    for issue in check_result.issues:
+                        issues.append(ValidationIssue(
+                            level=ValidationLevel.SYNTAX,
+                            severity=IssueSeverity.ERROR,
+                            file_path=file_path,
+                            message=issue.message,
+                            line=issue.line,
+                            column=issue.column,
+                            suggestion=issue.suggestion,
+                            language="python",
+                        ))
+    
+                # === STAGE VALID CHANGES ===
+                if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
+                    logger.info(f"[VALIDATION] Staging auto-fixed content for {file_path}")
+                    self.vfs.stage_change(file_path, check_result.fixed_content)
+
+            # ========================================================================
+            # NON-PYTHON FILE VALIDATION (JS/TS, Go, Java)
+            # Uses two-phase approach:
+            # 1. Auto-fix phase: Apply fixes to individual files
+            # 2. Grouped validation phase: Compile files together to resolve dependencies
+            # ========================================================================
+
+            adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root, vfs=self.vfs)
+            dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
+
+            # ========================================================================
+            # PRE-INSTALL: Install dependencies from config files (pom.xml, package.json, go.mod)
+            # This ensures dependencies are available before compilation
+            # ========================================================================
             try:
-                # Use compile_check_with_deps for grouped compilation
-                compile_result = adapter_manager.compile_check_with_deps(
-                    [(code, fp, language) for code, fp in language_files]
-                )
+                config_install_results = dependency_manager.install_all_dependencies_from_config(vfs=self.vfs)
+                for lang, install_result in config_install_results.items():
+                    if install_result is not None:
+                        if install_result.all_success:
+                            logger.info(f"[SYNTAX] Pre-installed {lang} dependencies: {install_result.successful} packages")
+                        elif install_result.failed > 0:
+                            logger.warning(f"[SYNTAX] Some {lang} dependencies failed to install: {install_result.failed} failed")
+            except Exception as e:
+                logger.warning(f"[SYNTAX] Failed to pre-install dependencies from config files: {e}")
+
+            # Collect non-Python files that have adapters
+            non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
+
+            if not non_py_files:
+                return issues
+
+            logger.info(f"[SYNTAX] Processing {len(non_py_files)} non-Python files with grouped validation")
+
+            # ========================================================================
+            # PHASE 1: Auto-fix individual files (formatting, simple fixes)
+            # ========================================================================
+            for file_path in non_py_files:
+                if result:
+                    result.auto_format_stats["stats"]["checked"] += 1
+    
+                content = self.vfs.read_file(file_path)
+                if content is None:
+                    continue
+    
+                file_language = adapter_manager.get_language_for_file(file_path) or "unknown"
+                original_content = content
+    
+                # Skip Java files from Phase 1 auto-fix; defer to Phase 2 check_java
+                if file_language == 'java':
+                    continue
+    
+                # Try auto-fix for formatting issues (non-Java only)
+                try:
+                    fixed_code, _ = adapter_manager.lint_file(content, file_path, fix=True)
+        
+                    # Stage fixed code if it changed (we'll validate it in phase 2)
+                    if fixed_code != content and fixed_code.strip():
+                        logger.info(f"[SYNTAX] Auto-formatted {file_path} ({file_language})")
+                        self.vfs.stage_change(file_path, fixed_code)
+                        if result:
+                            result.auto_format_stats["stats"]["fixed"] += 1
+                            result.auto_format_stats["fixed_files"].append({
+                                "file": file_path,
+                                "fixes": [f"Auto-format applied ({file_language})"]
+                            })
+                except Exception as e:
+                    logger.warning(f"[SYNTAX] Auto-fix failed for {file_path}: {e}")
+
+            # ========================================================================
+            # PHASE 2: Grouped compilation check (resolves inter-file dependencies)
+            # ========================================================================
+
+            # Group files by language for batch compilation
+            files_by_language: Dict[str, List[Tuple[str, str]]] = {}
+
+            for file_path in non_py_files:
+                # Read the latest content (may have been auto-fixed in phase 1)
+                content = self.vfs.read_file(file_path)
+                if content is None:
+                    continue
+    
+                language = adapter_manager.get_language_for_file(file_path) or "unknown"
+    
+                if language not in files_by_language:
+                    files_by_language[language] = []
+    
+                files_by_language[language].append((content, file_path))
+
+            # Compile each language group together
+            for language, language_files in files_by_language.items():
+                if not language_files:
+                    continue
+    
+                logger.info(f"[SYNTAX] Batch compiling {len(language_files)} {language} files together")
+
+                if language == 'java':
+                    for code, file_path in language_files:
+                        # PHASE 2A: Check for syntax errors WITHOUT auto-fixing
+                        check_result_no_fix = self.syntax_checker.check_java(code, auto_fix=False)
+
+                        # If no errors, file is valid
+                        if check_result_no_fix.is_valid:
+                            logger.info(f"[SYNTAX] Java file valid: {file_path}")
+                            continue
+
+                            # Examine errors to determine if they are ONLY semicolon-related
+                            has_non_semicolon_errors = False
+                            for issue in check_result_no_fix.issues:
+                                # Check if error is about missing semicolons
+                                if not (("Missing ';'" in issue.message or "missing ';'" in issue.message or "';'" in issue.message)):
+                                    has_non_semicolon_errors = True
+                                    break
+
+                                    if has_non_semicolon_errors:
+                                        # Non-semicolon errors - report as errors, don't attempt fix
+                                        for issue in check_result_no_fix.issues:
+                                            logger.error(f"[JAVA SYNTAX] Unfixable error in {file_path}: {issue.message}")
+                                            issues.append(ValidationIssue(
+                                            level=ValidationLevel.SYNTAX,
+                                            severity=IssueSeverity.ERROR,
+                                            file_path=file_path,
+                                            message=f"[Java Syntax Error] {file_path}: {issue.message}",
+                                            line=issue.line,
+                                            column=issue.column,
+                                            code="java_syntax_error",
+                                            language="java"
+                                            ))
+
+                                            if result is not None:
+                                                result.auto_format_stats["stats"]["with_errors"] += 1
+                                                result.auto_format_stats["stats"]["failed"] += 1
+                                                result.auto_format_stats["failed_files"].append({
+                                                "file": file_path,
+                                                "errors": [i.message for i in check_result_no_fix.issues]
+                                                })
+                                            else:
+                                                # All errors are semicolon-only - attempt auto-fix
+                                                check_result_fix = self.syntax_checker.check_java(code, auto_fix=True)
+
+                                                if check_result_fix.was_auto_fixed and check_result_fix.fixed_content and check_result_fix.is_valid:
+                                                    # Auto-fix succeeded
+                                                    logger.info(f"[SYNTAX] Successfully auto-fixed semicolon errors in {file_path}")
+                                                    self.vfs.stage_change(file_path, check_result_fix.fixed_content)
+                                                    if result is not None:
+                                                        result.auto_format_stats["stats"]["fixed"] += 1
+                                                        result.auto_format_stats["fixed_files"].append({
+                                                        "file": file_path,
+                                                        "fixes": check_result_fix.applied_fixes
+                                                        })
+                                                    else:
+                                                        # Auto-fix failed - report error and don't stage
+                                                        logger.error(f"[JAVA SYNTAX] Auto-fix failed for semicolon errors in {file_path}")
+                                                        for issue in check_result_no_fix.issues:
+                                                            issues.append(ValidationIssue(
+                                                            level=ValidationLevel.SYNTAX,
+                                                            severity=IssueSeverity.ERROR,
+                                                            file_path=file_path,
+                                                            message=f"[Java Syntax Error] {file_path}: {issue.message}",
+                                                            line=issue.line,
+                                                            column=issue.column,
+                                                            code="java_syntax_error",
+                                                            language="java"
+                                                            ))
+
+                                                            if result is not None:
+                                                                result.auto_format_stats["stats"]["with_errors"] += 1
+                                                                result.auto_format_stats["stats"]["failed"] += 1
+                                                                result.auto_format_stats["failed_files"].append({
+                                                                "file": file_path,
+                                                                "errors": [i.message for i in check_result_no_fix.issues]
+                                                                })
+
+                                                                continue  # Skip compile_check_with_deps for Java
+                    for code, file_path in language_files:
+                        check_result = self.syntax_checker.check_java(code, auto_fix=True)
                 
-                if compile_result.get('success', False):
-                    logger.info(f"[SYNTAX] All {len(language_files)} {language} files passed grouped compilation")
-                else:
-                    # Compilation failed - collect errors
-                    stderr = compile_result.get('stderr', '')
-                    
-                    # Check for missing dependencies
-                    missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
-                        stderr, language
-                    )
-                    
-                    if missing_deps:
-                        logger.info(f"[SYNTAX] Detected missing dependencies for {language}: {missing_deps}")
-                        
-                        # Try to install missing dependencies
-                        any_installed = False
-                        for package in missing_deps:
-                            try:
-                                logger.info(f"[SYNTAX] Installing missing dependency: {package} for {language}")
-                                install_result = dependency_manager.install_dependency_for_language(package, language)
-                                if install_result.status == InstallResult.SUCCESS:
-                                    logger.info(f"[SYNTAX] Successfully installed {package}")
-                                    any_installed = True
-                                else:
-                                    logger.warning(f"[SYNTAX] Failed to install {package}: {install_result.message}")
-                            except Exception as e:
-                                logger.warning(f"[SYNTAX] Error installing {package}: {e}")
-                        
-                        # Re-run compilation if dependencies were installed
-                        if any_installed:
-                            logger.info(f"[SYNTAX] Re-running grouped compilation for {language} after dependency installation")
+                        if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
+                            logger.info(f"[SYNTAX] Successfully auto-fixed syntax errors in {file_path}")
+                            self.vfs.stage_change(file_path, check_result.fixed_content)
+                            if result is not None:
+                                result.auto_format_stats["stats"]["fixed"] += 1
+                                result.auto_format_stats["fixed_files"].append({
+                                    "file": file_path,
+                                    "fixes": check_result.applied_fixes
+                                })
+                        elif not check_result.is_valid:
+                            for issue in check_result.issues:
+                                # Format message with file name and error type
+                                message = f"[Java Syntax Error] {file_path}: {issue.message}"
+                                if issue.line is not None:
+                                    message += f" (line {issue.line})"
                             
-                            # Re-read files (content unchanged, but dependencies now available)
-                            compile_result = adapter_manager.compile_check_with_deps(
-                                [(code, fp, language) for code, fp in language_files]
-                            )
-                            
-                            if compile_result.get('success', False):
-                                logger.info(f"[SYNTAX] All {language} files passed after dependency installation")
-                                continue
-                    
-                    # Still failing - report errors
-                    individual_results = compile_result.get('by_language', {}).get(language, {}).get('results', [])
-                    
-                    if individual_results:
-                        # Report individual file errors
-                        for file_result in individual_results:
-                            if not file_result.get('success', False):
-                                file_path = file_result.get('file_path', 'unknown')
-                                file_stderr = file_result.get('stderr', stderr)
-                                
                                 issues.append(ValidationIssue(
                                     level=ValidationLevel.SYNTAX,
                                     severity=IssueSeverity.ERROR,
                                     file_path=file_path,
-                                    message=f"Compilation/syntax check failed:\n{file_stderr[:500]}",
+                                    message=message,
+                                    line=issue.line,
+                                    column=issue.column,
+                                    code="java_syntax_error",
+                                    language="java"
+                                ))
+                            
+                                # Log at error level with clear formatting
+                                log_message = f"[JAVA SYNTAX] Unfixable syntax error in {file_path}: {issue.message}"
+                                if issue.line is not None:
+                                    log_message += f" (line {issue.line})"
+                                logger.error(log_message)
+                    
+                            if result is not None:
+                                result.auto_format_stats["stats"]["with_errors"] += 1
+                                result.auto_format_stats["stats"]["failed"] += 1
+                                result.auto_format_stats["failed_files"].append({
+                                    "file": file_path,
+                                    "errors": [i.message for i in check_result.issues]
+                                })
+            
+                    continue  # Skip compile_check_with_deps for Java
+    
+                try:
+                    # Use compile_check_with_deps for grouped compilation
+                    compile_result = adapter_manager.compile_check_with_deps(
+                        [(code, fp, language) for code, fp in language_files]
+                    )
+        
+                    if compile_result.get('success', False):
+                        logger.info(f"[SYNTAX] All {len(language_files)} {language} files passed grouped compilation")
+                    else:
+                        # Compilation failed - collect errors
+                        stderr = compile_result.get('stderr', '')
+            
+                        # Check for missing dependencies
+                        missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
+                            stderr, language
+                        )
+            
+                        if missing_deps:
+                            logger.info(f"[SYNTAX] Detected missing dependencies for {language}: {missing_deps}")
+                
+                            # Try to install missing dependencies
+                            any_installed = False
+                            for package in missing_deps:
+                                try:
+                                    logger.info(f"[SYNTAX] Installing missing dependency: {package} for {language}")
+                                    install_result = dependency_manager.install_dependency_for_language(package, language)
+                                    if install_result.status == InstallResult.SUCCESS:
+                                        logger.info(f"[SYNTAX] Successfully installed {package}")
+                                        any_installed = True
+                                    else:
+                                        logger.warning(f"[SYNTAX] Failed to install {package}: {install_result.message}")
+                                except Exception as e:
+                                    logger.warning(f"[SYNTAX] Error installing {package}: {e}")
+                
+                            # Re-run compilation if dependencies were installed
+                            if any_installed:
+                                logger.info(f"[SYNTAX] Re-running grouped compilation for {language} after dependency installation")
+                    
+                                # Re-read files (content unchanged, but dependencies now available)
+                                compile_result = adapter_manager.compile_check_with_deps(
+                                    [(code, fp, language) for code, fp in language_files]
+                                )
+                    
+                                if compile_result.get('success', False):
+                                    logger.info(f"[SYNTAX] All {language} files passed after dependency installation")
+                                    continue
+            
+                        # Still failing - report errors
+                        individual_results = compile_result.get('by_language', {}).get(language, {}).get('results', [])
+            
+                        if individual_results:
+                            # Report individual file errors
+                            for file_result in individual_results:
+                                if not file_result.get('success', False):
+                                    file_path = file_result.get('file_path', 'unknown')
+                                    file_stderr = file_result.get('stderr', stderr)
+                        
+                                    issues.append(ValidationIssue(
+                                        level=ValidationLevel.SYNTAX,
+                                        severity=IssueSeverity.ERROR,
+                                        file_path=file_path,
+                                        message=f"Compilation/syntax check failed:\n{file_stderr[:500]}",
+                                        code=get_error_code_for_language(language, "compile"),
+                                        language=language,
+                                    ))
+                        
+                                    if result:
+                                        result.auto_format_stats["stats"]["with_errors"] += 1
+                                        result.auto_format_stats["stats"]["failed"] += 1
+                                        result.auto_format_stats["failed_files"].append({
+                                            "file": file_path,
+                                            "errors": [f"Grouped compilation failed"]
+                                        })
+                        else:
+                            # No individual results - report batch error for all files
+                            for code, file_path in language_files:
+                                issues.append(ValidationIssue(
+                                    level=ValidationLevel.SYNTAX,
+                                    severity=IssueSeverity.ERROR,
+                                    file_path=file_path,
+                                    message=f"Batch compilation failed for {language} files:\n{stderr[:500]}",
                                     code=get_error_code_for_language(language, "compile"),
                                     language=language,
                                 ))
-                                
+                    
                                 if result:
                                     result.auto_format_stats["stats"]["with_errors"] += 1
                                     result.auto_format_stats["stats"]["failed"] += 1
                                     result.auto_format_stats["failed_files"].append({
                                         "file": file_path,
-                                        "errors": [f"Grouped compilation failed"]
+                                        "errors": [f"Batch compilation failed"]
                                     })
-                    else:
-                        # No individual results - report batch error for all files
-                        for code, file_path in language_files:
-                            issues.append(ValidationIssue(
-                                level=ValidationLevel.SYNTAX,
-                                severity=IssueSeverity.ERROR,
-                                file_path=file_path,
-                                message=f"Batch compilation failed for {language} files:\n{stderr[:500]}",
-                                code=get_error_code_for_language(language, "compile"),
-                                language=language,
-                            ))
-                            
-                            if result:
-                                result.auto_format_stats["stats"]["with_errors"] += 1
-                                result.auto_format_stats["stats"]["failed"] += 1
-                                result.auto_format_stats["failed_files"].append({
-                                    "file": file_path,
-                                    "errors": [f"Batch compilation failed"]
-                                })
+    
+                except Exception as e:
+                    logger.error(f"[SYNTAX] Grouped compilation error for {language}: {e}")
+                    for code, file_path in language_files:
+                        issues.append(ValidationIssue(
+                            level=ValidationLevel.SYNTAX,
+                            severity=IssueSeverity.ERROR,
+                            file_path=file_path,
+                            message=f"Grouped compilation error for {language}: {e}",
+                            code=get_error_code_for_language(language, "compile"),
+                            language=language,
+                        ))
             
-            except Exception as e:
-                logger.error(f"[SYNTAX] Grouped compilation error for {language}: {e}")
-                for code, file_path in language_files:
-                    issues.append(ValidationIssue(
-                        level=ValidationLevel.SYNTAX,
-                        severity=IssueSeverity.ERROR,
-                        file_path=file_path,
-                        message=f"Grouped compilation error for {language}: {e}",
-                        code=get_error_code_for_language(language, "compile"),
-                        language=language,
-                    ))
-                    
-                    if result:
-                        result.auto_format_stats["stats"]["with_errors"] += 1
-                        result.auto_format_stats["stats"]["failed"] += 1
-                        result.auto_format_stats["failed_files"].append({
-                            "file": file_path,
-                            "errors": [str(e)]
-                        })
-        
-        return issues
+                        if result:
+                            result.auto_format_stats["stats"]["with_errors"] += 1
+                            result.auto_format_stats["stats"]["failed"] += 1
+                            result.auto_format_stats["failed_files"].append({
+                                "file": file_path,
+                                "errors": [str(e)]
+                            })
+
+            return issues
     
     # ========================================================================
     # LEVEL 2: IMPORTS
@@ -1888,261 +2016,285 @@ exclude =
     
     
     async def _check_runtime(self, files: List[str], result: ValidationResult = None) -> List[ValidationIssue]:
-        """
-        Проверяет runtime — выполняет каждый файл с учётом его типа.
+            """
+            Проверяет runtime — выполняет каждый файл с учётом его типа.
         
-        Использует RuntimeTester для умного тестирования:
-        - Standard Python: runpy.run_path()
-        - GUI/Game: headless import test
-        - SQL: temp database validation
-        - API: network check + graceful handling
-        - Web: skip with INFO
+            Использует RuntimeTester для умного тестирования:
+            - Standard Python: runpy.run_path()
+            - GUI/Game: headless import test
+            - SQL: temp database validation
+            - API: network check + graceful handling
+            - Web: skip with INFO
         
-        Для не-Python файлов (JS/TS, Go, Java):
-        - Использует compile_check_with_deps для групповой компиляции
-        - Файлы компилируются вместе для разрешения зависимостей
+            Для не-Python файлов (JS/TS, Go, Java):
+            - Использует compile_check_with_deps для групповой компиляции
+            - Файлы компилируются вместе для разрешения зависимостей
         
-        Args:
-            files: List of file paths to check
-            result: ValidationResult to update statistics
+            Args:
+                files: List of file paths to check
+                result: ValidationResult to update statistics
             
-        Returns:
-            List of ValidationIssues
-        """
-        issues = []
+            Returns:
+                List of ValidationIssues
+            """
+            issues = []
         
-        # Separate Python and non-Python files
-        py_files = [f for f in files if f.endswith('.py')]
+            # Separate Python and non-Python files
+            py_files = [f for f in files if f.endswith('.py')]
         
-        adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root, vfs=self.vfs)
-        non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
+            adapter_manager = AdapterManager.get_instance(project_root=self.vfs.project_root, vfs=self.vfs)
+            non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
         
-        # If no files to check at all, return early
-        if not py_files and not non_py_files:
-            logger.info("RUNTIME: No files to check")
-            return issues
+            # If no files to check at all, return early
+            if not py_files and not non_py_files:
+                logger.info("RUNTIME: No files to check")
+                return issues
         
-        logger.info(f"RUNTIME: Checking {len(py_files)} Python files and {len(non_py_files)} non-Python files")
+            logger.info(f"RUNTIME: Checking {len(py_files)} Python files and {len(non_py_files)} non-Python files")
         
-        temp_dir = None
-        try:
-            # Materialize VFS to temp directory - this is used by BOTH Python and non-Python checks
-            temp_dir = self._materialize_vfs()
+            temp_dir = None
+            try:
+                # Materialize VFS to temp directory - this is used by BOTH Python and non-Python checks
+                temp_dir = self._materialize_vfs()
             
-            # ========================================================================
-            # PYTHON FILE VALIDATION
-            # ========================================================================
-            if py_files:
-                logger.info(f"RUNTIME: Checking {len(py_files)} Python files with RuntimeTester")
+                # ========================================================================
+                # PYTHON FILE VALIDATION
+                # ========================================================================
+                if py_files:
+                    logger.info(f"RUNTIME: Checking {len(py_files)} Python files with RuntimeTester")
                 
-                # Create RuntimeTester
-                tester = RuntimeTester(self.vfs)
+                    # Create RuntimeTester
+                    tester = RuntimeTester(self.vfs)
                 
-                # Analyze project
-                analysis = await tester.analyze_project(py_files)
+                    # Analyze project
+                    analysis = await tester.analyze_project(py_files)
                 
-                logger.info(
-                    f"RUNTIME: Project analysis - {analysis.total_tokens} tokens, "
-                    f"category={analysis.size_category.value}, "
-                    f"timeout={analysis.total_timeout_seconds}s, "
-                    f"frameworks={list(analysis.detected_frameworks.keys())}"
-                )
+                    logger.info(
+                        f"RUNTIME: Project analysis - {analysis.total_tokens} tokens, "
+                        f"category={analysis.size_category.value}, "
+                        f"timeout={analysis.total_timeout_seconds}s, "
+                        f"frameworks={list(analysis.detected_frameworks.keys())}"
+                    )
                 
-                # Run all tests
-                summary = await tester.run_all_tests(
-                    files=py_files,
-                    temp_dir=temp_dir,
-                    total_timeout=analysis.total_timeout_seconds,
-                    analysis=analysis,
-                )
+                    # Run all tests
+                    summary = await tester.run_all_tests(
+                        files=py_files,
+                        temp_dir=temp_dir,
+                        total_timeout=analysis.total_timeout_seconds,
+                        analysis=analysis,
+                    )
                 
-                # Process results
-                for test_result in summary.results:
-                    if test_result.status == TestStatus.PASSED:
-                        logger.info(f"RUNTIME PASSED: {test_result.file_path} ({test_result.app_type.value})")
+                    # Process results
+                    for test_result in summary.results:
+                        if test_result.status == TestStatus.PASSED:
+                            logger.info(f"RUNTIME PASSED: {test_result.file_path} ({test_result.app_type.value})")
                         
-                    elif test_result.status == TestStatus.SKIPPED:
-                        issues.append(ValidationIssue(
-                            level=ValidationLevel.RUNTIME,
-                            severity=IssueSeverity.INFO,
-                            file_path=test_result.file_path,
-                            message=test_result.message,
-                            suggestion=test_result.suggestion,
-                            language="python",
-                        ))
-                        logger.info(f"RUNTIME SKIPPED: {test_result.file_path} - {test_result.message}")
+                        elif test_result.status == TestStatus.SKIPPED:
+                            issues.append(ValidationIssue(
+                                level=ValidationLevel.RUNTIME,
+                                severity=IssueSeverity.INFO,
+                                file_path=test_result.file_path,
+                                message=test_result.message,
+                                suggestion=test_result.suggestion,
+                                language="python",
+                            ))
+                            logger.info(f"RUNTIME SKIPPED: {test_result.file_path} - {test_result.message}")
                         
-                    elif test_result.status == TestStatus.FAILED:
-                        full_message = test_result.message
-                        if test_result.details:
-                            details_lines = test_result.details.strip().split('\n')
-                            relevant_lines = details_lines[-10:] if len(details_lines) > 10 else details_lines
-                            details_preview = '\n'.join(relevant_lines)
-                            full_message = f"{test_result.message}\n\nTraceback (last 10 lines):\n{details_preview}"
+                        elif test_result.status == TestStatus.FAILED:
+                            full_message = test_result.message
+                            if test_result.details:
+                                details_lines = test_result.details.strip().split('\n')
+                                relevant_lines = details_lines[-10:] if len(details_lines) > 10 else details_lines
+                                details_preview = '\n'.join(relevant_lines)
+                                full_message = f"{test_result.message}\n\nTraceback (last 10 lines):\n{details_preview}"
                         
-                        issues.append(ValidationIssue(
-                            level=ValidationLevel.RUNTIME,
-                            severity=IssueSeverity.ERROR,
-                            file_path=test_result.file_path,
-                            message=full_message,
-                            suggestion=test_result.suggestion,
-                            language="python",
-                        ))
-                        logger.warning(f"RUNTIME FAILED: {test_result.file_path} - {test_result.message}")
+                            issues.append(ValidationIssue(
+                                level=ValidationLevel.RUNTIME,
+                                severity=IssueSeverity.ERROR,
+                                file_path=test_result.file_path,
+                                message=full_message,
+                                suggestion=test_result.suggestion,
+                                language="python",
+                            ))
+                            logger.warning(f"RUNTIME FAILED: {test_result.file_path} - {test_result.message}")
                         
-                    elif test_result.status == TestStatus.TIMEOUT:
-                        issues.append(ValidationIssue(
-                            level=ValidationLevel.RUNTIME,
-                            severity=IssueSeverity.ERROR,
-                            file_path=test_result.file_path,
-                            message=test_result.message,
-                            suggestion=test_result.suggestion or "Check for infinite loops or blocking operations",
-                            language="python",
-                        ))
-                        logger.warning(f"RUNTIME TIMEOUT: {test_result.file_path} - {test_result.message}")
+                        elif test_result.status == TestStatus.TIMEOUT:
+                            issues.append(ValidationIssue(
+                                level=ValidationLevel.RUNTIME,
+                                severity=IssueSeverity.ERROR,
+                                file_path=test_result.file_path,
+                                message=test_result.message,
+                                suggestion=test_result.suggestion or "Check for infinite loops or blocking operations",
+                                language="python",
+                            ))
+                            logger.warning(f"RUNTIME TIMEOUT: {test_result.file_path} - {test_result.message}")
                         
-                    elif test_result.status == TestStatus.ERROR:
-                        full_message = test_result.message
-                        if test_result.details:
-                            details_lines = test_result.details.strip().split('\n')
-                            relevant_lines = details_lines[-10:] if len(details_lines) > 10 else details_lines
-                            details_preview = '\n'.join(relevant_lines)
-                            full_message = f"{test_result.message}\n\nTraceback (last 10 lines):\n{details_preview}"
+                        elif test_result.status == TestStatus.ERROR:
+                            full_message = test_result.message
+                            if test_result.details:
+                                details_lines = test_result.details.strip().split('\n')
+                                relevant_lines = details_lines[-10:] if len(details_lines) > 10 else details_lines
+                                details_preview = '\n'.join(relevant_lines)
+                                full_message = f"{test_result.message}\n\nTraceback (last 10 lines):\n{details_preview}"
                         
-                        issues.append(ValidationIssue(
-                            level=ValidationLevel.RUNTIME,
-                            severity=IssueSeverity.ERROR,
-                            file_path=test_result.file_path,
-                            message=full_message,
-                            suggestion=test_result.suggestion,
-                            language="python",
-                        ))
-                        logger.error(f"RUNTIME ERROR: {test_result.file_path} - {test_result.message}")
+                            issues.append(ValidationIssue(
+                                level=ValidationLevel.RUNTIME,
+                                severity=IssueSeverity.ERROR,
+                                file_path=test_result.file_path,
+                                message=full_message,
+                                suggestion=test_result.suggestion,
+                                language="python",
+                            ))
+                            logger.error(f"RUNTIME ERROR: {test_result.file_path} - {test_result.message}")
                 
-                # Update result statistics
-                if result is not None:
-                    result.runtime_files_checked = summary.total_files
-                    result.runtime_files_passed = summary.passed
-                    result.runtime_files_failed = summary.failed + summary.errors + summary.timeouts
-                    result.runtime_files_skipped = summary.skipped
-                    result.runtime_test_summary = summary.to_dict()
+                    # Update result statistics
+                    if result is not None:
+                        result.runtime_files_checked = summary.total_files
+                        result.runtime_files_passed = summary.passed
+                        result.runtime_files_failed = summary.failed + summary.errors + summary.timeouts
+                        result.runtime_files_skipped = summary.skipped
+                        result.runtime_test_summary = summary.to_dict()
                 
-                logger.info(
-                    f"RUNTIME SUMMARY (Python): {summary.passed}/{summary.total_files} passed, "
-                    f"{summary.failed} failed, {summary.skipped} skipped, "
-                    f"{summary.timeouts} timeouts, {summary.errors} errors"
-                )
+                    logger.info(
+                        f"RUNTIME SUMMARY (Python): {summary.passed}/{summary.total_files} passed, "
+                        f"{summary.failed} failed, {summary.skipped} skipped, "
+                        f"{summary.timeouts} timeouts, {summary.errors} errors"
+                    )
             
-            # ========================================================================
+                # ========================================================================
             
-            # ========================================================================
-            # NON-PYTHON FILE COMPILATION CHECKS (JS/TS, Go, Java)
-            # Uses compile_check_with_deps for grouped compilation with dependencies
-            # ========================================================================
-            if non_py_files:
-                logger.info(f"RUNTIME: Checking {len(non_py_files)} non-Python files with language adapters")
+                # ========================================================================
+                # NON-PYTHON FILE COMPILATION CHECKS (JS/TS, Go, Java)
+                # Uses compile_check_with_deps for grouped compilation with dependencies
+                # ========================================================================
+                if non_py_files:
+                    logger.info(f"RUNTIME: Checking {len(non_py_files)} non-Python files with language adapters")
                 
-                dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
+                    dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
                 
-                # Group files by language for batch compilation
-                files_by_language: Dict[str, List[Tuple[str, str]]] = {}
+                    # Group files by language for batch compilation
+                    files_by_language: Dict[str, List[Tuple[str, str]]] = {}
                 
-                for file_path in non_py_files:
-                    # ALWAYS read content from VFS to get the latest staged version
-                    content = self.vfs.read_file(file_path)
+                    for file_path in non_py_files:
+                        # ALWAYS read content from VFS to get the latest staged version
+                        content = self.vfs.read_file(file_path)
                     
-                    if content is None:
-                        logger.warning(f"Could not read {file_path} from VFS, skipping")
-                        continue
+                        if content is None:
+                            logger.warning(f"Could not read {file_path} from VFS, skipping")
+                            continue
                     
-                    language = adapter_manager.get_language_for_file(file_path) or "unknown"
+                        language = adapter_manager.get_language_for_file(file_path) or "unknown"
                     
-                    if language not in files_by_language:
-                        files_by_language[language] = []
+                        if language not in files_by_language:
+                            files_by_language[language] = []
                     
-                    files_by_language[language].append((content, file_path))
+                        files_by_language[language].append((content, file_path))
                 
-                # Compile each language group together using compile_check_with_deps
-                for language, language_files in files_by_language.items():
-                    if not language_files:
-                        continue
+                    # Compile each language group together using compile_check_with_deps
+                    for language, language_files in files_by_language.items():
+                        if not language_files:
+                            continue
                     
-                    logger.info(f"RUNTIME: Batch compiling {len(language_files)} {language} files together")
+                        logger.info(f"RUNTIME: Batch compiling {len(language_files)} {language} files together")
                     
-                    try:
-                        # Use compile_check_with_deps for grouped compilation
-                        # This allows files to see each other's dependencies
-                        compile_result = adapter_manager.compile_check_with_deps(
-                            [(code, fp, language) for code, fp in language_files]
-                        )
-                        
-                        if compile_result.get('success', False):
-                            logger.info(f"RUNTIME PASSED ({language}): All {len(language_files)} files compiled successfully")
-                            if result is not None:
-                                result.runtime_files_checked += len(language_files)
-                                result.runtime_files_passed += len(language_files)
-                        else:
-                            # Process individual results if available
-                            individual_results = compile_result.get('by_language', {}).get(language, {}).get('results', [])
-                            failed_files = compile_result.get('failed_files', [])
-                            stderr = compile_result.get('stderr', '')
-                            
-                            # Check for missing dependencies before reporting errors
-                            missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
-                                stderr, language
+                        try:
+                            # Use compile_check_with_deps for grouped compilation
+                            # This allows files to see each other's dependencies
+                            compile_result = adapter_manager.compile_check_with_deps(
+                                [(code, fp, language) for code, fp in language_files],
+                                project_root=Path(temp_dir)
                             )
+                        
+                            if compile_result.get('success', False):
+                                logger.info(f"RUNTIME PASSED ({language}): All {len(language_files)} files compiled successfully")
+                                if result is not None:
+                                    result.runtime_files_checked += len(language_files)
+                                    result.runtime_files_passed += len(language_files)
+                            else:
+                                # Process individual results if available
+                                individual_results = compile_result.get('by_language', {}).get(language, {}).get('results', [])
+                                failed_files = compile_result.get('failed_files', [])
+                                stderr = compile_result.get('stderr', '')
                             
-                            if missing_deps:
-                                logger.info(f"[RUNTIME] Detected missing dependencies for {language}: {missing_deps}")
-                                
-                                # Try to install each missing dependency
-                                any_installed = False
-                                for package in missing_deps:
-                                    try:
-                                        logger.info(f"[RUNTIME] Installing missing dependency: {package} for {language}")
-                                        install_result = dependency_manager.install_dependency_for_language(package, language)
-                                        
-                                        if install_result.status == InstallResult.SUCCESS:
-                                            logger.info(f"[RUNTIME] Successfully installed {package}")
-                                            any_installed = True
-                                        else:
-                                            logger.warning(f"[RUNTIME] Failed to install {package}: {install_result.message}")
-                                        
-                                    except Exception as e:
-                                        logger.warning(f"[RUNTIME] Error installing {package}: {e}")
-                                
-                                # If any packages were installed, re-run compile check
-                                if any_installed:
-                                    logger.info(f"[RUNTIME] Re-running batch compile check for {language} after dependency installation")
-                                    compile_result = adapter_manager.compile_check_with_deps(
-                                        [(code, fp, language) for code, fp in language_files]
-                                    )
-                                    
-                                    if compile_result.get('success', False):
-                                        logger.info(f"RUNTIME PASSED ({language}): All files compiled after dependency install")
-                                        if result is not None:
-                                            result.runtime_files_checked += len(language_files)
-                                            result.runtime_files_passed += len(language_files)
-                                        continue
+                                # Check for missing dependencies before reporting errors
+                                missing_deps = dependency_manager.detect_missing_dependencies_from_errors(
+                                    stderr, language
+                                )
                             
-                            # Report errors for failed files
-                            if individual_results:
-                                for file_result in individual_results:
-                                    file_path = file_result.get('file_path', 'unknown')
-                                    file_success = file_result.get('success', False)
-                                    file_stderr = file_result.get('stderr', '')
-                                    
-                                    if file_success:
-                                        logger.info(f"RUNTIME PASSED ({language}): {file_path}")
-                                        if result is not None:
-                                            result.runtime_files_checked += 1
-                                            result.runtime_files_passed += 1
-                                    else:
-                                        error_message = (
-                                            f"Compilation/syntax check failed for {language} file.\n"
-                                            f"Error output:\n{file_stderr[:500]}"
+                                if missing_deps:
+                                    logger.info(f"[RUNTIME] Detected missing dependencies for {language}: {missing_deps}")
+                                
+                                    # Try to install each missing dependency
+                                    any_installed = False
+                                    for package in missing_deps:
+                                        try:
+                                            logger.info(f"[RUNTIME] Installing missing dependency: {package} for {language}")
+                                            install_result = dependency_manager.install_dependency_for_language(package, language)
+                                        
+                                            if install_result.status == InstallResult.SUCCESS:
+                                                logger.info(f"[RUNTIME] Successfully installed {package}")
+                                                any_installed = True
+                                            else:
+                                                logger.warning(f"[RUNTIME] Failed to install {package}: {install_result.message}")
+                                        
+                                        except Exception as e:
+                                            logger.warning(f"[RUNTIME] Error installing {package}: {e}")
+                                
+                                    # If any packages were installed, re-run compile check
+                                    if any_installed:
+                                        logger.info(f"[RUNTIME] Re-running batch compile check for {language} after dependency installation")
+                                        compile_result = adapter_manager.compile_check_with_deps(
+                                            [(code, fp, language) for code, fp in language_files],
+                                            project_root=Path(temp_dir)
                                         )
+                                    
+                                        if compile_result.get('success', False):
+                                            logger.info(f"RUNTIME PASSED ({language}): All files compiled after dependency install")
+                                            if result is not None:
+                                                result.runtime_files_checked += len(language_files)
+                                                result.runtime_files_passed += len(language_files)
+                                            continue
+                            
+                                # Report errors for failed files
+                                if individual_results:
+                                    for file_result in individual_results:
+                                        file_path = file_result.get('file_path', 'unknown')
+                                        file_success = file_result.get('success', False)
+                                        file_stderr = file_result.get('stderr', '')
+                                    
+                                        if file_success:
+                                            logger.info(f"RUNTIME PASSED ({language}): {file_path}")
+                                            if result is not None:
+                                                result.runtime_files_checked += 1
+                                                result.runtime_files_passed += 1
+                                        else:
+                                            error_message = (
+                                                f"Compilation/syntax check failed for {language} file.\n"
+                                                f"Error output:\n{file_stderr[:500]}"
+                                            )
                                         
+                                            issues.append(ValidationIssue(
+                                                level=ValidationLevel.RUNTIME,
+                                                severity=IssueSeverity.ERROR,
+                                                file_path=file_path,
+                                                message=error_message,
+                                                code=f"{language}_compile_error",
+                                                suggestion=f"Fix the {language} compilation errors shown above",
+                                                language=language,
+                                            ))
+                                        
+                                            logger.warning(f"RUNTIME FAILED ({language}): {file_path}")
+                                            if result is not None:
+                                                result.runtime_files_checked += 1
+                                                result.runtime_files_failed += 1
+                                else:
+                                    # No individual results, report batch error
+                                    for file_path in [fp for _, fp in language_files]:
+                                        error_message = (
+                                            f"Batch compilation failed for {language} files.\n"
+                                            f"Error output:\n{stderr[:500]}"
+                                        )
+                                    
                                         issues.append(ValidationIssue(
                                             level=ValidationLevel.RUNTIME,
                                             severity=IssueSeverity.ERROR,
@@ -2152,64 +2304,42 @@ exclude =
                                             suggestion=f"Fix the {language} compilation errors shown above",
                                             language=language,
                                         ))
-                                        
-                                        logger.warning(f"RUNTIME FAILED ({language}): {file_path}")
+                                    
                                         if result is not None:
                                             result.runtime_files_checked += 1
                                             result.runtime_files_failed += 1
-                            else:
-                                # No individual results, report batch error
-                                for file_path in [fp for _, fp in language_files]:
-                                    error_message = (
-                                        f"Batch compilation failed for {language} files.\n"
-                                        f"Error output:\n{stderr[:500]}"
-                                    )
-                                    
-                                    issues.append(ValidationIssue(
-                                        level=ValidationLevel.RUNTIME,
-                                        severity=IssueSeverity.ERROR,
-                                        file_path=file_path,
-                                        message=error_message,
-                                        code=f"{language}_compile_error",
-                                        suggestion=f"Fix the {language} compilation errors shown above",
-                                        language=language,
-                                    ))
-                                    
-                                    if result is not None:
-                                        result.runtime_files_checked += 1
-                                        result.runtime_files_failed += 1
                     
-                    except Exception as e:
-                        logger.error(f"RUNTIME ERROR ({language}): Batch compilation failed - {e}")
-                        for _, file_path in language_files:
-                            issues.append(ValidationIssue(
-                                level=ValidationLevel.RUNTIME,
-                                severity=IssueSeverity.ERROR,
-                                file_path=file_path,
-                                message=f"Compilation check error for {language}: {e}",
-                                code=f"{language}_check_error",
-                                language=language,
-                            ))
-                            if result is not None:
-                                result.runtime_files_checked += 1
-                                result.runtime_files_failed += 1
+                        except Exception as e:
+                            logger.error(f"RUNTIME ERROR ({language}): Batch compilation failed - {e}")
+                            for _, file_path in language_files:
+                                issues.append(ValidationIssue(
+                                    level=ValidationLevel.RUNTIME,
+                                    severity=IssueSeverity.ERROR,
+                                    file_path=file_path,
+                                    message=f"Compilation check error for {language}: {e}",
+                                    code=f"{language}_check_error",
+                                    language=language,
+                                ))
+                                if result is not None:
+                                    result.runtime_files_checked += 1
+                                    result.runtime_files_failed += 1
                 
-                logger.info(f"RUNTIME: Non-Python checks complete for {len(non_py_files)} files")
+                    logger.info(f"RUNTIME: Non-Python checks complete for {len(non_py_files)} files")
         
-        except Exception as e:
-            logger.error(f"Runtime check failed: {e}", exc_info=True)
-            issues.append(ValidationIssue(
-                level=ValidationLevel.RUNTIME,
-                severity=IssueSeverity.ERROR,
-                file_path="<runtime>",
-                message=f"Runtime validation error: {e}",
-                language="python",
-            ))
-        finally:
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as e:
+                logger.error(f"Runtime check failed: {e}", exc_info=True)
+                issues.append(ValidationIssue(
+                    level=ValidationLevel.RUNTIME,
+                    severity=IssueSeverity.ERROR,
+                    file_path="<runtime>",
+                    message=f"Runtime validation error: {e}",
+                    language="python",
+                ))
+            finally:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
         
-        return issues
+            return issues
     
     
     

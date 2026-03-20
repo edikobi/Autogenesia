@@ -24,8 +24,9 @@ from app.agents.feedback_handler import (
     ValidatorFeedback,
     UserFeedback,
     TestErrorFeedback,
-    TestRunFeedback,  # NEW
-    create_test_run_feedback_from_xml,  # NEW
+    TestRunFeedback,
+    JavaSyntaxErrorFeedback,
+    create_test_run_feedback_from_xml,
 )
 
 
@@ -287,6 +288,30 @@ class FeedbackLoopState:
             failed_code=failed_code,
         )
         logger.info(f"FeedbackLoop: Added test error ({test_type})")
+
+    def add_java_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """
+        Add Java syntax error feedback.
+
+        Args:
+            file_path: Path to Java file with errors
+            errors: List of error messages
+            error_lines: List of line numbers
+            was_fix_attempted: Whether auto-fix was attempted
+        """
+        self.feedback_handler.add_java_syntax_error(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        )
+        logger.info(f"FeedbackLoop: Added Java syntax error for {file_path}")
     
     
     # ... конец метода add_test_error ...

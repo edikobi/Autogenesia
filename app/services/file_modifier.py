@@ -934,24 +934,24 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Применяет CODE_BLOCK и стейджит результат в VFS.
-        
+    
         IMPROVED: Validates syntax before staging to prevent cascading failures.
         If applied change breaks file syntax (classes/methods become unparseable),
         attempts to fix with autopep8 first. If fix fails, the change is rejected.
-        
+    
         Args:
             vfs: VirtualFileSystem instance
             block: Распарсенный CODE_BLOCK
-            
+        
         Returns:
             ModifyResult
         """
         # Импорт здесь для избежания circular import
         from app.services.virtual_fs import ChangeType
-        
+    
         # Читаем текущее содержимое через VFS
         existing_content = vfs.read_file(block.file_path) or ""
-        
+    
         # === HANDLE DIFF MODES FOR NON-PYTHON LANGUAGES ===
         if block.mode in self.DIFF_MODES:
             # Determine language from block or file extension
@@ -967,14 +967,14 @@ class FileModifier:
                     '.java': 'java',
                 }
                 language = ext_to_lang.get(ext)
-            
+        
             if not language:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
                     message=f"Cannot determine language for DIFF mode. File: {block.file_path}",
                 )
-            
+        
             # Create MultiLangDiffInstruction
             diff_instruction = MultiLangDiffInstruction(
                 file_path=block.file_path,
@@ -987,127 +987,165 @@ class FileModifier:
                 insert_before=block.insert_before,
                 replace_pattern=block.replace_pattern,
             )
-            
+        
             # Apply multi-language diff
             result = self.apply_multilang_diff(existing_content, diff_instruction)
-            
+        
             # Stage if successful
             if result.success:
                 change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
                 vfs.stage_change(block.file_path, result.new_content, change_type)
                 logger.info(f"Staged DIFF modification to {block.file_path}")
-            
-            return result
         
+            return result
+    
         # === STANDARD PYTHON MODE HANDLING ===
         # Применяем модификацию
         result = self.apply_code_block(existing_content, block)
-        
+    
+        # === DETECT NON-PYTHON FILES FOR LIGHTWEIGHT VALIDATION ===
+        # Check file extension to determine if this is a non-Python file
+        file_ext = Path(block.file_path).suffix.lower()
+        non_python_extensions = {'.java', '.js', '.jsx', '.ts', '.tsx', '.go'}
+        is_non_python_file = file_ext in non_python_extensions
+    
         # === SYNTAX VALIDATION BEFORE STAGING ===
         # Prevents cascading failures when one block breaks file structure
         if result.success and result.new_content:
-            ts_parser = _get_tree_sitter_parser()
-            if ts_parser:
-                try:
-                    # Parse the modified content
-                    parse_result = ts_parser.parse(result.new_content)
+            if is_non_python_file:
+                # For non-Python files: perform lightweight tree-structure validation only
+                language_map = {
+                    '.java': 'java',
+                    '.js': 'javascript',
+                    '.jsx': 'javascript',
+                    '.ts': 'typescript',
+                    '.tsx': 'typescript',
+                    '.go': 'go',
+                }
+                language = language_map.get(file_ext)
+            
+                if language:
+                    is_valid, errors = self._validate_multilang_syntax(result.new_content, language)
+                    if not is_valid:
+                        from app.agents.feedback_handler import StagingErrorType
                     
-                    # Check for critical structural errors
-                    if parse_result.has_errors:
-                        # Determine if errors are critical (affect class/method discovery)
-                        critical_error = False
-                        error_details = []
+                        logger.warning(
+                            f"Syntax validation failed for {block.file_path}: "
+                            f"Applied change breaks file structure. Errors: {errors}"
+                        )
+                        result.success = False
+                        result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                        result.message = (
+                            f"Syntax validation failed: applied change breaks file structure. "
+                            f"This would cause cascading failures for subsequent blocks. "
+                            f"Errors: {'; '.join(errors[:2])}"
+                        )
+                        result.new_content = existing_content  # Revert to original
+                        return result
+            else:
+                # For Python files: use full tree-sitter validation
+                ts_parser = _get_tree_sitter_parser()
+                if ts_parser:
+                    try:
+                        # Parse the modified content
+                        parse_result = ts_parser.parse(result.new_content)
+                    
+                        # Check for critical structural errors
+                        if parse_result.has_errors:
+                            # Determine if errors are critical (affect class/method discovery)
+                            critical_error = False
+                            error_details = []
                         
-                        for error in parse_result.errors[:3]:
-                            error_str = str(error).lower()
-                            # Check if error affects structural elements
-                            if any(keyword in error_str for keyword in ['class', 'def', 'indent', 'expected']):
-                                critical_error = True
-                                error_details.append(str(error))
+                            for error in parse_result.errors[:3]:
+                                error_str = str(error).lower()
+                                # Check if error affects structural elements
+                                if any(keyword in error_str for keyword in ['class', 'def', 'indent', 'expected']):
+                                    critical_error = True
+                                    error_details.append(str(error))
                         
-                        # Also check if we can still find the target class/method
-                        if block.target_class:
-                            class_info = parse_result.get_class(block.target_class)
-                            if class_info is None:
-                                critical_error = True
-                                error_details.append(f"Class '{block.target_class}' no longer parseable after modification")
+                            # Also check if we can still find the target class/method
+                            if block.target_class:
+                                class_info = parse_result.get_class(block.target_class)
+                                if class_info is None:
+                                    critical_error = True
+                                    error_details.append(f"Class '{block.target_class}' no longer parseable after modification")
                         
-                        if critical_error:
-                            # === ATTEMPT REPAIR WITH AUTOPEP8 ===
-                            logger.info(f"Syntax error detected in {block.file_path}, attempting autopep8 repair...")
+                            if critical_error:
+                                # === ATTEMPT REPAIR WITH AUTOPEP8 ===
+                                logger.info(f"Syntax error detected in {block.file_path}, attempting autopep8 repair...")
                             
-                            repaired_content = None
-                            try:
-                                from app.services.syntax_checker import SyntaxChecker
-                                checker = SyntaxChecker(
-                                    use_black=False, 
-                                    use_autopep8=True,
-                                    project_python_path=self.project_python_path
-                                )
-                                fix_result = checker.check_python(result.new_content, auto_fix=True)
+                                repaired_content = None
+                                try:
+                                    from app.services.syntax_checker import SyntaxChecker
+                                    checker = SyntaxChecker(
+                                        use_black=False, 
+                                        use_autopep8=True,
+                                        project_python_path=self.project_python_path
+                                    )
+                                    fix_result = checker.check_python(result.new_content, auto_fix=True)
                                 
-                                if fix_result.was_auto_fixed and fix_result.fixed_content:
-                                    # Verify the fix actually resolved the issue
-                                    fixed_parse = ts_parser.parse(fix_result.fixed_content)
+                                    if fix_result.was_auto_fixed and fix_result.fixed_content:
+                                        # Verify the fix actually resolved the issue
+                                        fixed_parse = ts_parser.parse(fix_result.fixed_content)
                                     
-                                    # Check if critical errors are gone
-                                    still_critical = False
-                                    if fixed_parse.has_errors:
-                                        for error in fixed_parse.errors[:3]:
-                                            error_str = str(error).lower()
-                                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                        # Check if critical errors are gone
+                                        still_critical = False
+                                        if fixed_parse.has_errors:
+                                            for error in fixed_parse.errors[:3]:
+                                                error_str = str(error).lower()
+                                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                    still_critical = True
+                                                    break
+                                    
+                                        # Check if target class is now parseable
+                                        if block.target_class and not still_critical:
+                                            fixed_class_info = fixed_parse.get_class(block.target_class)
+                                            if fixed_class_info is None:
                                                 still_critical = True
-                                                break
                                     
-                                    # Check if target class is now parseable
-                                    if block.target_class and not still_critical:
-                                        fixed_class_info = fixed_parse.get_class(block.target_class)
-                                        if fixed_class_info is None:
-                                            still_critical = True
-                                    
-                                    if not still_critical:
-                                        # Repair succeeded!
-                                        logger.info(f"Autopep8 repair succeeded for {block.file_path}")
-                                        repaired_content = fix_result.fixed_content
-                                        result.new_content = repaired_content
-                                        result.changes_made.append("Auto-repaired syntax with autopep8")
-                                    else:
-                                        logger.warning(f"Autopep8 repair did not resolve critical errors in {block.file_path}")
-                            except ImportError:
-                                logger.debug("SyntaxChecker not available for repair attempt")
-                            except Exception as e:
-                                logger.warning(f"Autopep8 repair failed: {e}")
+                                        if not still_critical:
+                                            # Repair succeeded!
+                                            logger.info(f"Autopep8 repair succeeded for {block.file_path}")
+                                            repaired_content = fix_result.fixed_content
+                                            result.new_content = repaired_content
+                                            result.changes_made.append("Auto-repaired syntax with autopep8")
+                                        else:
+                                            logger.warning(f"Autopep8 repair did not resolve critical errors in {block.file_path}")
+                                except ImportError:
+                                    logger.debug("SyntaxChecker not available for repair attempt")
+                                except Exception as e:
+                                    logger.warning(f"Autopep8 repair failed: {e}")
                             
-                            # If repair failed, reject the change
-                            if repaired_content is None:
-                                from app.agents.feedback_handler import StagingErrorType
+                                # If repair failed, reject the change
+                                if repaired_content is None:
+                                    from app.agents.feedback_handler import StagingErrorType
                                 
-                                logger.warning(
-                                    f"Syntax validation failed for {block.file_path}: "
-                                    f"Applied change breaks file structure. Errors: {error_details}"
-                                )
-                                result.success = False
-                                result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
-                                result.message = (
-                                    f"Syntax validation failed: applied change breaks file structure. "
-                                    f"Autopep8 repair was attempted but failed. "
-                                    f"This would cause cascading failures for subsequent blocks. "
-                                    f"Errors: {'; '.join(error_details[:2])}"
-                                )
-                                result.new_content = existing_content  # Revert to original
-                                return result
-                                
-                except Exception as e:
-                    # Don't block on parser errors, just log
-                    logger.debug(f"Syntax validation skipped due to parser error: {e}")
-        
+                                    logger.warning(
+                                        f"Syntax validation failed for {block.file_path}: "
+                                        f"Applied change breaks file structure. Errors: {error_details}"
+                                    )
+                                    result.success = False
+                                    result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                                    result.message = (
+                                        f"Syntax validation failed: applied change breaks file structure. "
+                                        f"Autopep8 repair was attempted but failed. "
+                                        f"This would cause cascading failures for subsequent blocks. "
+                                        f"Errors: {'; '.join(error_details[:2])}"
+                                    )
+                                    result.new_content = existing_content  # Revert to original
+                                    return result
+                            
+                    except Exception as e:
+                        # Don't block on parser errors, just log
+                        logger.debug(f"Syntax validation skipped due to parser error: {e}")
+    
         # Если успешно — стейджим
         if result.success:
             # Используем ChangeType enum, не строку!
             change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
             vfs.stage_change(block.file_path, result.new_content, change_type)
             logger.info(f"Staged CODE_BLOCK modification to {block.file_path}")
-        
+    
         return result
     
     
@@ -1389,71 +1427,73 @@ class FileModifier:
             )
     
     def _find_multilang_target(
-        self,
-        parser: 'MultiLanguageParser',
-        source_bytes: bytes,
-        language: str,
-        target_class: Optional[str],
-        target_method: Optional[str],
-        target_function: Optional[str]
-    ) -> Optional[Dict[str, Any]]:
-        """Find a target element (class, method, function) in non-Python code using tree-sitter."""
-        try:
-            # Get parser for language
-            ts_parser = parser._get_parser_for_language(language)
-            tree = ts_parser.parse(source_bytes)
+            self,
+            parser: 'MultiLanguageParser',
+            source_bytes: bytes,
+            language: str,
+            target_class: Optional[str],
+            target_method: Optional[str],
+            target_function: Optional[str]
+        ) -> Optional[Dict[str, Any]]:
+            """Find a target element (class, method, function) in non-Python code using tree-sitter."""
+            try:
+                # Get parser for language
+                ts_parser, _ = parser._get_parser_for_language(language)
+                tree = ts_parser.parse(source_bytes)
+        
+                # Get language config
+                lang_config = parser.LANGUAGE_CONFIGS.get(language, {})
+                function_types = lang_config.get('function_types', [])
+                class_types = lang_config.get('class_types', [])
+        
+                # Walk tree to find target
+                def walk_tree(node, current_class=None):
+                    node_name = None
+                    is_class = node.type in class_types
+                    is_function = node.type in function_types
             
-            # Get language config
-            lang_config = parser.LANGUAGE_CONFIGS.get(language, {})
-            function_types = lang_config.get('function_types', [])
-            class_types = lang_config.get('class_types', [])
+                    if is_class or is_function:
+                        node_name = parser._extract_node_name(node, source_bytes, language)
             
-            # Walk tree to find target
-            def walk_tree(node):
-                # Check for class
-                if target_class and node.type in class_types:
-                    name = parser._extract_node_name(node, language)
-                    if name == target_class:
-                        # Found class, now search for method within
-                        if target_method:
-                            for child in node.children:
-                                result = walk_tree(child)
-                                if result and result.get('name') == target_method:
-                                    return result
-                        else:
-                            return {
-                                'node': node,
-                                'start_line': node.start_point[0] + 1,
-                                'end_line': node.end_point[0] + 1,
-                                'name': name,
-                                'kind': 'class'
-                            }
-                
-                # Check for function/method
-                if (target_function or target_method) and node.type in function_types:
-                    name = parser._extract_node_name(node, language)
-                    if name == (target_function or target_method):
+                    # If we are looking for a class and found it
+                    if target_class and not target_method and is_class and node_name == target_class:
                         return {
                             'node': node,
                             'start_line': node.start_point[0] + 1,
                             'end_line': node.end_point[0] + 1,
-                            'name': name,
-                            'kind': 'function'
+                            'name': node_name,
+                            'kind': 'class'
                         }
-                
-                # Recurse
-                for child in node.children:
-                    result = walk_tree(child)
-                    if result:
-                        return result
-                
-                return None
             
-            return walk_tree(tree.root_node)
+                    # Update current class context - FIX: Only update if is_class AND node_name is not None
+                    next_class = node_name if (is_class and node_name is not None) else current_class
+            
+                    # If we are looking for a method/function and found it
+                    target_func_name = target_function or target_method
+                    if target_func_name and is_function and node_name == target_func_name:
+                        # If target_class is specified, we must be inside it
+                        if not target_class or next_class == target_class:
+                            return {
+                                'node': node,
+                                'start_line': node.start_point[0] + 1,
+                                'end_line': node.end_point[0] + 1,
+                                'name': node_name,
+                                'kind': 'function'
+                            }
+            
+                    # Recurse
+                    for child in node.children:
+                        result = walk_tree(child, next_class)
+                        if result:
+                            return result
+            
+                    return None
         
-        except Exception as e:
-            logger.warning(f"Error finding multilang target: {e}")
-            return None
+                return walk_tree(tree.root_node)
+        
+            except Exception as e:
+                logger.warning(f"Error finding multilang target: {e}")
+                return None
     
     def _find_unique_anchor(
         self,
@@ -1464,7 +1504,9 @@ class FileModifier:
     ) -> Dict[str, Any]:
         """
         Find a unique anchor pattern in lines.
-        
+    
+        Supports both single-line and multiline patterns.
+    
         Returns:
             Dict with keys:
                 - found: bool - whether pattern was found at all
@@ -1474,51 +1516,104 @@ class FileModifier:
         """
         if end_line is None:
             end_line = len(lines)
-        
+    
         matches = []
-        
+    
+        # PRIMARY STRATEGY: Single-line substring search
         for i in range(start_line, min(end_line, len(lines))):
             if pattern in lines[i]:
                 matches.append(i)
-        
-        if len(matches) == 0:
-            return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
-        
-        if len(matches) > 1:
+    
+        if len(matches) == 1:
+            return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+        elif len(matches) > 1:
             return {'found': True, 'unique': False, 'line_number': -1, 'count': len(matches)}
+    
+        # SECONDARY STRATEGY: Multiline pattern support
+        if '\n' in pattern:
+            try:
+                # Split pattern by newlines and strip each part
+                pattern_lines = [line.strip() for line in pattern.split('\n')]
+                pattern_lines = [line for line in pattern_lines if line]  # Filter empty lines
+            
+                if len(pattern_lines) == 1:
+                    # After filtering, only one line left - search for that stripped element
+                    single_line = pattern_lines[0]
+                    for i in range(start_line, min(end_line, len(lines))):
+                        if single_line in lines[i]:
+                            matches.append(i)
+                
+                    if len(matches) == 0:
+                        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+                    elif len(matches) == 1:
+                        return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+                    else:
+                        return {'found': True, 'unique': False, 'line_number': -1, 'count': len(matches)}
+            
+                elif len(pattern_lines) > 1:
+                    # Multiple pattern lines - perform sliding window search
+                    multiline_matches = []
+                
+                    for i in range(start_line, min(end_line - len(pattern_lines) + 1, len(lines))):
+                        # Check if pattern_lines[0] is substring of lines[i].strip()
+                        if pattern_lines[0] in lines[i].strip():
+                            # Verify subsequent lines match
+                            all_match = True
+                            for j, p_line in enumerate(pattern_lines[1:], 1):
+                                if i + j >= len(lines):
+                                    all_match = False
+                                    break
+                                if p_line not in lines[i + j].strip():
+                                    all_match = False
+                                    break
+                        
+                            if all_match:
+                                multiline_matches.append(i)
+                
+                    if len(multiline_matches) == 0:
+                        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+                    elif len(multiline_matches) == 1:
+                        return {'found': True, 'unique': True, 'line_number': multiline_matches[0], 'count': 1}
+                    else:
+                        return {'found': True, 'unique': False, 'line_number': -1, 'count': len(multiline_matches)}
         
-        return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+            except Exception as e:
+                logger.debug(f"Multiline pattern search failed: {e}")
+                return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+    
+        # No matches found
+        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
     
     
     def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:
-        """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""
-        try:
-            parser = MultiLanguageParser()
-            ts_parser = parser._get_parser_for_language(language)
-            tree = ts_parser.parse(content.encode('utf-8'))
+            """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""
+            try:
+                parser = MultiLanguageParser()
+                ts_parser, _ = parser._get_parser_for_language(language)
+                tree = ts_parser.parse(content.encode('utf-8'))
             
-            errors = []
+                errors = []
             
-            # Walk tree to find ERROR nodes
-            def walk_tree(node):
-                if node.type == 'ERROR':
-                    line_num = node.start_point[0] + 1
-                    text_snippet = content[node.start_byte:node.end_byte][:30]
-                    errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
+                # Walk tree to find ERROR nodes
+                def walk_tree(node):
+                    if node.type == 'ERROR':
+                        line_num = node.start_point[0] + 1
+                        text_snippet = content[node.start_byte:node.end_byte][:30]
+                        errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
                 
-                for child in node.children:
-                    walk_tree(child)
+                    for child in node.children:
+                        walk_tree(child)
             
-            walk_tree(tree.root_node)
+                walk_tree(tree.root_node)
             
-            return (len(errors) == 0, errors)
+                return (len(errors) == 0, errors)
         
-        except ValueError:
-            # Unsupported language - skip validation
-            return (True, [])
-        except Exception as e:
-            logger.debug(f"Error validating syntax: {e}")
-            return (True, [])
+            except ValueError:
+                # Unsupported language - skip validation
+                return (True, [])
+            except Exception as e:
+                logger.debug(f"Error validating syntax: {e}")
+                return (True, [])
     
     def validate_vfs_state(
         self, 
@@ -1571,20 +1666,33 @@ class FileModifier:
     ) -> ModifyResult:
         """Заменяет весь файл"""
         new_content = instruction.code
-        
-        # Опционально сохраняем импорты
+    
+        # Detect if this is non-Python content by attempting to parse as Python
         if instruction.preserve_imports and existing_content:
-            existing_imports = self._extract_imports(existing_content)
-            new_imports = self._extract_imports(new_content)
-            
-            missing = set(existing_imports) - set(new_imports)
-            if missing:
-                import_block = '\n'.join(sorted(missing))
-                new_content = import_block + '\n\n' + new_content
-        
+            # Try to parse existing content as Python
+            try:
+                ast.parse(existing_content)
+                # Also try to parse new content as Python
+                try:
+                    ast.parse(new_content)
+                    # Both parse successfully - safe to preserve imports
+                    existing_imports = self._extract_imports(existing_content)
+                    new_imports = self._extract_imports(new_content)
+                
+                    missing = set(existing_imports) - set(new_imports)
+                    if missing:
+                        import_block = '\n'.join(sorted(missing))
+                        new_content = import_block + '\n\n' + new_content
+                except SyntaxError:
+                    # New content is not valid Python - skip import preservation
+                    pass
+            except SyntaxError:
+                # Existing content is not valid Python (non-Python file) - skip import preservation
+                pass
+    
         old_lines = len(existing_content.splitlines()) if existing_content else 0
         new_lines = len(new_content.splitlines())
-        
+    
         return ModifyResult(
             success=True,
             new_content=new_content,

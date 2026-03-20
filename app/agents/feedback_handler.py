@@ -19,6 +19,57 @@ from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
 
+
+@dataclass
+class JavaSyntaxErrorFeedback:
+    """
+    Feedback for Java syntax errors that could not be auto-fixed.
+    
+    Indicates that the generated Java code has syntax errors that
+    the auto-fix system could not resolve, and the code must be
+    regenerated with correct syntax.
+    """
+    file_path: str
+    errors: List[str]
+    error_lines: List[Optional[int]]
+    was_fix_attempted: bool = True
+    
+    def to_prompt_format(self) -> str:
+        """Format for inclusion in Orchestrator prompt."""
+        parts = []
+        parts.append("🔴 JAVA SYNTAX ERROR — AUTO-FIX FAILED (Source: Tree-sitter)")
+        parts.append("=" * 60)
+        parts.append(f"File: {self.file_path}")
+        parts.append("Status: Auto-correction was attempted and ROLLED BACK (unfixable errors remain)")
+        parts.append("")
+        parts.append("Errors detected by Tree-sitter:")
+        
+        for error, line in zip(self.errors, self.error_lines):
+            if line is not None:
+                parts.append(f"  • Line {line}: {error}")
+            else:
+                parts.append(f"  • {error}")
+        
+        parts.append("")
+        parts.append("REQUIRED ACTION:")
+        parts.append("Your Java code has SYNTAX ERRORS that cannot be auto-fixed.")
+        parts.append("You MUST regenerate the Java code with correct syntax.")
+        parts.append("Common Java syntax issues: missing semicolons, unmatched braces, incorrect method signatures.")
+        parts.append("Do NOT just rearrange the same code — write syntactically correct Java.")
+        parts.append("=" * 60)
+        
+        return "\n".join(parts)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "source": "java_syntax_error",
+            "file_path": self.file_path,
+            "errors": self.errors,
+            "error_lines": self.error_lines,
+            "was_fix_attempted": self.was_fix_attempted,
+        }
+
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -521,17 +572,29 @@ class ValidationErrorFeedback:
         """Format for Orchestrator prompt."""
         parts = []
         parts.append("=" * 60)
-        
+    
         if self.is_blocking:
             parts.append(f"🔴 BLOCKING VALIDATION ERRORS (Level: {self.validation_level.upper()})")
         else:
             parts.append(f"⚠️ VALIDATION ISSUES (Level: {self.validation_level.upper()})")
-        
+    
         parts.append("=" * 60)
         parts.append(f"Errors: {self.error_count} | Warnings: {self.warning_count}")
         parts.append(f"Affected files: {', '.join(self.affected_files)}")
         parts.append("")
-        
+    
+        # Determine if all issues share the same language
+        all_languages = set()
+        for issue in self.issues:
+            language = issue.get("language")
+            if language:
+                all_languages.add(language)
+    
+        # If all issues share the same language, add it to header
+        if len(all_languages) == 1:
+            language = list(all_languages)[0]
+            parts[-3] = f"🔴 BLOCKING VALIDATION ERRORS (Level: {self.validation_level.upper()} | Language: {language.capitalize()})" if self.is_blocking else f"⚠️ VALIDATION ISSUES (Level: {self.validation_level.upper()} | Language: {language.capitalize()})"
+    
         # Group issues by file
         issues_by_file: Dict[str, List[Dict]] = {}
         for issue in self.issues:
@@ -539,19 +602,25 @@ class ValidationErrorFeedback:
             if file_path not in issues_by_file:
                 issues_by_file[file_path] = []
             issues_by_file[file_path].append(issue)
-        
+    
         for file_path, file_issues in issues_by_file.items():
             parts.append(f"📄 {file_path}:")
             for issue in file_issues[:5]:  # Max 5 issues per file
                 severity = issue.get("severity", "error")
                 line = issue.get("line", "?")
                 message = issue.get("message", "Unknown error")
+                language = issue.get("language")
                 icon = "❌" if severity == "error" else "⚠️"
-                parts.append(f"  {icon} Line {line}: {message[:100]}")
+            
+                # Include language in error line if present
+                if language:
+                    parts.append(f"  {icon} [{language}] Line {line}: {message[:100]}")
+                else:
+                    parts.append(f"  {icon} Line {line}: {message[:100]}")
             if len(file_issues) > 5:
                 parts.append(f"  ... and {len(file_issues) - 5} more issues")
             parts.append("")
-        
+    
         parts.append("YOUR OPTIONS:")
         if self.is_blocking:
             parts.append("1. MUST FIX these errors - code cannot run with syntax errors")
@@ -559,9 +628,9 @@ class ValidationErrorFeedback:
             parts.append("1. FIX → Revise your code to address these issues")
             parts.append("2. EXPLAIN → If issues are in existing code or acceptable, explain why")
             parts.append("3. IGNORE → Mark as known issues (for type hints, legacy code)")
-        
+    
         parts.append("=" * 60)
-        
+    
         return "\n".join(parts)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -854,6 +923,7 @@ class FeedbackHandler:
         self._validation_errors: Optional[ValidationErrorFeedback] = None  # NEW
         self._runtime_test_feedback: Optional[RuntimeTestFeedback] = None  # NEW
         self._staging_errors: List[StagingErrorFeedback] = []
+        self._java_syntax_errors: List[JavaSyntaxErrorFeedback] = []
 
     
     def add_validator_feedback(self, feedback: ValidatorFeedback) -> None:
@@ -954,6 +1024,30 @@ class FeedbackHandler:
             insert_pattern=insert_pattern,
         ))
         logger.info(f"FeedbackHandler: Added staging error for {file_path} (type={error_type.value})")
+
+    def add_java_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """
+        Add Java syntax error feedback.
+
+        Args:
+            file_path: Path to Java file with errors
+            errors: List of error messages
+            error_lines: List of line numbers (may contain None)
+            was_fix_attempted: Whether auto-fix was attempted
+        """
+        self._java_syntax_errors.append(JavaSyntaxErrorFeedback(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        ))
+        logger.info(f"FeedbackHandler: Added Java syntax error for {file_path} ({len(errors)} errors)")
     
     
     
@@ -961,7 +1055,7 @@ class FeedbackHandler:
     def get_feedback_for_orchestrator(self) -> Dict[str, str]:
         """
         Get ALL feedback formatted for Orchestrator prompt.
-        
+    
         Returns dict with SEPARATE keys for each feedback type.
         """
         result = {
@@ -971,37 +1065,43 @@ class FeedbackHandler:
             "test_run_results": "",
             "validation_errors": "",
             "runtime_test_feedback": "",  # NEW
+            "java_syntax_errors": "",
         }
-        
+    
         if self._validator_feedback and not self._validator_feedback.approved:
             result["validator_feedback"] = self._validator_feedback.to_prompt_format()
-        
+    
         if self._user_feedback:
             result["user_feedback"] = self._user_feedback.to_prompt_format()
-        
+    
         if self._test_errors:
             error_parts = []
             for error in self._test_errors:
                 error_parts.append(error.to_prompt_format())
             result["test_errors"] = "\n\n".join(error_parts)
-        
+    
         if self._test_run_results:
             run_parts = []
             for run_result in self._test_run_results:
                 run_parts.append(run_result.to_prompt_format())
             result["test_run_results"] = "\n\n".join(run_parts)
-        
+    
         if self._validation_errors:
             result["validation_errors"] = self._validation_errors.to_prompt_format()
-        
+    
         # NEW: Add runtime test feedback
         if self._runtime_test_feedback:
             result["runtime_test_feedback"] = self._runtime_test_feedback.to_prompt_format()
-        
+    
         if self._staging_errors:
             parts = [e.to_prompt_format() for e in self._staging_errors]
             result["staging_errors"] = "\n\n".join(parts)
-            
+    
+        # NEW: Add Java syntax errors
+        if self._java_syntax_errors:
+            parts = [e.to_prompt_format() for e in self._java_syntax_errors]
+            result["java_syntax_errors"] = "\n\n".join(parts)
+        
         return result
         
     
@@ -1026,7 +1126,8 @@ class FeedbackHandler:
         self._validation_errors = None      # NEW: was missing
         self._runtime_test_feedback = None  # NEW
         self._staging_errors = []
-        logger.info("FeedbackHandler: Cleared all feedback")    
+        self._java_syntax_errors = []
+        logger.info("FeedbackHandler: Cleared all feedback")
     
     
     

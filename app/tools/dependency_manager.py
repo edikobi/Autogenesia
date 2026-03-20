@@ -16,8 +16,9 @@ import re
 import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Set, Tuple
+from typing import Optional, List, Dict, Set, Tuple, Any
 import ast
+import xml.etree.ElementTree as ET
 from enum import Enum
 from importlib.metadata import packages_distributions
 from app.services.language_adapter import AdapterManager
@@ -253,15 +254,17 @@ class DependencyManager:
     - Резолвить import name → pip package name
     """
     
-    def __init__(self, project_root: Optional[Path] = None, auto_create_venv: bool = True):
+    def __init__(self, project_root: Optional[Path] = None, auto_create_venv: bool = True, vfs: Optional[Any] = None):
         """
         Initialize DependencyManager.
         
         Args:
             project_root: Root directory of the project
             auto_create_venv: If True, create .venv if not found
+            vfs: Optional VirtualFileSystem instance for reading staged config files
         """
         self.project_root = Path(project_root) if project_root else Path.cwd()
+        self.vfs = vfs  # Store VFS for reading staged config files
         self._installed_cache = None
         
         # Detect existing venv
@@ -292,7 +295,8 @@ class DependencyManager:
         
         logger.info(
             f"DependencyManager initialized: project={self.project_root}, "
-            f"venv={self._venv_path if self._venv_path else 'not found'}"
+            f"venv={self._venv_path if self._venv_path else 'not found'}, "
+            f"vfs={'enabled' if self.vfs else 'disabled'}"
         )
     
     
@@ -321,6 +325,64 @@ class DependencyManager:
         """Update pip and python paths based on detected venv."""
         self._pip_path = self._get_pip_path()
         self._python_path = self._get_python_path()
+    
+    def _materialize_config_file(self, filename: str) -> bool:
+        """
+        Materializes a config file from VFS to disk if it exists in VFS.
+        
+        This is critical for dependency installation: package managers (npm, mvn, go)
+        need config files on disk, but AI may have generated them only in VFS.
+        
+        If file exists on disk AND in VFS with different content, VFS content wins
+        (it's the authoritative source during the session).
+        
+        Args:
+            filename: Name of config file (e.g., 'pom.xml', 'package.json', 'go.mod')
+            
+        Returns:
+            True if file exists (on disk or was materialized), False otherwise
+        """
+        file_path = self.project_root / filename
+        
+        # If no VFS, just check if file exists on disk
+        if self.vfs is None:
+            return file_path.exists()
+        
+        try:
+            # Try to read from VFS (includes staged files)
+            vfs_content = self.vfs.read_file(filename)
+            
+            if vfs_content is None:
+                # File not in VFS, check disk
+                return file_path.exists()
+            
+            # File exists in VFS - check if we need to materialize
+            if file_path.exists():
+                try:
+                    disk_content = file_path.read_text(encoding='utf-8')
+                    if disk_content == vfs_content:
+                        # Same content, no need to rewrite
+                        logger.debug(f"[DEPS] {filename} already on disk with same content")
+                        return True
+                    else:
+                        # Different content - VFS wins (it's authoritative)
+                        logger.info(f"[DEPS] Updating {filename} on disk from VFS (content differs)")
+                except Exception as e:
+                    logger.warning(f"[DEPS] Could not read existing {filename}: {e}")
+            else:
+                logger.info(f"[DEPS] Creating {filename} on disk from VFS")
+            
+            # Materialize to disk
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(vfs_content, encoding='utf-8')
+            
+            logger.info(f"[DEPS] Materialized {filename} from VFS to disk for dependency installation")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"[DEPS] Failed to materialize {filename} from VFS: {e}")
+            # Fall back to checking if file exists on disk
+            return file_path.exists()
     
     
     def _get_pip_path(self) -> str:
@@ -913,6 +975,31 @@ class DependencyManager:
                     message="npm not available. Install Node.js to use npm packages."
                 )
             
+            # CRITICAL: Materialize package.json from VFS if it exists there but not on disk
+            # This handles the case where AI generated package.json during the session
+            self._materialize_config_file("package.json")
+            
+            # If package.json still doesn't exist, initialize npm project
+            package_json_path = self.project_root / "package.json"
+            if not package_json_path.exists():
+                logger.info(f"No package.json found, initializing npm project at {self.project_root}")
+                init_result = subprocess.run(
+                    ['npm', 'init', '-y'],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=60,
+                    cwd=str(self.project_root)
+                )
+                if init_result.returncode != 0:
+                    logger.warning(f"Failed to initialize npm project: {init_result.stderr}")
+                    return InstallationResult(
+                        package=package_name,
+                        status=InstallResult.FAILED,
+                        message=f"Failed to initialize npm project: {init_result.stderr[:200]}"
+                    )
+            
             # Build command
             cmd = ['npm', 'install']
             
@@ -971,6 +1058,34 @@ class DependencyManager:
                     status=InstallResult.FAILED,
                     message="go not available. Install Go to use Go modules."
                 )
+            
+            # CRITICAL: Materialize go.mod and go.sum from VFS if they exist there but not on disk
+            # This handles the case where AI generated go.mod during the session
+            self._materialize_config_file("go.mod")
+            self._materialize_config_file("go.sum")
+            
+            # If go.mod still doesn't exist, initialize go module
+            go_mod_path = self.project_root / "go.mod"
+            if not go_mod_path.exists():
+                logger.info(f"No go.mod found, initializing Go module at {self.project_root}")
+                # Use directory name as module name
+                module_name = self.project_root.name
+                init_result = subprocess.run(
+                    ['go', 'mod', 'init', module_name],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=60,
+                    cwd=str(self.project_root)
+                )
+                if init_result.returncode != 0:
+                    logger.warning(f"Failed to initialize Go module: {init_result.stderr}")
+                    return InstallationResult(
+                        package=module_path,
+                        status=InstallResult.FAILED,
+                        message=f"Failed to initialize Go module: {init_result.stderr[:200]}"
+                    )
             
             # Build command
             cmd = ['go', 'get', module_path]
@@ -1048,7 +1163,11 @@ class DependencyManager:
                     )
                 )
             
-            # Check if pom.xml exists
+            # CRITICAL: Materialize pom.xml from VFS if it exists there but not on disk
+            # This handles the case where AI generated pom.xml during the session
+            self._materialize_config_file("pom.xml")
+            
+            # Check if pom.xml exists (now checking after potential materialization)
             pom_path = self.project_root / "pom.xml"
             if not pom_path.exists():
                 logger.warning(f"No pom.xml found in {self.project_root}. Cannot add Maven dependency.")
@@ -1056,7 +1175,7 @@ class DependencyManager:
                     package=package_name,
                     status=InstallResult.FAILED,
                     message=(
-                        f"No pom.xml found in project root. "
+                        f"No pom.xml found in project root (checked both disk and VFS). "
                         "Create a pom.xml file or use 'mvn archetype:generate' to initialize a Maven project."
                     )
                 )
@@ -1113,6 +1232,515 @@ class DependencyManager:
                 status=InstallResult.FAILED,
                 message=str(e)
             )
+            
+    def install_dependencies_from_pom_xml(self, pom_content: Optional[str] = None, pom_path: Optional[Path] = None) -> BulkInstallResult:
+        """Parses pom.xml content or file and installs all dependencies using Maven. 
+        Supports reading from VFS (pom_content) or disk (pom_path).
+        
+        IMPORTANT: If pom_content is provided, it is written to pom.xml and KEPT on disk
+        for Maven to use. This is intentional - Maven needs the file to resolve dependencies.
+        """
+        try:
+            # Determine which pom.xml to use
+            if pom_content is not None:
+                # Write VFS content to pom.xml - this file MUST remain for Maven
+                pom_file = self.project_root / "pom.xml"
+                pom_file.write_text(pom_content, encoding='utf-8')
+                logger.info(f"[DEPS] Wrote pom.xml from VFS content ({len(pom_content)} chars)")
+            elif pom_path is not None and pom_path.exists():
+                pom_file = pom_path
+            elif (self.project_root / "pom.xml").exists():
+                pom_file = self.project_root / "pom.xml"
+            else:
+                return BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[],
+                    all_success=False,
+                    message="No pom.xml found"
+                )
+            
+            # Parse pom.xml to extract dependencies
+            try:
+                tree = ET.parse(pom_file)
+                root = tree.getroot()
+            except ET.ParseError as e:
+                logger.error(f"Failed to parse pom.xml: {e}")
+                return BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[],
+                    all_success=False,
+                    message=f"Parse error: {e}"
+                )
+            
+            # Extract namespace if present
+            namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
+            
+            # Find dependencies
+            dependencies = []
+            deps_elem = root.find('.//m:dependencies', namespace)
+            if deps_elem is None:
+                deps_elem = root.find('.//dependencies')
+            
+            if deps_elem is not None:
+                for dep in deps_elem.findall('m:dependency', namespace) or deps_elem.findall('dependency'):
+                    group_id_elem = dep.find('m:groupId', namespace) or dep.find('groupId')
+                    artifact_id_elem = dep.find('m:artifactId', namespace) or dep.find('artifactId')
+                    version_elem = dep.find('m:version', namespace) or dep.find('version')
+                    
+                    if group_id_elem is not None and artifact_id_elem is not None:
+                        group_id = group_id_elem.text
+                        artifact_id = artifact_id_elem.text
+                        version = version_elem.text if version_elem is not None else None
+                        
+                        if group_id and artifact_id:
+                            dependencies.append((group_id, artifact_id, version))
+            
+            if not dependencies:
+                logger.info("No dependencies found in pom.xml")
+                return BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[],
+                    all_success=True,
+                    message="No dependencies to install"
+                )
+            
+            logger.info(f"Found {len(dependencies)} dependencies in pom.xml")
+            
+            # Try to run mvn dependency:resolve for all dependencies at once
+            try:
+                cmd = ['mvn', 'dependency:resolve', '-q']
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=600,
+                    cwd=str(self.project_root)
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"Successfully resolved all {len(dependencies)} Maven dependencies")
+                    return BulkInstallResult(
+                        total=len(dependencies),
+                        successful=len(dependencies),
+                        failed=0,
+                        skipped=0,
+                        results=[],
+                        all_success=True,
+                        message=f"Installed {len(dependencies)} dependencies"
+                    )
+                else:
+                    logger.warning(f"mvn dependency:resolve failed, falling back to individual installation")
+            except subprocess.TimeoutExpired:
+                logger.warning("mvn dependency:resolve timed out, falling back to individual installation")
+            except Exception as e:
+                logger.warning(f"mvn dependency:resolve failed: {e}, falling back to individual installation")
+            
+            # Fallback: install each dependency individually
+            successful = 0
+            failed = 0
+            results = []
+            
+            for group_id, artifact_id, version in dependencies:
+                result = self.install_maven_dependency(group_id, artifact_id, version)
+                results.append(result)
+                if result.status == InstallResult.SUCCESS:
+                    successful += 1
+                else:
+                    failed += 1
+            
+            return BulkInstallResult(
+                total=len(dependencies),
+                successful=successful,
+                failed=failed,
+                skipped=0,
+                results=results,
+                all_success=failed == 0,
+                message=f"Installed {successful}/{len(dependencies)} dependencies"
+            )
+        
+        except subprocess.TimeoutExpired:
+            logger.error("Maven dependency installation timed out")
+            return BulkInstallResult(
+                total=0,
+                successful=0,
+                failed=0,
+                skipped=0,
+                results=[],
+                all_success=False,
+                message="Timeout during Maven dependency installation"
+            )
+        except Exception as e:
+            logger.error(f"Error installing Maven dependencies: {e}")
+            return BulkInstallResult(
+                total=0,
+                successful=0,
+                failed=0,
+                skipped=0,
+                results=[],
+                all_success=False,
+                message=f"Error: {e}"
+            )
+            
+            
+    def install_dependencies_from_package_json(self, package_json_content: Optional[str] = None, package_json_path: Optional[Path] = None) -> BulkInstallResult:
+        """Parses package.json content or file and installs all dependencies using npm. Supports reading from VFS (package_json_content) or disk (package_json_path)."""
+        try:
+            # Determine which package.json to use
+            if package_json_content is not None:
+                # Write VFS content to package.json
+                package_json_file = self.project_root / "package.json"
+                package_json_file.write_text(package_json_content, encoding='utf-8')
+            elif package_json_path is not None and package_json_path.exists():
+                package_json_file = package_json_path
+            elif (self.project_root / "package.json").exists():
+                package_json_file = self.project_root / "package.json"
+            else:
+                return BulkInstallResult(
+                    successful=0,
+                    failed=0,
+                    all_success=False,
+                    message="No package.json found"
+                )
+            
+            # Parse package.json to count dependencies
+            try:
+                with open(package_json_file, 'r', encoding='utf-8') as f:
+                    package_data = json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse package.json: {e}")
+                return BulkInstallResult(
+                    successful=0,
+                    failed=0,
+                    all_success=False,
+                    message=f"Parse error: {e}"
+                )
+            
+            # Count dependencies
+            dependencies = package_data.get('dependencies', {})
+            dev_dependencies = package_data.get('devDependencies', {})
+            total_deps = len(dependencies) + len(dev_dependencies)
+            
+            if total_deps == 0:
+                logger.info("No dependencies found in package.json")
+                return BulkInstallResult(
+                    successful=0,
+                    failed=0,
+                    all_success=True,
+                    message="No dependencies to install"
+                )
+            
+            logger.info(f"Found {total_deps} dependencies in package.json")
+            
+            # Run npm install
+            try:
+                cmd = ['npm', 'install']
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=600,
+                    cwd=str(self.project_root)
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"Successfully installed all {total_deps} npm dependencies")
+                    return BulkInstallResult(
+                        successful=total_deps,
+                        failed=0,
+                        all_success=True,
+                        message=f"Installed {total_deps} dependencies"
+                    )
+                else:
+                    logger.warning(f"npm install failed: {result.stderr}")
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=total_deps,
+                        all_success=False,
+                        message=f"npm install failed: {result.stderr[:200]}"
+                    )
+            
+            except subprocess.TimeoutExpired:
+                logger.error("npm install timed out")
+                return BulkInstallResult(
+                    successful=0,
+                    failed=total_deps,
+                    all_success=False,
+                    message="Timeout during npm install"
+                )
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error: {e}")
+            return BulkInstallResult(
+                successful=0,
+                failed=0,
+                all_success=False,
+                message=f"JSON parse error: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Error installing npm dependencies: {e}")
+            return BulkInstallResult(
+                successful=0,
+                failed=0,
+                all_success=False,
+                message=f"Error: {e}"
+        )
+            
+    def install_dependencies_from_go_mod(self, go_mod_content: Optional[str] = None, go_mod_path: Optional[Path] = None) -> BulkInstallResult:
+        """Parses go.mod content or file and installs all dependencies using go mod download. Supports reading from VFS (go_mod_content) or disk (go_mod_path)."""
+        try:
+            # Determine which go.mod to use
+            if go_mod_content is not None:
+                # Write VFS content to go.mod
+                go_mod_file = self.project_root / "go.mod"
+                go_mod_file.write_text(go_mod_content, encoding='utf-8')
+            elif go_mod_path is not None and go_mod_path.exists():
+                go_mod_file = go_mod_path
+            elif (self.project_root / "go.mod").exists():
+                go_mod_file = self.project_root / "go.mod"
+            else:
+                return BulkInstallResult(
+                    successful=0,
+                    failed=0,
+                    all_success=False,
+                    message="No go.mod found"
+                )
+            
+            # Try to run go mod download
+            try:
+                cmd = ['go', 'mod', 'download']
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=600,
+                    cwd=str(self.project_root)
+                )
+                
+                if result.returncode == 0:
+                    logger.info("Successfully downloaded all Go dependencies")
+                    return BulkInstallResult(
+                        successful=1,
+                        failed=0,
+                        all_success=True,
+                        message="Downloaded all Go dependencies"
+                    )
+                else:
+                    logger.warning(f"go mod download failed, trying go mod tidy")
+                    
+                    # Try go mod tidy
+                    try:
+                        tidy_result = subprocess.run(
+                            ['go', 'mod', 'tidy'],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            timeout=300,
+                            cwd=str(self.project_root)
+                        )
+                        
+                        if tidy_result.returncode == 0:
+                            # Retry download after tidy
+                            retry_result = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=600,
+                                cwd=str(self.project_root)
+                            )
+                            
+                            if retry_result.returncode == 0:
+                                logger.info("Successfully downloaded Go dependencies after tidy")
+                                return BulkInstallResult(
+                                    successful=1,
+                                    failed=0,
+                                    all_success=True,
+                                    message="Downloaded Go dependencies after tidy"
+                                )
+                        
+                    except Exception as e:
+                        logger.warning(f"go mod tidy failed: {e}")
+                    
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=1,
+                        all_success=False,
+                        message=f"go mod download failed: {result.stderr[:200]}"
+                    )
+            
+            except subprocess.TimeoutExpired:
+                logger.error("go mod download timed out")
+                return BulkInstallResult(
+                    successful=0,
+                    failed=1,
+                    all_success=False,
+                    message="Timeout during go mod download"
+                )
+        
+        except Exception as e:
+            logger.error(f"Error installing Go dependencies: {e}")
+            return BulkInstallResult(
+                successful=0,
+                failed=0,
+                all_success=False,
+                message=f"Error: {e}"
+            )
+    
+    def install_all_dependencies_from_config(self, vfs: Optional[Any] = None) -> Dict[str, BulkInstallResult]:
+        """Detects and installs dependencies from all configuration files (pom.xml, package.json, go.mod). 
+        Materializes config files from VFS to disk first, then checks VFS for content, then falls back to disk."""
+        results = {
+            'java': None,
+            'javascript': None,
+            'go': None,
+        }
+        
+        # CRITICAL: Store original VFS and use provided one if available
+        original_vfs = self.vfs
+        if vfs is not None:
+            self.vfs = vfs
+        
+        try:
+            # ========================================================================
+            # PHASE 1: Materialize ALL config files from VFS to disk BEFORE installation
+            # Package managers (npm, mvn, go) work with files on disk, not VFS!
+            # ========================================================================
+            materialized_files = []
+            
+            # Java config files
+            if self._materialize_config_file("pom.xml"):
+                materialized_files.append("pom.xml")
+            if self._materialize_config_file("build.gradle"):
+                materialized_files.append("build.gradle")
+            if self._materialize_config_file("build.gradle.kts"):
+                materialized_files.append("build.gradle.kts")
+            
+            # JavaScript/TypeScript config files
+            if self._materialize_config_file("package.json"):
+                materialized_files.append("package.json")
+            if self._materialize_config_file("package-lock.json"):
+                materialized_files.append("package-lock.json")
+            
+            # Go config files
+            if self._materialize_config_file("go.mod"):
+                materialized_files.append("go.mod")
+            if self._materialize_config_file("go.sum"):
+                materialized_files.append("go.sum")
+            
+            if materialized_files:
+                logger.info(f"[DEPS] Materialized config files from VFS: {materialized_files}")
+            
+            # ========================================================================
+            # PHASE 2: Install dependencies from config files
+            # ========================================================================
+            
+            # Check for Java (pom.xml)
+            try:
+                pom_content = None
+                if self.vfs is not None:
+                    try:
+                        pom_content = self.vfs.read_file("pom.xml")
+                    except Exception:
+                        pass
+                
+                if pom_content is not None:
+                    logger.info("[DEPS] Installing Java dependencies from VFS pom.xml")
+                    results['java'] = self.install_dependencies_from_pom_xml(pom_content=pom_content)
+                elif (self.project_root / "pom.xml").exists():
+                    logger.info("[DEPS] Installing Java dependencies from disk pom.xml")
+                    results['java'] = self.install_dependencies_from_pom_xml()
+            except Exception as e:
+                logger.warning(f"[DEPS] Failed to install Java dependencies: {e}")
+                results['java'] = BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[]
+                )
+            
+            # Check for JavaScript/TypeScript (package.json)
+            try:
+                package_json_content = None
+                if self.vfs is not None:
+                    try:
+                        package_json_content = self.vfs.read_file("package.json")
+                    except Exception:
+                        pass
+                
+                if package_json_content is not None:
+                    logger.info("[DEPS] Installing JavaScript dependencies from VFS package.json")
+                    results['javascript'] = self.install_dependencies_from_package_json(package_json_content=package_json_content)
+                elif (self.project_root / "package.json").exists():
+                    logger.info("[DEPS] Installing JavaScript dependencies from disk package.json")
+                    results['javascript'] = self.install_dependencies_from_package_json()
+            except Exception as e:
+                logger.warning(f"[DEPS] Failed to install JavaScript dependencies: {e}")
+                results['javascript'] = BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[]
+                )
+            
+            # Check for Go (go.mod)
+            try:
+                go_mod_content = None
+                if self.vfs is not None:
+                    try:
+                        go_mod_content = self.vfs.read_file("go.mod")
+                    except Exception:
+                        pass
+                
+                if go_mod_content is not None:
+                    logger.info("[DEPS] Installing Go dependencies from VFS go.mod")
+                    results['go'] = self.install_dependencies_from_go_mod(go_mod_content=go_mod_content)
+                elif (self.project_root / "go.mod").exists():
+                    logger.info("[DEPS] Installing Go dependencies from disk go.mod")
+                    results['go'] = self.install_dependencies_from_go_mod()
+            except Exception as e:
+                logger.warning(f"[DEPS] Failed to install Go dependencies: {e}")
+                results['go'] = BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[]
+                )
+            
+            # Log summary
+            for lang, result in results.items():
+                if result is not None:
+                    if result.all_success:
+                        logger.info(f"[DEPS] {lang}: {result.successful} packages installed successfully")
+                    else:
+                        logger.warning(f"[DEPS] {lang}: {result.successful} succeeded, {result.failed} failed")
+        
+        except Exception as e:
+            logger.error(f"[DEPS] Error in install_all_dependencies_from_config: {e}")
+        finally:
+            # Restore original VFS
+            self.vfs = original_vfs
+        
+        return results
     
     def install_dependency_for_language(self, package_name: str, language: Optional[str] = None, version: Optional[str] = None) -> InstallationResult:
         """
@@ -1124,6 +1752,8 @@ class DependencyManager:
         For Java, attempts to parse Maven coordinates from package_name
         (format: 'groupId:artifactId' or 'groupId:artifactId:version').
         
+        CRITICAL: Materializes config files from VFS to disk before installation.
+        
         Args:
             package_name: Package name or Maven coordinates for Java
             language: Target language (python, javascript, typescript, go, java)
@@ -1133,6 +1763,29 @@ class DependencyManager:
             InstallationResult with status and message
         """
         try:
+            # ========================================================================
+            # PHASE 1: Materialize relevant config files based on language
+            # ========================================================================
+            if language is not None:
+                language_lower = language.lower()
+                
+                # Materialize config files for the target language
+                if language_lower == "java":
+                    self._materialize_config_file("pom.xml")
+                    self._materialize_config_file("build.gradle")
+                    self._materialize_config_file("build.gradle.kts")
+                
+                elif language_lower in ("javascript", "typescript"):
+                    self._materialize_config_file("package.json")
+                    self._materialize_config_file("package-lock.json")
+                
+                elif language_lower == "go":
+                    self._materialize_config_file("go.mod")
+                    self._materialize_config_file("go.sum")
+            
+            # ========================================================================
+            # PHASE 2: Install dependency for the specified language
+            # ========================================================================
             if language is not None:
                 language_lower = language.lower()
                 
@@ -1798,7 +2451,8 @@ def install_dependency_tool(
     package_name: str,
     language: Optional[str] = None,
     version: Optional[str] = None,
-    python_path: Optional[str] = None
+    python_path: Optional[str] = None,
+    vfs: Optional[Any] = None
 ) -> str:
     """
     Installs a dependency for the specified programming language.
@@ -1810,12 +2464,14 @@ def install_dependency_tool(
                  If None, attempts installation for all supported languages.
         version: Optional version specifier
         python_path: Optional path to Python executable (used for Python installs)
+        vfs: Optional VirtualFileSystem instance for reading staged config files
 
     Returns:
         XML formatted result
     """
     try:
-        manager = DependencyManager(Path(project_dir), auto_create_venv=True)
+        # Pass VFS to DependencyManager so it can materialize config files from staging
+        manager = DependencyManager(Path(project_dir), auto_create_venv=True, vfs=vfs)
 
         # Override python_path if provided (relevant for Python installs)
         if python_path and language and language.lower() == "python":

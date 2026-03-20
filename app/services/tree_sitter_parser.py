@@ -711,9 +711,9 @@ class MultiLanguageParser:
         """Recursively walk tree and extract chunks"""
         class_types = config.get("class_types", [])
         function_types = config.get("function_types", [])
-        
+    
         if node.type in class_types:
-            name = self._extract_node_name(node, source_bytes)
+            name = self._extract_node_name(node, source_bytes, language)
             if name:
                 content = self._get_node_content(node, source_bytes)
                 chunks.append(MultiLanguageChunk(
@@ -731,9 +731,9 @@ class MultiLanguageParser:
                 for child in node.children:
                     self._walk_tree(child, source_bytes, file_path, language, config, chunks, parent_name=name)
                 return
-        
+    
         elif node.type in function_types:
-            name = self._extract_node_name(node, source_bytes)
+            name = self._extract_node_name(node, source_bytes, language)
             if name:
                 content = self._get_node_content(node, source_bytes)
                 kind = "method" if parent_name else "function"
@@ -749,7 +749,7 @@ class MultiLanguageParser:
                     language=language
                 ))
                 return
-        
+    
         # Recursively process children
         for child in node.children:
             self._walk_tree(child, source_bytes, file_path, language, config, chunks, parent_name=parent_name)
@@ -767,11 +767,58 @@ class MultiLanguageParser:
             return "\n".join(imports)
         return None
 
-    def _extract_node_name(self, node, source_bytes: bytes) -> Optional[str]:
-        """Extract identifier name from node"""
-        for child in node.children:
-            if child.type == "identifier":
-                return source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
+    def _extract_node_name(self, node, source_bytes: bytes, language: Optional[str] = None) -> Optional[str]:
+        """
+        Extract identifier name from node with language-aware logic.
+    
+        Handles language-specific node structures:
+        - Java method_declaration: method name is the last identifier before parameter_list
+        - Go method_declaration: method name is the identifier not inside parameter_list
+        - Go type_declaration: name is inside first type_spec child
+        - Other languages: first identifier child (default behavior)
+    
+        Args:
+            node: Tree-sitter node
+            source_bytes: Source code as bytes
+            language: Optional language hint for language-specific logic
+        
+        Returns:
+            Identifier string or None if not found
+        """
+        # Default behavior: return first identifier child
+        if node.type != 'method_declaration' and node.type != 'type_declaration':
+            for child in node.children:
+                if child.type == "identifier":
+                    return source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
+            return None
+    
+        # Special handling for method_declaration (Java and Go)
+        if node.type == 'method_declaration':
+            # Collect all identifier and field_identifier children (direct children only)
+            identifiers = []
+            for child in node.children:
+                if child.type in ('identifier', 'field_identifier'):
+                    identifiers.append(child)
+        
+            if identifiers:
+                # Return the LAST identifier (method name is always last before parameter_list)
+                last_identifier = identifiers[-1]
+                return source_bytes[last_identifier.start_byte:last_identifier.end_byte].decode('utf-8', errors='ignore')
+        
+            return None
+    
+        # Special handling for type_declaration (Go class equivalent)
+        if node.type == 'type_declaration':
+            # Find first type_spec child
+            for child in node.children:
+                if child.type == 'type_spec':
+                    # Find first identifier in type_spec
+                    for spec_child in child.children:
+                        if spec_child.type == 'identifier':
+                            return source_bytes[spec_child.start_byte:spec_child.end_byte].decode('utf-8', errors='ignore')
+        
+            return None
+    
         return None
 
     def _get_node_content(self, node, source_bytes: bytes) -> str:
@@ -801,104 +848,228 @@ class MultiLanguageParser:
         )
 
     def find_element(
-        self,
-        source_code: str,
-        language: str,
-        element_name: str,
-        element_type: str = 'function',
-        parent_name: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Find a code element (function, method, class) by name in source code. Returns dict with start_line, end_line, indent, content or None."""
-        try:
-            # Validate language
-            if language not in self.LANGUAGE_CONFIGS:
-                raise ValueError(f"Unsupported language: {language}")
-            
-            # Get parser
-            ts_parser = self._get_parser_for_language(language)
-            tree = ts_parser.parse(source_code.encode('utf-8'))
-            
-            # Get config
-            config = self.LANGUAGE_CONFIGS[language]
-            function_types = config.get('function_types', [])
-            class_types = config.get('class_types', [])
-            
-            # Determine target types
-            if element_type in ('function', 'method'):
-                target_types = function_types
-            elif element_type == 'class':
-                target_types = class_types
-            else:
-                target_types = function_types
-            
-            # Helper to find node by name
-            def find_node_by_name(node, name, types, parent_class=None):
-                if node.type in types:
-                    node_name = self._extract_node_name(node, language)
-                    if node_name == name:
-                        # If parent_class specified, verify we're in that class
-                        if parent_class:
-                            # Check if this node is within parent_class
-                            # (simplified - just return if name matches)
-                            pass
-                        return node
-                
-                for child in node.children:
-                    result = find_node_by_name(child, name, types, parent_class)
-                    if result:
-                        return result
-                
-                return None
-            
-            # Find the element
-            found_node = find_node_by_name(tree.root_node, element_name, target_types, parent_name)
-            
-            if not found_node:
-                return None
-            
-            # Extract content
-            content = source_code[found_node.start_byte:found_node.end_byte]
-            
-            return {
-                'start_line': found_node.start_point[0] + 1,
-                'end_line': found_node.end_point[0] + 1,
-                'indent': found_node.start_point[1],
-                'content': content
-            }
+            self,
+            source_code: str,
+            language: str,
+            element_name: str,
+            element_type: str = 'function',
+            parent_name: Optional[str] = None
+        ) -> Optional[Dict[str, Any]]:
+            """Find a code element (function, method, class) by name in source code. Returns dict with start_line, end_line, indent, content or None."""
+            try:
+                # Validate language
+                if language not in self.LANGUAGE_CONFIGS:
+                    raise ValueError(f"Unsupported language: {language}")
         
-        except Exception as e:
-            logger.warning(f"Error finding element: {e}")
-            return None
+                # Get parser
+                ts_parser, _ = self._get_parser_for_language(language)
+                source_bytes = source_code.encode('utf-8')
+                tree = ts_parser.parse(source_bytes)
+        
+                # Get config
+                config = self.LANGUAGE_CONFIGS[language]
+                function_types = config.get('function_types', [])
+                class_types = config.get('class_types', [])
+        
+                # Determine target types
+                if element_type in ('function', 'method'):
+                    target_types = function_types
+                elif element_type == 'class':
+                    target_types = class_types
+                else:
+                    target_types = function_types
+        
+                # Helper to find node by name
+                def find_node(node, target_name, types, current_parent=None):
+                    node_name = None
+                    is_class = node.type in class_types
+                    is_target_type = node.type in types
+            
+                    if is_class or is_target_type:
+                        node_name = self._extract_node_name(node, source_bytes, language)
+            
+                    next_parent = node_name if is_class else current_parent
+            
+                    if is_target_type and node_name == target_name:
+                        if parent_name is None or current_parent == parent_name:
+                            return node
+            
+                    for child in node.children:
+                        result = find_node(child, target_name, types, next_parent)
+                        if result:
+                            return result
+            
+                    return None
+        
+                # Find the element
+                found_node = find_node(tree.root_node, element_name, target_types)
+        
+                if not found_node:
+                    return None
+        
+                # Extract content
+                content = source_bytes[found_node.start_byte:found_node.end_byte].decode('utf-8', errors='ignore')
+        
+                return {
+                    'start_line': found_node.start_point[0] + 1,
+                    'end_line': found_node.end_point[0] + 1,
+                    'indent': found_node.start_point[1],
+                    'content': content
+                }
+    
+            except Exception as e:
+                logger.warning(f"Error finding element: {e}")
+                return None
 
     def validate_syntax(self, source_code: str, language: str) -> Tuple[bool, List[str]]:
-        """Validate syntax of source code using tree-sitter. Returns (is_valid, list_of_errors)."""
-        try:
-            # Get parser
-            ts_parser = self._get_parser_for_language(language)
-            tree = ts_parser.parse(source_code.encode('utf-8'))
-            
-            errors = []
-            
-            # Walk tree to find ERROR nodes
-            def walk_tree(node):
-                if node.type == 'ERROR':
-                    line_num = node.start_point[0] + 1
-                    text_snippet = source_code[node.start_byte:node.end_byte][:30]
-                    errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
-                
-                for child in node.children:
-                    walk_tree(child)
-            
-            walk_tree(tree.root_node)
-            
-            return (len(errors) == 0, errors)
+            """Validate syntax of source code using tree-sitter. Returns (is_valid, list_of_errors)."""
+            try:
+                # Get parser
+                parser_info = self._get_parser_for_language(language)
+                ts_parser = parser_info[0]
+                tree = ts_parser.parse(source_code.encode('utf-8'))
         
-        except ValueError:
-            # Unsupported language
-            return (True, [])
+                errors = []
+        
+                # Walk tree to find ERROR nodes and missing tokens
+                def walk_tree(node):
+                    if node.type == 'ERROR':
+                        line_num = node.start_point[0] + 1
+                        text_snippet = source_code[node.start_byte:node.end_byte][:30]
+                        errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
+                    elif getattr(node, 'is_missing', False):
+                        line_num = node.start_point[0] + 1
+                        errors.append(f"Line {line_num}: Missing '{node.type}'")
+            
+                    for child in node.children:
+                        walk_tree(child)
+        
+                walk_tree(tree.root_node)
+        
+                return (len(errors) == 0, errors)
+    
+            except ValueError:
+                # Unsupported language
+                return (True, [])
+            except Exception as e:
+                logger.debug(f"Error validating syntax: {e}")
+                return (True, [])
+
+    def auto_fix_syntax(self, source_code: str, language: str) -> Tuple[str, bool]:
+        """
+        Fix syntax errors in source code using a language-specific strategy.
+    
+        For Java: Uses tree-sitter to detect missing semicolons and applies
+        a safe, line-aware insertion strategy.
+    
+        For other languages: Returns code unchanged (no fixes attempted).
+    
+        Args:
+            source_code: The source code to fix.
+            language: The language of the source code.
+    
+        Returns:
+            Tuple[str, bool]: (fixed_code, was_fixed)
+        """
+        try:
+            # Only attempt fixes for Java
+            if language.lower() != "java":
+                return (source_code, False)
+        
+            # Get parser for Java
+            try:
+                parser_info = self._get_parser_for_language(language)
+                parser = parser_info[0]
+            except ValueError:
+                logger.warning(f"No parser available for {language}")
+                return (source_code, False)
+        
+            source_bytes = source_code.encode('utf-8')
+            tree = parser.parse(source_bytes)
+        
+            # === STEP 1: Find missing semicolons ===
+            missing_semicolon_lines = set()
+        
+            def collect_missing_semicolons(node):
+                """Recursively find is_missing nodes with type ';'"""
+                if node.is_missing and node.type == ";":
+                    # Get the 1-indexed line number where semicolon is expected
+                    line_num = node.start_point[0] + 1
+                    missing_semicolon_lines.add(line_num)
+            
+                for child in node.children:
+                    collect_missing_semicolons(child)
+        
+            collect_missing_semicolons(tree.root_node)
+        
+            if not missing_semicolon_lines:
+                return (source_code, False)
+        
+            # === STEP 2: Split source into lines ===
+            lines = source_code.split('\n')
+            modified = False
+        
+            # === STEP 3: Process each line with missing semicolon ===
+            for line_num in sorted(missing_semicolon_lines):
+                # Convert to 0-indexed
+                line_idx = line_num - 1
+            
+                if line_idx < 0 or line_idx >= len(lines):
+                    continue
+            
+                line = lines[line_idx]
+                stripped = line.rstrip()
+            
+                # === SAFETY CHECKS ===
+            
+                # Check 1: Line is not empty
+                if not stripped:
+                    continue
+            
+                # Check 2: Line does not already end with ; { } ,
+                if stripped[-1] in (';', '{', '}', ','):
+                    continue
+            
+                # Check 3: Line is not a comment
+                stripped_lstrip = stripped.lstrip()
+                if stripped_lstrip.startswith('//') or stripped_lstrip.startswith('/*') or stripped_lstrip.startswith('*'):
+                    continue
+            
+                # Check 4: Line does not start with Java block keywords
+                block_keywords = (
+                    'if', 'else', 'for', 'while', 'do', 'try', 'catch', 'finally',
+                    'switch', 'class', 'interface', 'enum', '@',
+                    'public', 'private', 'protected', 'static', 'abstract',
+                    'synchronized', 'native'
+                )
+            
+                # Check if line starts with any keyword
+                first_word = stripped_lstrip.split()[0] if stripped_lstrip.split() else ''
+                if first_word in block_keywords:
+                    # Additional check: if line contains { at the end, skip it
+                    if '{' in stripped:
+                        continue
+            
+                # Check 5: Line is not a standalone { or }
+                if stripped in ('{', '}'):
+                    continue
+            
+                # === INSERT SEMICOLON ===
+                # Preserve trailing whitespace/newline
+                trailing_ws = line[len(stripped):]
+                lines[line_idx] = stripped + ';' + trailing_ws
+                modified = True
+        
+            if not modified:
+                return (source_code, False)
+        
+            # === STEP 5: Reconstruct source ===
+            fixed_code = '\n'.join(lines)
+            return (fixed_code, True)
+    
         except Exception as e:
-            logger.debug(f"Error validating syntax: {e}")
-            return (True, [])
+            logger.warning(f"Failed to auto-fix syntax for {language}: {e}")
+            return (source_code, False)
         
 
 

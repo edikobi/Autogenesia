@@ -301,26 +301,139 @@ class SyntaxChecker:
             result.is_valid = False
         
         return result
+
+    def check_java(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
+        """
+        Validates Java source code syntax using tree-sitter and attempts auto-fix if errors are found.
+    
+        Performs full static analysis with auto-correction retry/rollback and clear error logging.
+
+        Args:
+            code: Java source code string
+            auto_fix: Whether to attempt auto-fixes on validation errors
+
+        Returns:
+            SyntaxCheckResult with validation results and optional fixes
+            - is_valid: True if code is valid
+            - fixed_content: Non-None only if auto-fix succeeded and is_valid=True
+            - was_auto_fixed: True only if a fix was successfully applied and re-validated
+            - original_content: Always the original code argument
+            - issues: List of SyntaxIssue objects with line/column info extracted from errors
+        """
+        try:
+            from app.services.tree_sitter_parser import MultiLanguageParser
+
+            ts_parser = MultiLanguageParser()
+        
+            # Step 1: Parse and validate using tree-sitter
+            is_valid, errors = ts_parser.validate_syntax(code, 'java')
+
+            # Step 2: If valid, return success
+            if is_valid:
+                return SyntaxCheckResult(is_valid=True, original_content=code)
+
+            # Step 3: If invalid and auto_fix=False, build result with issues
+            if not auto_fix:
+                result = SyntaxCheckResult(is_valid=False, original_content=code)
+                for error_msg in errors:
+                    # Extract line number using regex
+                    line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                    line_num = int(line_match.group(1)) if line_match else None
+                
+                    issue = SyntaxIssue(
+                        issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                        message=error_msg,
+                        line=line_num,
+                        is_critical=True,
+                    )
+                    result.issues.append(issue)
+                return result
+
+            # Step 4: If invalid and auto_fix=True, attempt fix with rollback
+            fixed_code, was_fixed = ts_parser.auto_fix_syntax(code, 'java')
+
+            if was_fixed:
+                # Re-validate the fixed code
+                is_valid_fixed, fixed_errors = ts_parser.validate_syntax(fixed_code, 'java')
+            
+                if is_valid_fixed:
+                    # Success: return fixed code
+                    return SyntaxCheckResult(
+                        is_valid=True,
+                        original_content=code,
+                        fixed_content=fixed_code,
+                        was_auto_fixed=True,
+                        applied_fixes=["Tree-sitter auto-fix (Java)"]
+                    )
+                else:
+                    # Re-validation failed: rollback
+                    logger.warning(
+                        f"[JAVA SYNTAX] Auto-correction failed and was rolled back. "
+                        f"Errors in '<unknown>': {fixed_errors}"
+                    )
+                
+                    # Build result from re-validation errors (not original errors)
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in fixed_errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                    
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    result.was_auto_fixed = False
+                    return result
+            else:
+                # was_fixed=False: auto-fix did not produce changes
+                logger.warning(
+                    f"[JAVA SYNTAX] Auto-correction failed and was rolled back. "
+                    f"Errors in '<unknown>': {errors}"
+                )
+            
+                result = SyntaxCheckResult(is_valid=False, original_content=code)
+                for error_msg in errors:
+                    line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                    line_num = int(line_match.group(1)) if line_match else None
+                
+                    issue = SyntaxIssue(
+                        issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                        message=error_msg,
+                        line=line_num,
+                        is_critical=True,
+                    )
+                    result.issues.append(issue)
+                result.was_auto_fixed = False
+                return result
+
+        except Exception as e:
+            logger.warning(f"Tree-sitter validation failed for Java: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
     
     def check_by_extension(self, content: str, file_path: str, 
                           auto_fix: bool = False) -> SyntaxCheckResult:
         """
         Проверяет синтаксис по расширению файла.
-        
+    
         Args:
             content: Содержимое файла
             file_path: Путь к файлу (для определения типа)
             auto_fix: Попытаться исправить критические проблемы
-            
+        
         Returns:
             SyntaxCheckResult с результатами проверки
         """
         ext = Path(file_path).suffix.lower()
-        
+    
         if ext == '.py':
             return self.check_python(content, auto_fix=auto_fix)
         elif ext == '.json':
             return self.check_json(content)
+        elif ext == '.java':
+            return self.check_java(content, auto_fix=auto_fix)
         else:
             # Для неизвестных типов — просто возвращаем "валидно"
             return SyntaxCheckResult(is_valid=True, original_content=content)
