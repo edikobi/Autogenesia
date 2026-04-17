@@ -23,6 +23,7 @@ from enum import Enum
 from app.services.tree_sitter_parser import MultiLanguageParser
 import ast
 import textwrap
+from app.services.syntax_fixer_agent import attempt_ai_syntax_fix, extract_surrounding_context
   
 
 # После строки: from enum import Enum
@@ -59,38 +60,50 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
     
     error_lower = error_message.lower()
     
-    # Check patterns in order
+    # 1. SPECIFIC TARGETING ERRORS (Highest priority)
+    # If something is "not found", it's a targeting error, even if it caused structure breakage
+    if "method" in error_lower and "not found" in error_lower:
+        return StagingErrorType.METHOD_NOT_FOUND
+    if "function" in error_lower and "not found" in error_lower:
+        return StagingErrorType.FUNCTION_NOT_FOUND
     if "class" in error_lower and "not found" in error_lower:
         return StagingErrorType.CLASS_NOT_FOUND
-    elif "method" in error_lower and "not found" in error_lower:
-        return StagingErrorType.METHOD_NOT_FOUND
-    elif "function" in error_lower and "not found" in error_lower:
-        return StagingErrorType.FUNCTION_NOT_FOUND
-    elif "pattern" in error_lower and "not found" in error_lower:
+    if "pattern" in error_lower and "not found" in error_lower:
         return StagingErrorType.INSERT_PATTERN_NOT_FOUND
-    elif "target_class" in error_lower and "required" in error_lower:
+    if "attribute" in error_lower and "not found" in error_lower:
+        return StagingErrorType.INSERT_PATTERN_NOT_FOUND
+
+    # 2. INTEGRITY ERRORS (Code loss detection)
+    if "integrity" in error_lower or "unintended deletion" in error_lower or "code loss" in error_lower:
+        return StagingErrorType.INTEGRITY_FAILURE
+    if "disappeared" in error_lower and ("method" in error_lower or "class" in error_lower):
+        return StagingErrorType.INTEGRITY_FAILURE
+
+    # 3. SYNTAX/STRUCTURE ERRORS
+    if "pre-existing corruption" in error_lower or "file already broken" in error_lower:
+        return StagingErrorType.PRE_EXISTING_CORRUPTION
+    if "structural errors detected" in error_lower or "structure validation failed" in error_lower:
+        return StagingErrorType.SYNTAX_VALIDATION_FAILED
+    if "syntax validation failed" in error_lower or "ai fix produced" in error_lower:
+        return StagingErrorType.SYNTAX_VALIDATION_FAILED
+    if "ai syntax fixer crashed" in error_lower:
+        return StagingErrorType.SYNTAX_VALIDATION_FAILED
+    
+    # 4. MISSING PARAMETERS
+    if "target_class" in error_lower and "required" in error_lower:
         return StagingErrorType.MISSING_TARGET_CLASS
-    elif "target_method" in error_lower and "required" in error_lower:
+    if "target_method" in error_lower and "required" in error_lower:
         return StagingErrorType.MISSING_TARGET_METHOD
-    elif "target_function" in error_lower and "required" in error_lower:
+    if "target_function" in error_lower and "required" in error_lower:
         return StagingErrorType.MISSING_TARGET_FUNCTION
-    elif "unknown mode" in error_lower or "valid modes" in error_lower:
+    
+    # 5. MISC
+    if "unknown mode" in error_lower or "valid modes" in error_lower:
         return StagingErrorType.INVALID_MODE
-    elif "parser" in error_lower and "not available" in error_lower:
+    if "parser" in error_lower and "not available" in error_lower:
         return StagingErrorType.PARSER_UNAVAILABLE
-    # Check for new REPLACE_IN_* modes
-    elif mode and mode.startswith("REPLACE_IN_"):
-        if "class" in error_lower and "not found" in error_lower:
-            return StagingErrorType.CLASS_NOT_FOUND
-        elif "method" in error_lower and "not found" in error_lower:
-            return StagingErrorType.METHOD_NOT_FOUND
-        elif "function" in error_lower and "not found" in error_lower:
-            return StagingErrorType.FUNCTION_NOT_FOUND
-        elif "pattern" in error_lower and "not found" in error_lower:
-            return StagingErrorType.INSERT_PATTERN_NOT_FOUND
-        elif "attribute" in error_lower and "not found" in error_lower:
-            return StagingErrorType.INSERT_PATTERN_NOT_FOUND
-    elif mode == "ADD_NEW_FUNCTION" or mode == "CREATE_FUNCTION":
+    
+    if mode == "ADD_NEW_FUNCTION" or mode == "CREATE_FUNCTION":
         if "must be a function definition" in error_lower:
             return StagingErrorType.INVALID_CODE_FORMAT
     
@@ -151,6 +164,7 @@ class ModifyResult:
     warnings: List[str] = field(default_factory=list)
     lines_added: int = 0
     lines_removed: int = 0
+    error_type: Optional[Any] = None  # StagingErrorType when validation fails
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -384,6 +398,11 @@ class FileModifier:
     
     # DIFF modes for non-Python languages (handled separately via apply_multilang_diff)
     DIFF_MODES: set = {"DIFF_INSERT", "DIFF_REPLACE"}
+    # Extensions for non-code files that bypass Tree-sitter validation
+    PLAIN_TEXT_EXTENSIONS: frozenset[str] = frozenset({
+        '.md', '.markdown', '.txt', '.rst', '.mod', '.sum', 
+        '.xml', '.toml', '.yaml', '.yml', '.ini', '.env', '.cfg', '.conf'
+    })
 
     def __init__(self, default_indent: int = 4, project_python_path: Optional[str] = None):
         """
@@ -439,9 +458,6 @@ class FileModifier:
                 
             elif mode == ModifyMode.REPLACE_IMPORT:
                 result = self._replace_import(existing_content, instruction)
-            
-            elif mode == ModifyMode.PATCH_METHOD:
-                result = self._patch_method(existing_content, instruction)
             
             elif mode == ModifyMode.PATCH_METHOD:
                 result = self._patch_method(existing_content, instruction)
@@ -675,131 +691,142 @@ class FileModifier:
     
     
     def apply_to_vfs(
-        self,
-        vfs: 'VirtualFileSystem',
-        file_path: str,
-        instruction: ModifyInstruction,
-    ) -> ModifyResult:
-        """
-        Применяет модификацию и стейджит результат в VFS.
+            self,
+            vfs: 'VirtualFileSystem',
+            file_path: str,
+            instruction: ModifyInstruction,
+        ) -> ModifyResult:
+            """
+            Применяет модификацию и стейджит результат в VFS.
+
+            IMPROVED: Validates syntax before staging to prevent cascading failures.
+            If applied change breaks file syntax, attempts to fix with autopep8 first.
+            Skips Tree-sitter validation for plain-text files.
+
+            Args:
+                vfs: VirtualFileSystem instance
+                file_path: Путь к файлу
+                instruction: Инструкция модификации
+    
+            Returns:
+                ModifyResult
+            """
+            from app.services.virtual_fs import ChangeType
         
-        IMPROVED: Validates syntax before staging to prevent cascading failures.
-        If applied change breaks file syntax, attempts to fix with autopep8 first.
-        
-        Args:
-            vfs: VirtualFileSystem instance
-            file_path: Путь к файлу
-            instruction: Инструкция модификации
-            
-        Returns:
-            ModifyResult
-        """
-        # Импорт здесь для избежания circular import
-        from app.services.virtual_fs import ChangeType
-        
-        # Читаем текущее содержимое через VFS
-        existing_content = vfs.read_file(file_path) or ""
-        
-        # Применяем модификацию
-        result = self.apply(existing_content, instruction)
-        
-        # === SYNTAX VALIDATION BEFORE STAGING ===
-        if result.success and result.new_content:
-            ts_parser = _get_tree_sitter_parser()
-            if ts_parser:
-                try:
-                    parse_result = ts_parser.parse(result.new_content)
-                    
-                    if parse_result.has_errors:
-                        # Check for critical errors
-                        critical_error = False
-                        error_details = []
-                        
-                        for error in parse_result.errors[:3]:
-                            error_str = str(error).lower()
-                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
-                                critical_error = True
-                                error_details.append(str(error))
-                        
-                        # Check target class if specified
-                        if instruction.target_class:
-                            class_info = parse_result.get_class(instruction.target_class)
-                            if class_info is None:
-                                critical_error = True
-                                error_details.append(f"Class '{instruction.target_class}' no longer parseable")
-                        
-                        if critical_error:
-                            # Attempt repair with autopep8
-                            logger.info(f"Syntax error detected in {file_path}, attempting autopep8 repair...")
-                            
-                            repaired_content = None
-                            try:
-                                from app.services.syntax_checker import SyntaxChecker
-                                checker = SyntaxChecker(
-                                    use_black=False,
-                                    use_autopep8=True,
-                                    project_python_path=self.project_python_path
-                                )
-                                fix_result = checker.check_python(result.new_content, auto_fix=True)
-                                
-                                if fix_result.was_auto_fixed and fix_result.fixed_content:
-                                    fixed_parse = ts_parser.parse(fix_result.fixed_content)
-                                    
-                                    still_critical = False
-                                    if fixed_parse.has_errors:
-                                        for error in fixed_parse.errors[:3]:
-                                            error_str = str(error).lower()
-                                            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+            existing_content = vfs.read_file(file_path) or ""
+            result = self.apply(existing_content, instruction)
+            file_ext = Path(file_path).suffix.lower()
+
+            # BRANCH A: plain-text files — skip all validation, stage directly
+            if file_ext in self.PLAIN_TEXT_EXTENSIONS:
+                if result.success:
+                    change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                    vfs.stage_change(file_path, result.new_content, change_type)
+                    logger.info(f"Staged plain-text modification to {file_path}")
+                return result
+
+            # BRANCH B: non-Python code files (Go/Java/JS/TS) — lightweight validation only
+            non_python_extensions = {'.java', '.js', '.jsx', '.ts', '.tsx', '.go'}
+            if file_ext in non_python_extensions:
+                if result.success and result.new_content:
+                    language_map = {
+                        '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
+                        '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+                    }
+                    language = language_map.get(file_ext)
+                    if language:
+                        is_valid, errors = self._validate_multilang_syntax(result.new_content, language)
+                        if not is_valid:
+                            from app.agents.feedback_handler import StagingErrorType
+                            logger.warning(f"Syntax validation failed for {file_path}: {errors}")
+                            result.success = False
+                            result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                            result.message = (
+                                f"Syntax validation failed: applied change breaks file structure. "
+                                f"This would cause cascading failures for subsequent blocks. "
+                                f"Errors: {'; '.join(errors[:2])}"
+                            )
+                            result.new_content = existing_content
+                            return result
+                # Stage if successful
+                if result.success:
+                    change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                    vfs.stage_change(file_path, result.new_content, change_type)
+                    logger.info(f"Staged modification to {file_path}")
+                return result
+
+            # BRANCH C: Python files — full Tree-sitter + autopep8 repair
+            if result.success and result.new_content:
+                ts_parser = _get_tree_sitter_parser()
+                if ts_parser:
+                    try:
+                        parse_result = ts_parser.parse(result.new_content)
+                        if parse_result.has_errors:
+                            critical_error = False
+                            error_details = []
+                            for error in parse_result.errors[:3]:
+                                error_str = str(error).lower()
+                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                    critical_error = True
+                                    error_details.append(str(error))
+                            if instruction.target_class:
+                                class_info = parse_result.get_class(instruction.target_class)
+                                if class_info is None:
+                                    critical_error = True
+                                    error_details.append(f"Class '{instruction.target_class}' no longer parseable")
+                            if critical_error:
+                                logger.info(f"Syntax error detected in {file_path}, attempting autopep8 repair...")
+                                repaired_content = None
+                                try:
+                                    from app.services.syntax_checker import SyntaxChecker
+                                    checker = SyntaxChecker(use_black=False, use_autopep8=True,
+                                                           project_python_path=self.project_python_path)
+                                    fix_result = checker.check_python(result.new_content, auto_fix=True)
+                                    if fix_result.was_auto_fixed and fix_result.fixed_content:
+                                        fixed_parse = ts_parser.parse(fix_result.fixed_content)
+                                        still_critical = False
+                                        if fixed_parse.has_errors:
+                                            for error in fixed_parse.errors[:3]:
+                                                error_str = str(error).lower()
+                                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                    still_critical = True
+                                                    break
+                                        if instruction.target_class and not still_critical:
+                                            if fixed_parse.get_class(instruction.target_class) is None:
                                                 still_critical = True
-                                                break
-                                    
-                                    if instruction.target_class and not still_critical:
-                                        if fixed_parse.get_class(instruction.target_class) is None:
-                                            still_critical = True
-                                    
-                                    if not still_critical:
-                                        logger.info(f"Autopep8 repair succeeded for {file_path}")
-                                        repaired_content = fix_result.fixed_content
-                                        result.new_content = repaired_content
-                                        result.changes_made.append("Auto-repaired syntax with autopep8")
-                                    else:
-                                        logger.warning(f"Autopep8 repair did not resolve critical errors in {file_path}")
-                            except ImportError:
-                                logger.debug("SyntaxChecker not available for repair attempt")
-                            except Exception as e:
-                                logger.warning(f"Autopep8 repair failed: {e}")
-                            
-                            # If repair failed, reject the change
-                            if repaired_content is None:
-                                from app.agents.feedback_handler import StagingErrorType
-                                
-                                logger.warning(
-                                    f"Syntax validation failed for {file_path}: "
-                                    f"Applied change breaks file structure. Errors: {error_details}"
-                                )
-                                result.success = False
-                                result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
-                                result.message = (
-                                    f"Syntax validation failed: applied change breaks file structure. "
-                                    f"Autopep8 repair was attempted but failed. "
-                                    f"This would cause cascading failures for subsequent blocks. "
-                                    f"Errors: {'; '.join(error_details[:2])}"
-                                )
-                                result.new_content = existing_content  # Revert to original
-                                return result
-                                
-                except Exception as e:
-                    # Don't block on parser errors, just log
-                    logger.debug(f"Syntax validation skipped due to parser error: {e}")
-        
-        # Если успешно — стейджим
-        if result.success:
-            # Используем ChangeType enum, не строку!
-            change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
-            vfs.stage_change(file_path, result.new_content, change_type)
-            logger.info(f"Staged modification to {file_path}")
-        
-        return result
+                                        if not still_critical:
+                                            logger.info(f"Autopep8 repair succeeded for {file_path}")
+                                            repaired_content = fix_result.fixed_content
+                                            result.new_content = repaired_content
+                                            result.changes_made.append("Auto-repaired syntax with autopep8")
+                                        else:
+                                            logger.warning(f"Autopep8 repair did not resolve critical errors in {file_path}")
+                                except ImportError:
+                                    logger.debug("SyntaxChecker not available for repair attempt")
+                                except Exception as e:
+                                    logger.warning(f"Autopep8 repair failed: {e}")
+                                if repaired_content is None:
+                                    from app.agents.feedback_handler import StagingErrorType
+                                    logger.warning(f"Syntax validation failed for {file_path}: {error_details}")
+                                    result.success = False
+                                    result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                                    result.message = (
+                                        f"Syntax validation failed: applied change breaks file structure. "
+                                        f"Autopep8 repair was attempted but failed. "
+                                        f"This would cause cascading failures for subsequent blocks. "
+                                        f"Errors: {'; '.join(error_details[:2])}"
+                                    )
+                                    result.new_content = existing_content
+                                    return result
+                    except Exception as e:
+                        logger.debug(f"Syntax validation skipped due to parser error: {e}")
+
+            # Final staging for Python files that passed or had non-critical errors
+            if result.success:
+                change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                vfs.stage_change(file_path, result.new_content, change_type)
+                logger.info(f"Staged modification to {file_path}")
+            return result
     
     # ========================================================================
     # CODE_BLOCK APPLICATION (Agent Mode)
@@ -928,225 +955,438 @@ class FileModifier:
     
     
     def apply_code_block_to_vfs(
-        self,
-        vfs: 'VirtualFileSystem',
-        block: ParsedCodeBlock,
-    ) -> ModifyResult:
-        """
-        Применяет CODE_BLOCK и стейджит результат в VFS.
-    
-        IMPROVED: Validates syntax before staging to prevent cascading failures.
-        If applied change breaks file syntax (classes/methods become unparseable),
-        attempts to fix with autopep8 first. If fix fails, the change is rejected.
-    
-        Args:
-            vfs: VirtualFileSystem instance
-            block: Распарсенный CODE_BLOCK
+            self,
+            vfs: 'VirtualFileSystem',
+            block: ParsedCodeBlock,
+        ) -> ModifyResult:
+            """
+            Применяет CODE_BLOCK и стейджит результат в VFS.
+
+            IMPROVED: Validates syntax before staging to prevent cascading failures.
+            If applied change breaks file syntax (classes/methods become unparseable),
+            attempts to fix with autopep8 first. If fix fails, calls AI syntax fixer
+            (up to 2 attempts). If all fixes fail, the change is rejected.
+            Skips Tree-sitter validation for plain-text files.
+
+            Args:
+                vfs: VirtualFileSystem instance
+                block: Распарсенный CODE_BLOCK
         
-        Returns:
-            ModifyResult
-        """
-        # Импорт здесь для избежания circular import
-        from app.services.virtual_fs import ChangeType
-    
-        # Читаем текущее содержимое через VFS
-        existing_content = vfs.read_file(block.file_path) or ""
-    
-        # === HANDLE DIFF MODES FOR NON-PYTHON LANGUAGES ===
-        if block.mode in self.DIFF_MODES:
-            # Determine language from block or file extension
-            language = block.language
-            if not language:
-                ext = Path(block.file_path).suffix.lower()
-                ext_to_lang = {
-                    '.js': 'javascript',
-                    '.jsx': 'javascript',
-                    '.ts': 'typescript',
-                    '.tsx': 'typescript',
-                    '.go': 'go',
-                    '.java': 'java',
-                }
-                language = ext_to_lang.get(ext)
+            Returns:
+                ModifyResult
+            """
+            from app.services.virtual_fs import ChangeType
+            existing_content = vfs.read_file(block.file_path) or ""
+
+            if block.mode in self.DIFF_MODES:
+                language = block.language
+                if not language:
+                    ext = Path(block.file_path).suffix.lower()
+                    ext_to_lang = {
+                        '.js': 'javascript',
+                        '.jsx': 'javascript',
+                        '.ts': 'typescript',
+                        '.tsx': 'typescript',
+                        '.go': 'go',
+                        '.java': 'java',
+                    }
+                    language = ext_to_lang.get(ext)
         
-            if not language:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Cannot determine language for DIFF mode. File: {block.file_path}",
+                if not language:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Cannot determine language for DIFF mode. File: {block.file_path}",
+                    )
+        
+                diff_instruction = MultiLangDiffInstruction(
+                    file_path=block.file_path,
+                    language=language,
+                    code=block.code,
+                    target_class=block.target_class,
+                    target_method=block.target_method,
+                    target_function=block.target_function,
+                    insert_after=block.insert_after,
+                    insert_before=block.insert_before,
+                    replace_pattern=block.replace_pattern,
                 )
         
-            # Create MultiLangDiffInstruction
-            diff_instruction = MultiLangDiffInstruction(
-                file_path=block.file_path,
-                language=language,
-                code=block.code,
-                target_class=block.target_class,
-                target_method=block.target_method,
-                target_function=block.target_function,
-                insert_after=block.insert_after,
-                insert_before=block.insert_before,
-                replace_pattern=block.replace_pattern,
-            )
+                result = self.apply_multilang_diff(existing_content, diff_instruction)
         
-            # Apply multi-language diff
-            result = self.apply_multilang_diff(existing_content, diff_instruction)
+                if result.success:
+                    change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                    vfs.stage_change(block.file_path, result.new_content, change_type)
+                    logger.info(f"Staged DIFF modification to {block.file_path}")
         
-            # Stage if successful
+                return result
+
+            result = self.apply_code_block(existing_content, block)
+
+            file_ext = Path(block.file_path).suffix.lower()
+            if file_ext in self.PLAIN_TEXT_EXTENSIONS:
+                if result.success:
+                    change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                    vfs.stage_change(block.file_path, result.new_content, change_type)
+                    logger.info(f"Staged plain-text modification to {block.file_path}")
+                return result
+
+            non_python_extensions = {'.java', '.js', '.jsx', '.ts', '.tsx', '.go'}
+            is_non_python_file = file_ext in non_python_extensions
+
+            # Determine language for AI fixer
+            language_map = {
+                '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
+                '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+                '.py': 'python',
+            }
+            file_language = block.language or language_map.get(file_ext, 'python')
+
+            # Capture the original block code ONCE — used as original_code in all AI fix attempts
+            original_block_code = block.code
+
+            if result.success and result.new_content:
+                if is_non_python_file:
+                    language = language_map.get(file_ext)
+                    if language:
+                        is_valid, errors = self._validate_multilang_syntax(result.new_content, language)
+                        if not is_valid:
+                            from app.agents.feedback_handler import StagingErrorType
+                            logger.warning(f"Syntax validation failed for {block.file_path}: {errors}")
+
+                            # === AI SYNTAX FIXER for non-Python languages ===
+                            fixed_result = self._try_ai_syntax_fix_for_block(
+                                block=block,
+                                existing_content=existing_content,
+                                language=file_language,
+                                original_block_code=original_block_code,
+                                error_details='; '.join(errors[:3]),
+                                max_attempts=2,
+                                is_python=False,
+                            )
+                            if fixed_result is not None:
+                                logger.info(f"AI syntax fix succeeded for {block.file_path}")
+                                change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                                vfs.stage_change(block.file_path, fixed_result.new_content, change_type)
+                                logger.info(f"Staged AI-fixed modification to {block.file_path}")
+                                return fixed_result
+
+                            # All fixes failed — reject
+                            result.success = False
+                            result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                            result.message = (
+                                f"Syntax validation failed: applied change breaks file structure. "
+                                f"AI syntax fixer also failed after 2 attempts. "
+                                f"This would cause cascading failures for subsequent blocks. "
+                                f"Errors: {'; '.join(errors[:2])}"
+                            )
+                            result.new_content = existing_content
+                            return result
+                else:
+                    ts_parser = _get_tree_sitter_parser()
+                    if ts_parser:
+                        try:
+                            parse_result = ts_parser.parse(result.new_content)
+                            if parse_result.has_errors:
+                                critical_error = False
+                                error_details = []
+                                for error in parse_result.errors[:3]:
+                                    error_str = str(error).lower()
+                                    if any(keyword in error_str for keyword in ['class', 'def', 'indent', 'expected']):
+                                        critical_error = True
+                                        error_details.append(str(error))
+                                if block.target_class:
+                                    class_info = parse_result.get_class(block.target_class)
+                                    if class_info is None:
+                                        critical_error = True
+                                        error_details.append(f"Class '{block.target_class}' no longer parseable after modification")
+                                if critical_error:
+                                    logger.info(f"Syntax error detected in {block.file_path}, attempting autopep8 repair...")
+                                    repaired_content = None
+                                    try:
+                                        from app.services.syntax_checker import SyntaxChecker
+                                        checker = SyntaxChecker(use_black=False, use_autopep8=True,
+                                                               project_python_path=self.project_python_path)
+                                        fix_result = checker.check_python(result.new_content, auto_fix=True)
+                                        if fix_result.was_auto_fixed and fix_result.fixed_content:
+                                            fixed_parse = ts_parser.parse(fix_result.fixed_content)
+                                            still_critical = False
+                                            if fixed_parse.has_errors:
+                                                for error in fixed_parse.errors[:3]:
+                                                    error_str = str(error).lower()
+                                                    if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
+                                                        still_critical = True
+                                                        break
+                                            if block.target_class and not still_critical:
+                                                fixed_class_info = fixed_parse.get_class(block.target_class)
+                                                if fixed_class_info is None:
+                                                    still_critical = True
+                                            if not still_critical:
+                                                logger.info(f"Autopep8 repair succeeded for {block.file_path}")
+                                                repaired_content = fix_result.fixed_content
+                                                result.new_content = repaired_content
+                                                result.changes_made.append("Auto-repaired syntax with autopep8")
+                                            else:
+                                                logger.warning(f"Autopep8 repair did not resolve critical errors in {block.file_path}")
+                                    except ImportError:
+                                        logger.debug("SyntaxChecker not available for repair attempt")
+                                    except Exception as e:
+                                        logger.warning(f"Autopep8 repair failed: {e}")
+
+                                    if repaired_content is None:
+                                        # === AI SYNTAX FIXER for Python ===
+                                        # autopep8 on full file failed; now try AI fixer on the block code itself
+                                        from app.agents.feedback_handler import StagingErrorType
+                                        logger.info(f"Autopep8 repair failed for {block.file_path}, trying AI syntax fixer...")
+
+                                        fixed_result = self._try_ai_syntax_fix_for_block(
+                                            block=block,
+                                            existing_content=existing_content,
+                                            language=file_language,
+                                            original_block_code=original_block_code,
+                                            error_details='; '.join(error_details[:3]),
+                                            max_attempts=2,
+                                            is_python=True,
+                                        )
+                                        if fixed_result is not None:
+                                            logger.info(f"AI syntax fix succeeded for {block.file_path}")
+                                            change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                                            vfs.stage_change(block.file_path, fixed_result.new_content, change_type)
+                                            logger.info(f"Staged AI-fixed modification to {block.file_path}")
+                                            return fixed_result
+
+                                        # All fixes failed — reject
+                                        logger.warning(f"All syntax repair attempts failed for {block.file_path}: {error_details}")
+                                        result.success = False
+                                        result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
+                                        result.message = (
+                                            f"Syntax validation failed: applied change breaks file structure. "
+                                            f"Autopep8 and AI syntax fixer both failed after all attempts. "
+                                            f"This would cause cascading failures for subsequent blocks. "
+                                            f"Errors: {'; '.join(error_details[:2])}"
+                                        )
+                                        result.new_content = existing_content
+                                        return result
+                        except Exception as e:
+                            logger.debug(f"Syntax validation skipped due to parser error: {e}")
+
             if result.success:
                 change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
                 vfs.stage_change(block.file_path, result.new_content, change_type)
-                logger.info(f"Staged DIFF modification to {block.file_path}")
-        
+                logger.info(f"Staged CODE_BLOCK modification to {block.file_path}")
             return result
     
-        # === STANDARD PYTHON MODE HANDLING ===
-        # Применяем модификацию
-        result = self.apply_code_block(existing_content, block)
     
-        # === DETECT NON-PYTHON FILES FOR LIGHTWEIGHT VALIDATION ===
-        # Check file extension to determine if this is a non-Python file
-        file_ext = Path(block.file_path).suffix.lower()
-        non_python_extensions = {'.java', '.js', '.jsx', '.ts', '.tsx', '.go'}
-        is_non_python_file = file_ext in non_python_extensions
-    
-        # === SYNTAX VALIDATION BEFORE STAGING ===
-        # Prevents cascading failures when one block breaks file structure
-        if result.success and result.new_content:
-            if is_non_python_file:
-                # For non-Python files: perform lightweight tree-structure validation only
-                language_map = {
-                    '.java': 'java',
-                    '.js': 'javascript',
-                    '.jsx': 'javascript',
-                    '.ts': 'typescript',
-                    '.tsx': 'typescript',
-                    '.go': 'go',
-                }
-                language = language_map.get(file_ext)
+    def _try_ai_syntax_fix_for_block(
+        self,
+        block: ParsedCodeBlock,
+        existing_content: str,
+        language: str,
+        original_block_code: str,
+        error_details: str,
+        max_attempts: int = 2,
+        is_python: bool = True,
+    ) -> Optional[ModifyResult]:
+        """
+        Attempts to fix syntax errors in a code block using AI syntax fixer agent.
+
+        This is called after structural repair (autopep8 for Python) fails.
+        Tries up to max_attempts to fix the code block, then returns the fixed result
+        or None if all attempts fail.
+
+        IMPORTANT: original_block_code must always be the ORIGINAL block code,
+        never the result of a previous attempt — prevents cascading AI errors.
+
+        Args:
+            block: ParsedCodeBlock that was applied
+            existing_content: Original file content before modification
+            language: Programming language (python, javascript, etc.)
+            original_block_code: The original code from the block (before any fixes)
+            error_details: Description of syntax errors
+            max_attempts: Maximum number of AI fix attempts (default 2)
+            is_python: Whether this is a Python file (affects validation strategy)
+
+        Returns:
+            ModifyResult with fixed content if successful, None if all attempts failed
+        """
+        try:
+            # === STEP 1: Compute insertion_line by searching for anchor patterns ===
+            insertion_line = None
+            content_lines = existing_content.splitlines()
             
-                if language:
-                    is_valid, errors = self._validate_multilang_syntax(result.new_content, language)
-                    if not is_valid:
-                        from app.agents.feedback_handler import StagingErrorType
-                    
-                        logger.warning(
-                            f"Syntax validation failed for {block.file_path}: "
-                            f"Applied change breaks file structure. Errors: {errors}"
+            # Search for insert_after anchor
+            if block.insert_after is not None:
+                for i, line in enumerate(content_lines):
+                    if block.insert_after in line:
+                        insertion_line = i + 1
+                        break
+            
+            # Search for insert_before anchor
+            elif block.insert_before is not None:
+                for i, line in enumerate(content_lines):
+                    if block.insert_before in line:
+                        insertion_line = i
+                        break
+            
+            # Search for replace_pattern anchor
+            elif block.replace_pattern is not None:
+                for i, line in enumerate(content_lines):
+                    if block.replace_pattern in line:
+                        insertion_line = i
+                        break
+            
+            # === STEP 2: Call extract_surrounding_context with mode and insertion_line ===
+            context_result = extract_surrounding_context(
+                file_content=existing_content,
+                target_class=block.target_class,
+                target_method=block.target_method,
+                target_function=block.target_function,
+                language=language,
+                mode=block.mode,
+                insertion_line=insertion_line,
+            )
+            
+            # === STEP 3: Unpack the returned dict ===
+            surrounding_context = context_result.get("surrounding_context", "")
+            target_indent_value = context_result.get("target_indent", None)
+            
+            # Attempt AI syntax fix up to max_attempts times.
+            # CRITICAL: always pass original_block_code as the code to fix,
+            # never the result of a previous attempt — prevents cascading errors.
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"AI syntax fix attempt {attempt}/{max_attempts} for {block.file_path}")
+
+                # === STEP 4: Define mode classification sets ===
+                INSIDE_MODES = {
+                    "PATCH_METHOD", "INSERT_INTO_METHOD", "ADD_LINES", "REPLACE_IN_METHOD",
+                    "MODIFY_METHOD_LINE", "INSERT_IN_FUNCTION", "PATCH_FUNCTION",
+                    "REPLACE_IN_FUNCTION", "DIFF_INSERT"
+                }
+                REPLACE_MODES = {
+                    "REPLACE_METHOD", "MODIFY_METHOD", "REPLACE_FUNCTION", "MODIFY_FUNCTION",
+                    "DIFF_REPLACE"
+                }
+                INSERT_NEW_MODES = {
+                    "INSERT_CLASS", "ADD_METHOD", "ADD_NEW_FUNCTION", "CREATE_FUNCTION",
+                    "INSERT_FILE", "ADD_FUNCTION", "APPEND_FILE", "APPEND"
+                }
+                
+                # === STEP 5: Compute is_method_or_function_insert using mode classification ===
+                is_method_or_function_insert = (
+                    block.mode.upper() in REPLACE_MODES or
+                    block.mode.upper() in INSERT_NEW_MODES
+                )
+
+                # Build context_info dict as expected by attempt_ai_syntax_fix
+                context_info: Dict[str, Any] = {
+                    "mode": block.mode,
+                    "target_name": (
+                        block.target_method
+                        or block.target_function
+                        or block.target_class
+                        or "unknown"
+                    ),
+                    "error_details": error_details,
+                    "surrounding_context": surrounding_context,
+                    "target_indent": target_indent_value,
+                    "original_code": original_block_code,
+                    "attempt_number": attempt,
+                    "is_method_or_function_insert": is_method_or_function_insert,
+                }
+
+                # attempt_ai_syntax_fix returns Tuple[Optional[str], bool]
+                fixed_code, success = attempt_ai_syntax_fix(
+                    original_block_code,
+                    language,
+                    context_info,
+                )
+
+                if not success or not fixed_code:
+                    logger.debug(f"AI syntax fixer returned empty/failed on attempt {attempt}")
+                    continue
+
+                # Build a ModifyInstruction with the fixed code
+                fixed_instruction = ModifyInstruction(
+                    mode=self.MODE_MAPPING.get(block.mode, ModifyMode.REPLACE_FILE),
+                    code=fixed_code,
+                    target_class=block.target_class,
+                    target_method=block.target_method,
+                    target_function=block.target_function,
+                    target_attribute=block.target_attribute,
+                    insert_after=block.insert_after,
+                    insert_before=block.insert_before,
+                    replace_pattern=block.replace_pattern,
+                    preserve_imports=True,
+                    auto_format=True,
+                )
+
+                # Apply the fixed instruction using apply_with_fallback
+                fixed_result = self.apply(existing_content, fixed_instruction)
+
+                if fixed_result.success and fixed_result.new_content:
+                    # Validate the fixed content with appropriate parser
+                    if is_python:
+                        ts_parser = _get_tree_sitter_parser()
+                        if ts_parser:
+                            try:
+                                parse_result = ts_parser.parse(fixed_result.new_content)
+                                if not parse_result.has_errors:
+                                    logger.info(
+                                        f"AI syntax fix validated successfully on attempt {attempt}"
+                                    )
+                                    fixed_result.changes_made.append(
+                                        f"Fixed syntax with AI fixer (attempt {attempt})"
+                                    )
+                                    return fixed_result
+                                else:
+                                    logger.debug(
+                                        f"AI syntax fix still has errors on attempt {attempt}"
+                                    )
+                            except Exception as e:
+                                logger.debug(f"Validation of AI fix failed: {e}")
+                        else:
+                            # No tree-sitter parser available — accept result as-is
+                            logger.info(
+                                f"AI syntax fix applied (no tree-sitter validation) on attempt {attempt}"
+                            )
+                            fixed_result.changes_made.append(
+                                f"Fixed syntax with AI fixer (attempt {attempt})"
+                            )
+                            return fixed_result
+                    else:
+                        # For non-Python: validate with language-specific validator
+                        is_valid, errors = self._validate_multilang_syntax(
+                            fixed_result.new_content, language
                         )
-                        result.success = False
-                        result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
-                        result.message = (
-                            f"Syntax validation failed: applied change breaks file structure. "
-                            f"This would cause cascading failures for subsequent blocks. "
-                            f"Errors: {'; '.join(errors[:2])}"
-                        )
-                        result.new_content = existing_content  # Revert to original
-                        return result
-            else:
-                # For Python files: use full tree-sitter validation
-                ts_parser = _get_tree_sitter_parser()
-                if ts_parser:
-                    try:
-                        # Parse the modified content
-                        parse_result = ts_parser.parse(result.new_content)
-                    
-                        # Check for critical structural errors
-                        if parse_result.has_errors:
-                            # Determine if errors are critical (affect class/method discovery)
-                            critical_error = False
-                            error_details = []
-                        
-                            for error in parse_result.errors[:3]:
-                                error_str = str(error).lower()
-                                # Check if error affects structural elements
-                                if any(keyword in error_str for keyword in ['class', 'def', 'indent', 'expected']):
-                                    critical_error = True
-                                    error_details.append(str(error))
-                        
-                            # Also check if we can still find the target class/method
-                            if block.target_class:
-                                class_info = parse_result.get_class(block.target_class)
-                                if class_info is None:
-                                    critical_error = True
-                                    error_details.append(f"Class '{block.target_class}' no longer parseable after modification")
-                        
-                            if critical_error:
-                                # === ATTEMPT REPAIR WITH AUTOPEP8 ===
-                                logger.info(f"Syntax error detected in {block.file_path}, attempting autopep8 repair...")
-                            
-                                repaired_content = None
-                                try:
-                                    from app.services.syntax_checker import SyntaxChecker
-                                    checker = SyntaxChecker(
-                                        use_black=False, 
-                                        use_autopep8=True,
-                                        project_python_path=self.project_python_path
-                                    )
-                                    fix_result = checker.check_python(result.new_content, auto_fix=True)
-                                
-                                    if fix_result.was_auto_fixed and fix_result.fixed_content:
-                                        # Verify the fix actually resolved the issue
-                                        fixed_parse = ts_parser.parse(fix_result.fixed_content)
-                                    
-                                        # Check if critical errors are gone
-                                        still_critical = False
-                                        if fixed_parse.has_errors:
-                                            for error in fixed_parse.errors[:3]:
-                                                error_str = str(error).lower()
-                                                if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected']):
-                                                    still_critical = True
-                                                    break
-                                    
-                                        # Check if target class is now parseable
-                                        if block.target_class and not still_critical:
-                                            fixed_class_info = fixed_parse.get_class(block.target_class)
-                                            if fixed_class_info is None:
-                                                still_critical = True
-                                    
-                                        if not still_critical:
-                                            # Repair succeeded!
-                                            logger.info(f"Autopep8 repair succeeded for {block.file_path}")
-                                            repaired_content = fix_result.fixed_content
-                                            result.new_content = repaired_content
-                                            result.changes_made.append("Auto-repaired syntax with autopep8")
-                                        else:
-                                            logger.warning(f"Autopep8 repair did not resolve critical errors in {block.file_path}")
-                                except ImportError:
-                                    logger.debug("SyntaxChecker not available for repair attempt")
-                                except Exception as e:
-                                    logger.warning(f"Autopep8 repair failed: {e}")
-                            
-                                # If repair failed, reject the change
-                                if repaired_content is None:
-                                    from app.agents.feedback_handler import StagingErrorType
-                                
-                                    logger.warning(
-                                        f"Syntax validation failed for {block.file_path}: "
-                                        f"Applied change breaks file structure. Errors: {error_details}"
-                                    )
-                                    result.success = False
-                                    result.error_type = StagingErrorType.SYNTAX_VALIDATION_FAILED
-                                    result.message = (
-                                        f"Syntax validation failed: applied change breaks file structure. "
-                                        f"Autopep8 repair was attempted but failed. "
-                                        f"This would cause cascading failures for subsequent blocks. "
-                                        f"Errors: {'; '.join(error_details[:2])}"
-                                    )
-                                    result.new_content = existing_content  # Revert to original
-                                    return result
-                            
-                    except Exception as e:
-                        # Don't block on parser errors, just log
-                        logger.debug(f"Syntax validation skipped due to parser error: {e}")
+                        if is_valid:
+                            logger.info(
+                                f"AI syntax fix validated successfully on attempt {attempt}"
+                            )
+                            fixed_result.changes_made.append(
+                                f"Fixed syntax with AI fixer (attempt {attempt})"
+                            )
+                            return fixed_result
+                        else:
+                            logger.debug(
+                                f"AI syntax fix still has errors on attempt {attempt}: {errors}"
+                            )
+                else:
+                    logger.debug(
+                        f"AI fix apply failed on attempt {attempt}: {fixed_result.message}"
+                    )
+
+            # All attempts exhausted
+            logger.warning(
+                f"AI syntax fixer exhausted {max_attempts} attempts for {block.file_path}"
+            )
+            return None
+
+        except ImportError as e:
+            logger.debug(f"AI syntax fixer not available: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"AI syntax fix failed with exception: {e}", exc_info=True)
+            return None
     
-        # Если успешно — стейджим
-        if result.success:
-            # Используем ChangeType enum, не строку!
-            change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
-            vfs.stage_change(block.file_path, result.new_content, change_type)
-            logger.info(f"Staged CODE_BLOCK modification to {block.file_path}")
-    
-        return result
     
     
     def apply_multilang_diff(self, existing_content: str, instruction: 'MultiLangDiffInstruction') -> ModifyResult:
@@ -1272,20 +1512,8 @@ class FileModifier:
                         message="DIFF_INSERT: No insertion point specified (no insert_after, insert_before, or target)"
                     )
                 
-                # Calculate indentation from reference line
-                indent = 0
-                if insert_line > 0 and insert_line <= len(lines):
-                    ref_line = lines[insert_line - 1] if insert_line > 0 else ""
-                    indent = len(ref_line) - len(ref_line.lstrip())
-                
-                # Indent code lines
-                code_lines = instruction.code.split('\n')
-                indented_lines = []
-                for line in code_lines:
-                    if line.strip():
-                        indented_lines.append(' ' * indent + line)
-                    else:
-                        indented_lines.append(line)
+                # No longer indenting code - use code as generated
+                indented_lines = instruction.code.split('\n')
                 
                 # Insert at position
                 modified_lines = lines[:insert_line] + indented_lines + lines[insert_line:]
@@ -1768,8 +1996,8 @@ class FileModifier:
         if insert_line is None:
             insert_line = class_info.span.end_line
         
-        # === Анализируем и нормализуем код с правильным отступом ===
-        formatted_code = self._analyze_and_normalize_indent(code, method_indent)
+        # Use code exactly as provided
+        formatted_code = code
         
         # Добавляем пустую строку перед методом
         prefix = '\n'
@@ -1809,8 +2037,8 @@ class FileModifier:
         code = instruction.code
         
         if not existing_content.strip():
-            # Новый файл — вставляем как есть с нормализацией
-            formatted_code = self._analyze_and_normalize_indent(code, 0)
+            # Новый файл — вставляем как есть
+            formatted_code = code
             return ModifyResult(
                 success=True,
                 new_content=formatted_code + '\n',
@@ -1822,8 +2050,8 @@ class FileModifier:
         lines = existing_content.splitlines(keepends=True)
         insert_line = self._find_imports_end(lines)
         
-        # Для module-level кода отступ = 0
-        formatted_code = self._analyze_and_normalize_indent(code, 0)
+        # Use code exactly as provided
+        formatted_code = code
         
         # Добавляем пустые строки вокруг для PEP8
         insert_content = '\n\n' + formatted_code.strip() + '\n'
@@ -1920,8 +2148,8 @@ class FileModifier:
         # Determine indent
         method_indent = method_info.indent
         
-        # === CONDITIONAL RE-INDENTATION ===
-        formatted_code = self._reindent_if_needed(code.expandtabs(4).rstrip(), method_indent)
+        # Use code exactly as provided
+        formatted_code = code.rstrip()
         
         old_lines_count = method_end - method_start
         
@@ -1987,8 +2215,8 @@ class FileModifier:
         func_end = func_info.span.end_line
         func_indent = func_info.indent
         
-        # === REMOVE NORMALIZATION: Simply expand tabs and strip trailing whitespace ===
-        formatted_code = code.expandtabs(4).rstrip()
+        # Use code exactly as provided
+        formatted_code = code.rstrip()
         
         old_lines_count = func_end - func_start
         
@@ -2059,8 +2287,8 @@ class FileModifier:
         # Определяем отступ из распарсенного дерева
         class_indent = class_info.indent
         
-        # === Анализируем и нормализуем код с правильным отступом ===
-        formatted_code = self._analyze_and_normalize_indent(code, class_indent)
+        # Use code exactly as provided
+        formatted_code = code
         
         old_lines_count = class_end - class_start
         
@@ -2270,75 +2498,83 @@ class FileModifier:
         """
         Normalizes code block indentation for insertion inside methods/functions.
         
-        This method solves the "wrong indentation from LLM" problem by:
-        1. Removing ALL existing indentation (tabs and spaces)
-        2. Rebuilding the code with correct indentation based on target_indent
-        3. Using structure analysis to handle nested blocks (if/for/while/etc.)
+        Uses a simple "shift" approach that preserves relative indentation structure:
+        1. Find the minimum indentation among all non-empty lines
+        2. Compute delta = target_indent - min_indent (the shift amount)
+        3. Shift all lines by delta while preserving relative indentation
+        
+        This preserves the LLM's indentation structure (which is typically correct)
+        and only adjusts the base level to match the target.
         
         Args:
-            code: Code block to normalize (may have wrong indentation)
+            code: Code block to normalize (may have wrong base indentation)
             target_indent: Target indentation level in spaces (e.g., 8 for method body)
             
         Returns:
             Code with correct indentation
         """
+        # Step 1: If code is empty/whitespace-only, return unchanged
         if not code or not code.strip():
             return code
         
-        # Step 1: Expand tabs and split into lines
+        # Step 2: Expand tabs to 4 spaces for consistency
         code = code.expandtabs(4)
+        
+        # Step 3: Split into lines
         lines = code.splitlines()
         
-        if not lines:
+        # Step 4: Find minimum indentation among non-empty lines
+        min_indent = None
+        for line in lines:
+            if line.strip():  # Non-empty line
+                current_indent = len(line) - len(line.lstrip())
+                if min_indent is None or current_indent < min_indent:
+                    min_indent = current_indent
+        
+        # If no non-empty lines found, return code unchanged
+        if min_indent is None:
+            min_indent = 0
+        
+        # Step 4b: Consistency guard — detect wildly inconsistent internal indentation
+        # If the LLM generated code with broken relative indentation (e.g., first line
+        # at 0 indent, continuations at 12 indent), a uniform shift would preserve and
+        # amplify the broken structure.  In such cases, skip normalization entirely and
+        # let tree-sitter validation catch the real problem.
+        non_empty_indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+        if len(non_empty_indents) >= 2:
+            max_indent = max(non_empty_indents)
+            indent_range = max_indent - min_indent
+            first_indent = non_empty_indents[0]
+            # Heuristic: if the first non-empty line is at min_indent but other lines
+            # are more than 3 nesting levels deeper (>12 spaces), the block is internally
+            # inconsistent.  Don't corrupt it further with a uniform shift.
+            if indent_range > 12 and first_indent == min_indent:
+                logger.debug(
+                    f"_normalize_block_indentation: skipping — inconsistent internal "
+                    f"indent (range={indent_range}, min={min_indent}, max={max_indent})"
+                )
+                return code
+        
+        # Step 5: Compute delta (shift amount)
+        delta = target_indent - min_indent
+        
+        # Step 6: If delta is 0, indentation is already correct
+        if delta == 0:
             return code
         
-        # Step 2: Strip ALL leading whitespace from every line (dedent to column 0)
-        stripped_lines = []
-        for line in lines:
-            stripped = line.lstrip()
-            stripped_lines.append(stripped if stripped else '')
-        
-        # Step 3: Rebuild with correct indentation based on structure
+        # Step 7: Build result_lines with shifted indentation
         result_lines = []
-        current_indent = target_indent
-        indent_stack = [target_indent]
-        
-        # Keywords that decrease indent BEFORE the line (dedent keywords)
-        dedent_keywords = ('elif ', 'else:', 'except ', 'except:', 'finally:', 'case ')
-        
-        # Keywords that increase indent AFTER the line (block openers)
-        block_openers = ('def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ', 
-                        'try:', 'except ', 'except:', 'finally:', 'with ', 'async ', 
-                        'match ', 'case ')
-        
-        for stripped in stripped_lines:
-            # Handle empty lines
-            if not stripped:
+        for line in lines:
+            if not line.strip():
+                # Blank line - append empty string
                 result_lines.append('')
-                continue
-            
-            # Handle comments - use current indent
-            if stripped.startswith('#'):
-                result_lines.append(' ' * current_indent + stripped)
-                continue
-            
-            # Check if this line should dedent (elif, else, except, finally, case)
-            should_dedent = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in dedent_keywords)
-            
-            if should_dedent and len(indent_stack) > 1:
-                indent_stack.pop()
-                current_indent = indent_stack[-1]
-            
-            # Add line with current indent
-            result_lines.append(' ' * current_indent + stripped)
-            
-            # Check if this line opens a new block (ends with : and is a block keyword)
-            if stripped.endswith(':') and not stripped.startswith('#'):
-                is_block_opener = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in block_openers)
-                if is_block_opener:
-                    current_indent = current_indent + self.default_indent
-                    indent_stack.append(current_indent)
+            else:
+                # Non-empty line - compute new indentation
+                current_indent = len(line) - len(line.lstrip())
+                new_indent = max(0, current_indent + delta)
+                result_lines.append(' ' * new_indent + line.lstrip())
         
+        # Step 8: Return joined result
         return '\n'.join(result_lines)
     
     
@@ -2434,9 +2670,7 @@ class FileModifier:
             if match_start_offset is not None:
                 matched_line = method_lines[match_start_offset]
                 body_indent = len(matched_line) - len(matched_line.lstrip())
-                # === CRITICAL: Normalize indentation for insertion inside method ===
-                # This solves the "wrong indentation from LLM" problem
-                formatted_code = self._normalize_block_indentation(code, body_indent)
+                formatted_code = code
                 
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
@@ -2444,7 +2678,6 @@ class FileModifier:
                 new_lines = lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:]
                 new_content = ''.join(new_lines)
                 
-                new_content = self._validate_and_fix_syntax(new_content)
                 target_name = f"{target_class}.{target_method}" if target_class else target_method
                 
                 return ModifyResult(
@@ -2456,7 +2689,7 @@ class FileModifier:
         # === END IDEMPOTENCY CHECK ===
         
         # Get method body indent using Tree-sitter when possible
-        body_base_indent = self._get_method_body_indent(method_info, lines, method_start)
+        # body_base_indent removal as per Plan V14
         
         insert_line_offset = None
         context_line_for_indent = None
@@ -2560,26 +2793,10 @@ class FileModifier:
                         context_line_for_indent = line
                         break
         
-        # FIX 2: Precise indentation calculation
-        if context_line_for_indent:
-            if insert_after:
-                # Calculate indent based on the line we are inserting AFTER
-                # We need the index in the original file content
-                context_line_idx = method_start + insert_line_offset - 1
-                if context_line_idx >= 0:
-                    body_indent = self._get_precise_indent(existing_content, context_line_idx)
-                else:
-                    body_indent = body_base_indent
-            else:
-                # For insert_before, we simply align with the target line
-                body_indent = len(context_line_for_indent) - len(context_line_for_indent.lstrip())
-        else:
-            # No context line (e.g. empty method or default pos), use method body base indent
-            body_indent = body_base_indent
+        # Indentation calculation removed for PATCH_METHOD as per Plan V14
+        body_indent = 0
         
-        # FIX 3: CRITICAL FIX: Use _normalize_block_indentation for proper handling
-        # This solves the "wrong indentation from LLM" problem
-        formatted_code = self._normalize_block_indentation(code, body_indent)
+        formatted_code = code
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -2604,7 +2821,7 @@ class FileModifier:
             "target_indent": body_indent
         }
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        # _validate_and_fix_syntax removed for PATCH_METHOD as per Plan V14
         
         added_lines = len(formatted_code.splitlines())
         target_name = f"{target_class}.{target_method}" if target_class else target_method
@@ -3173,6 +3390,126 @@ class FileModifier:
         
         return (None, None)
     
+    def _expand_multiline_block(
+        self,
+        lines: List[str],
+        match_start: int,
+        match_end: int,
+        scope_end: int,
+    ) -> Tuple[int, int]:
+        """
+        Expands a single-line match to cover the full multi-line expression.
+
+        When ``_find_multiline_match`` finds a pattern like ``result = {`` as a
+        single line (match_end == match_start + 1), the replacement would only
+        remove that one line and leave the remaining lines of the dict/list/tuple
+        orphaned.  This helper detects unclosed delimiters on the matched line
+        and scans forward until the balancing close delimiter is found, then
+        returns the expanded ``(match_start, new_match_end)``.
+
+        Handles:
+        - ``{}``, ``[]``, ``()`` including nested variants
+        - String literals (skips brackets inside quotes)
+        - Already-balanced single-line expressions (no expansion)
+        - Edge case where match already spans multiple lines
+
+        Args:
+            lines: All source lines of the file (with line endings).
+            match_start: Start index returned by ``_find_multiline_match``.
+            match_end: End index returned by ``_find_multiline_match``.
+            scope_end: Hard upper boundary (e.g. method/class end) — never
+                       scan past this.
+
+        Returns:
+            ``(match_start, expanded_match_end)`` — unchanged if no expansion
+            is needed.
+        """
+        # Only expand single-line matches
+        if match_end - match_start != 1:
+            return match_start, match_end
+
+        line_text = lines[match_start] if match_start < len(lines) else ""
+
+        # --- Count open/close delimiters on the matched line, ignoring strings ---
+        OPEN = {'{': '}', '[': ']', '(': ')'}
+        CLOSE = set(OPEN.values())
+
+        def count_delimiters(text: str) -> int:
+            """Return net open-delimiter balance, skipping string literals."""
+            balance = 0
+            in_single = False
+            in_double = False
+            in_triple_single = False
+            in_triple_double = False
+            i = 0
+            while i < len(text):
+                c = text[i]
+                # --- triple-quote detection (must come before single-quote) ---
+                if not in_double and not in_triple_double:
+                    if text[i:i+3] == "'''":
+                        in_triple_single = not in_triple_single
+                        i += 3
+                        continue
+                if not in_single and not in_triple_single:
+                    if text[i:i+3] == '"""':
+                        in_triple_double = not in_triple_double
+                        i += 3
+                        continue
+                # --- single/double quote handling ---
+                if not in_triple_single and not in_triple_double:
+                    if c == "'" and not in_double:
+                        in_single = not in_single
+                        i += 1
+                        continue
+                    if c == '"' and not in_single:
+                        in_double = not in_double
+                        i += 1
+                        continue
+                # skip escaped characters
+                if c == '\\' and i + 1 < len(text):
+                    i += 2
+                    continue
+                # inside any string — skip
+                if in_single or in_double or in_triple_single or in_triple_double:
+                    i += 1
+                    continue
+                # --- comment detection (Python-style) ---
+                if c == '#':
+                    break  # rest of line is comment
+                # --- delimiter counting ---
+                if c in OPEN:
+                    balance += 1
+                elif c in CLOSE:
+                    balance -= 1
+                i += 1
+            return balance
+
+        balance = count_delimiters(line_text)
+
+        # If balance <= 0, the line is self-contained (or closes something)
+        if balance <= 0:
+            return match_start, match_end
+
+        # --- Scan forward to find the balancing close ---
+        for idx in range(match_start + 1, min(scope_end, len(lines))):
+            balance += count_delimiters(lines[idx])
+            if balance <= 0:
+                expanded_end = idx + 1
+                logger.debug(
+                    f"_expand_multiline_block: expanded match from "
+                    f"[{match_start+1}:{match_end}] to [{match_start+1}:{expanded_end}]"
+                )
+                return match_start, expanded_end
+
+        # Could not find the closing delimiter within scope — don't expand
+        # (let the original single-line match proceed to avoid data loss)
+        logger.debug(
+            f"_expand_multiline_block: could not find closing delimiter "
+            f"within scope (lines {match_start+1}..{scope_end}). "
+            f"Keeping original match range."
+        )
+        return match_start, match_end
+
     def _replace_in_method(
         self,
         existing_content: str,
@@ -3236,6 +3573,13 @@ class FileModifier:
         # Используем _find_multiline_match для поиска паттерна
         match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
         
+        # Expand single-line match to cover full multi-line expression
+        # (e.g. `result = {` should expand to include the entire dict literal)
+        if match_start is not None and match_end is not None:
+            match_start, match_end = self._expand_multiline_block(
+                lines, match_start, match_end, method_end
+            )
+        
         # Fallback: search for comment pattern with exact unique match
         if match_start is None and replace_pattern.strip().startswith('#'):
             comment_pattern = replace_pattern.strip()
@@ -3264,11 +3608,10 @@ class FileModifier:
         
         # Determine indent from lines[match_start]
         old_line = lines[match_start]
-        line_indent = len(old_line) - len(old_line.lstrip())
+        # line_indent removed for REPLACE_IN_METHOD as per Plan V14
+        line_indent = 0
         
-        # === CRITICAL: Normalize indentation for replacement inside method ===
-        # This solves the "wrong indentation from LLM" problem
-        formatted_code = self._normalize_block_indentation(code, line_indent)
+        formatted_code = code
         
         # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):
@@ -3519,8 +3862,8 @@ class FileModifier:
             if target_node.end_point[1] == 0:
                 end_line -= 1
             
-            # Нормализуем отступ кода (должен быть 0 для глобального уровня)
-            formatted_code = self._analyze_and_normalize_indent(code, 0)
+            # Use code exactly as provided
+            formatted_code = code
             if not formatted_code.endswith('\n'):
                 formatted_code += '\n'
             
@@ -3932,6 +4275,9 @@ class FileModifier:
         """
         Проверяет синтаксис через Tree-sitter и пытается исправить.
         Передаёт информацию о вставленном блоке в SyntaxChecker.
+        
+        IMPORTANT: Auto-fix is only triggered for CRITICAL structural errors
+        (errors that break class/def/indent structure), not for minor issues.
         """
         ts_parser = _get_tree_sitter_parser()
         if not ts_parser:
@@ -3942,10 +4288,31 @@ class FileModifier:
             # Clear inserted block info on success
             FileModifier._last_inserted_block = None
             return content
-            
+        
+        # Check if errors are critical (structural) — only then attempt auto-fix
+        critical_error = False
+        for error in result.errors[:5]:
+            error_str = str(error).lower()
+            if any(kw in error_str for kw in ['class', 'def', 'indent', 'expected', 'block', 'colon']):
+                critical_error = True
+                break
+        
+        if not critical_error:
+            # Non-critical errors (e.g. minor syntax issues) — don't auto-fix,
+            # let the staging validation handle them
+            logger.debug(f"Non-critical syntax errors detected, skipping auto-fix: {result.errors[:1]}")
+            FileModifier._last_inserted_block = None
+            return content
+        
         # Код невалиден — пробуем исправить
         logger.warning(f"Syntax error detected after modification. Errors: {result.errors[:1]}")
         
+        # [V18.6] Disable mechanical auto-fix for PATCH_METHOD and REPLACE_IN_METHOD
+        # to ensure raw generator code (indents) is preserved byte-for-byte.
+        if instruction.mode in [ModifyMode.PATCH_METHOD, ModifyMode.REPLACE_IN_METHOD]:
+            logger.debug(f"Skipping mechanical auto-fix for mode {instruction.mode.name}")
+            return content
+
         # Пробуем через SyntaxChecker (если доступен)
         try:
             from app.services.syntax_checker import SyntaxChecker

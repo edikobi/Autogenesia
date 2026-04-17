@@ -559,8 +559,9 @@ class DependencyManager:
     
     def _ensure_go_environment(self) -> bool:
         """
-        Ensures Go module environment is initialized. Creates go.mod if not exists.
-        
+        Ensures Go module environment is initialized. Creates go.mod if not exists,
+        then runs go mod tidy to organize it.
+    
         Returns:
             True if Go environment exists or was created successfully
         """
@@ -568,19 +569,19 @@ class DependencyManager:
         if shutil.which('go') is None:
             logger.warning("go not available. Install Go to use Go features.")
             return False
-        
+    
         go_mod = self.project_root / "go.mod"
-        
+    
         # If go.mod exists, environment is ready
         if go_mod.exists():
             logger.debug(f"Go module already initialized at {self.project_root}")
             return True
-        
+    
         # Initialize go module
         try:
             # Use directory name as module name
             module_name = self.project_root.name
-            
+        
             logger.info(f"Initializing Go module at {self.project_root}")
             result = subprocess.run(
                 ['go', 'mod', 'init', module_name],
@@ -591,14 +592,38 @@ class DependencyManager:
                 timeout=60,
                 cwd=str(self.project_root)
             )
-            
-            if result.returncode == 0:
-                logger.info(f"Successfully initialized Go module: {module_name}")
-                return True
-            else:
+        
+            if result.returncode != 0:
                 logger.warning(f"Failed to initialize go mod: {result.stderr}")
                 return False
-                
+        
+            logger.info(f"Successfully initialized Go module: {module_name}")
+        
+            # Run go mod tidy to organize the newly created go.mod
+            try:
+                tidy_result = subprocess.run(
+                    ['go', 'mod', 'tidy'],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=60,
+                    cwd=str(self.project_root)
+                )
+            
+                if tidy_result.returncode != 0:
+                    # Log warning but don't fail - tidy is non-critical
+                    logger.warning(f"go mod tidy failed after init: {tidy_result.stderr[:200]}")
+                else:
+                    logger.info("go mod tidy succeeded after init")
+            except subprocess.TimeoutExpired:
+                logger.warning("go mod tidy timed out after init")
+            except Exception as e:
+                logger.warning(f"Error running go mod tidy after init: {e}")
+        
+            # Return True even if tidy failed - init succeeded
+            return True
+        
         except subprocess.TimeoutExpired:
             logger.warning("go mod init timed out")
             return False

@@ -319,24 +319,24 @@ class ToolExecutor:
     def _execute_grep_search(self, arguments: Dict[str, Any]) -> str:
         """Execute grep_search tool with VFS support."""
         pattern = arguments.get("pattern", "")
-        
         if not pattern:
             return self._format_error("pattern is required")
-        
+        language = arguments.get("language")                 # <-- добавить
         return grep_search_tool(
             pattern=pattern,
             project_dir=self.project_dir,
-            use_regex=arguments.get("use_regex", False),
+            is_regex=arguments.get("is_regex", False),
             case_sensitive=arguments.get("case_sensitive", False),
             file_pattern=arguments.get("file_pattern"),
             path=arguments.get("path"),
-            max_files=arguments.get("max_files", 100),
-            max_matches_per_file=arguments.get("max_matches_per_file", 20),
+            max_files=arguments.get("max_files", 200),
+            max_matches_per_file=arguments.get("max_matches_per_file", 50),  # <-- изменить на 50
             max_total_matches=arguments.get("max_total_matches", 50),
             context_lines=arguments.get("context_lines", 2),
-            virtual_fs=self.virtual_fs  # Pass VFS for staged files
+            virtual_fs=self.virtual_fs,
+            language=language,
+            multiline=arguments.get("multiline", False)
         )
-    
     
     
     def _execute_show_file_relations(self, arguments: Dict[str, Any]) -> str:

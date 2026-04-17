@@ -6036,7 +6036,6 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
     parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
-    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
     parts.append("")    
     
     return "\n".join(parts)
@@ -6183,7 +6182,6 @@ def _get_go_prompt_injection() -> str:
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
     parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
-    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
     parts.append("")    
     
     return "\n".join(parts)
@@ -6332,7 +6330,6 @@ def _get_java_prompt_injection() -> str:
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
     parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
-    parts.append("If you use REPLACE_FILE unnecessarily, you risk deleting important code that should remain. Always prefer the more granular diff modes unless the instruction says otherwise.")
     parts.append("")    
     
     parts.append("")

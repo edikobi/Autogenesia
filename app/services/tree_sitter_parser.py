@@ -48,7 +48,12 @@ def _get_parser():
             import tree_sitter_python as tspython
             from tree_sitter import Language, Parser
             
-            _language = Language(tspython.language())
+            lang_data = tspython.language()
+            if isinstance(lang_data, Language):
+                _language = lang_data
+            else:
+                _language = Language(lang_data)
+                
             _parser = Parser(_language)
             logger.debug("Tree-sitter parser initialized successfully")
         except ImportError as e:
@@ -241,6 +246,25 @@ class FaultTolerantParser:
             result.success = False
         
         return result
+
+    def get_defined_elements(self, source_code: str) -> set[str]:
+        """
+        Возвращает множество имен всех классов и методов/функций в коде.
+        Формат имен: 'ClassName', 'ClassName.method_name', 'function_name'.
+        """
+        try:
+            result = self.parse(source_code)
+            elements = set()
+            for cls in result.classes:
+                elements.add(cls.name)
+                for method in cls.methods:
+                    elements.add(f"{cls.name}.{method.name}")
+            for func in result.functions:
+                elements.add(func.name)
+            return elements
+        except Exception as e:
+            logger.warning(f"Error getting defined elements (Python): {e}")
+            return set()
     
     
     def _collect_errors(self, node, source_bytes: bytes, result: ParseResult):
@@ -611,10 +635,15 @@ class MultiLanguageParser:
             if 'attr' in config:
                 # For TypeScript, need to access specific attribute
                 lang_func = getattr(module, config['attr'])
-                lang_obj = Language(lang_func())
+                lang_data = lang_func()
             else:
                 # For others, use default language attribute
-                lang_obj = Language(module.language())
+                lang_data = module.language()
+
+            if isinstance(lang_data, Language):
+                lang_obj = lang_data
+            else:
+                lang_obj = Language(lang_data)
 
             # Create parser
             parser = Parser(lang_obj)
@@ -933,13 +962,35 @@ class MultiLanguageParser:
         
                 # Walk tree to find ERROR nodes and missing tokens
                 def walk_tree(node):
-                    if node.type == 'ERROR':
+                    # Robust structural error detection: 
+                    # 1. ERROR nodes (syntax garbage)
+                    # 2. is_missing flag (structural holes)
+                    is_err = (node.type == 'ERROR')
+                    
+                    # Safe check for is_missing (property vs method across versions)
+                    missing_attr = getattr(node, 'is_missing', False)
+                    is_miss = missing_attr() if callable(missing_attr) else bool(missing_attr)
+                    
+                    if is_err:
                         line_num = node.start_point[0] + 1
-                        text_snippet = source_code[node.start_byte:node.end_byte][:30]
+                        text_snippet = source_code[node.start_byte:node.end_byte][:30].strip()
                         errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
-                    elif getattr(node, 'is_missing', False):
+                    elif is_miss:
+                        # [V18.25] Mapping of common symbols to human readable names
+                        mapping = {
+                            '}': 'closing brace "}"',
+                            '{': 'opening brace "{"',
+                            ')': 'closing parenthesis ")"',
+                            '(': 'opening parenthesis "("',
+                            ']': 'closing bracket "]"',
+                            '[': 'opening bracket "["',
+                            ';': 'semicolon ";"',
+                            ':': 'colon ":"',
+                        }
                         line_num = node.start_point[0] + 1
-                        errors.append(f"Line {line_num}: Missing '{node.type}'")
+                        token_name = str(node.type)
+                        display_name = mapping.get(token_name, f"token '{token_name}'")
+                        errors.append(f"Line {line_num}: Missing {display_name}")
             
                     for child in node.children:
                         walk_tree(child)
@@ -952,8 +1003,17 @@ class MultiLanguageParser:
                 # Unsupported language
                 return (True, [])
             except Exception as e:
-                logger.debug(f"Error validating syntax: {e}")
-                return (True, [])
+                logger.error(f"Error validating syntax for {language}: {e}")
+                return (False, [f"Critical validation error: {str(e)}"])
+
+    def get_missing_nodes(self, source_code: str, language: str) -> List[str]:
+        """
+        [NEW] Returns a list of detailed descriptions for MISSING tokens in the tree.
+        As specified in v7.5 plan.
+        """
+        _, errors = self.validate_syntax(source_code, language)
+        # Filter for MISSING nodes specifically
+        return [e for e in errors if "Missing" in e]
 
     def auto_fix_syntax(self, source_code: str, language: str) -> Tuple[str, bool]:
         """
@@ -1070,6 +1130,51 @@ class MultiLanguageParser:
         except Exception as e:
             logger.warning(f"Failed to auto-fix syntax for {language}: {e}")
             return (source_code, False)
+
+    def get_defined_elements(self, source_code: str, language: str) -> set[str]:
+        """
+        Extract all class and method/function names from source code.
+        Format: 'ClassName', 'ClassName.method_name', 'function_name'.
+        """
+        try:
+            # Get parser
+            ts_parser, _ = self._get_parser_for_language(language)
+            source_bytes = source_code.encode('utf-8')
+            tree = ts_parser.parse(source_bytes)
+            
+            config = self.LANGUAGE_CONFIGS.get(language, {})
+            class_types = config.get("class_types", [])
+            function_types = config.get("function_types", [])
+            
+            elements = set()
+            
+            def walk(node, parent_name=None):
+                node_name = None
+                is_class = node.type in class_types
+                is_func = node.type in function_types
+                
+                if is_class or is_func:
+                    node_name = self._extract_node_name(node, source_bytes, language)
+                    if node_name:
+                        if is_class:
+                            elements.add(node_name)
+                        else:
+                            # Avoid duplicates like 'ClassName.ClassName' for constructors if needed, 
+                            # but for integrity check simple string is fine.
+                            full_name = f"{parent_name}.{node_name}" if parent_name else node_name
+                            elements.add(full_name)
+                
+                # Update parent name ONLY if we found a class
+                next_parent = node_name if is_class else parent_name
+                
+                for child in node.children:
+                    walk(child, next_parent)
+            
+            walk(tree.root_node)
+            return elements
+        except Exception as e:
+            logger.warning(f"Error extracting elements for {language}: {e}")
+            return set()
         
 
 

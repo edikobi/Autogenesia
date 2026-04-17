@@ -117,6 +117,14 @@ class SyntaxChecker:
         self._yapf_available = self._check_tool_available("yapf")
         self._inserted_block_info: Optional[Dict[str, Any]] = None
         
+        # Lazy-initialized Tree-sitter parser reference
+        self._ts_parser = None
+        try:
+            from app.services.tree_sitter_parser import FaultTolerantParser
+            self._ts_parser = FaultTolerantParser()
+        except ImportError:
+            self._ts_parser = None
+        
         logger.debug(
             f"SyntaxChecker initialized: black={self._black_available}, "
             f"autopep8={self._autopep8_available}, isort={self._isort_available}, "
@@ -862,6 +870,91 @@ class SyntaxChecker:
         logger.debug("All Tree-sitter strategies failed")
         return None
     
+    def _fix_indentation_errors(self, code: str) -> str:
+        """
+        Attempts to fix indentation errors by normalizing indent levels to multiples of 4.
+        
+        Returns the fixed code or the original code if no fix was possible.
+        """
+        lines = code.split('\n')
+        fixed_lines = []
+        indent_size = 4
+        
+        for line in lines:
+            if not line.strip():
+                fixed_lines.append(line)
+                continue
+            
+            stripped = line.lstrip()
+            leading = line[:len(line) - len(stripped)]
+            
+            # Count effective spaces (tabs -> 4 spaces)
+            spaces = 0
+            for char in leading:
+                if char == ' ':
+                    spaces += 1
+                elif char == '\t':
+                    spaces += indent_size
+            
+            # Normalize to nearest multiple of indent_size
+            normalized_spaces = round(spaces / indent_size) * indent_size
+            fixed_lines.append(' ' * normalized_spaces + stripped)
+        
+        return '\n'.join(fixed_lines)
+    
+    
+    def _fix_unclosed_brackets(self, code: str) -> str:
+        """
+        Attempts to fix unclosed brackets/parentheses/braces by adding missing closing characters.
+        
+        Returns the fixed code or the original code if no fix was possible.
+        """
+        # Count brackets
+        open_parens = 0
+        open_brackets = 0
+        open_braces = 0
+        in_string = False
+        string_char = None
+        
+        for i, char in enumerate(code):
+            # Handle string detection (simplified)
+            if char in ('"', "'") and (i == 0 or code[i-1] != '\\'):
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif char == string_char:
+                    in_string = False
+                continue
+            
+            if in_string:
+                continue
+            
+            if char == '(':
+                open_parens += 1
+            elif char == ')':
+                open_parens -= 1
+            elif char == '[':
+                open_brackets += 1
+            elif char == ']':
+                open_brackets -= 1
+            elif char == '{':
+                open_braces += 1
+            elif char == '}':
+                open_braces -= 1
+        
+        # Add missing closing brackets at end of code
+        suffix = ''
+        if open_parens > 0:
+            suffix += ')' * open_parens
+        if open_brackets > 0:
+            suffix += ']' * open_brackets
+        if open_braces > 0:
+            suffix += '}' * open_braces
+        
+        if suffix:
+            return code.rstrip() + suffix + '\n'
+        
+        return code
     
     def _find_containing_element(self, code: str, error_line_idx: int, parser) -> Optional[Tuple[int, int, int, str]]:
         """
@@ -1054,10 +1147,11 @@ class SyntaxChecker:
         import subprocess
         
         try:
+            indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
             if self._project_python_path:
-                cmd = [self._project_python_path, '-m', 'autopep8', '-']
+                cmd = [self._project_python_path, '-m', 'autopep8', '--select=' + indent_codes, '-']
             else:
-                cmd = ['autopep8', '-']
+                cmd = ['autopep8', '--select=' + indent_codes, '-']
             
             result = subprocess.run(
                 cmd,
@@ -1306,10 +1400,11 @@ class SyntaxChecker:
             return None
         
         try:
+            indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
             if self._project_python_path:
-                cmd = [self._project_python_path, '-m', 'autopep8', '-']
+                cmd = [self._project_python_path, '-m', 'autopep8', '--select=' + indent_codes, '-']
             else:
-                cmd = ['autopep8', '-']
+                cmd = ['autopep8', '--select=' + indent_codes, '-']
             
             result = subprocess.run(
                 cmd,
@@ -1397,10 +1492,11 @@ class SyntaxChecker:
             return None
         
         try:
+            indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
             if self._project_python_path:
-                cmd = [self._project_python_path, '-m', 'autopep8', '-']
+                cmd = [self._project_python_path, '-m', 'autopep8', '--select=' + indent_codes, '-']
             else:
-                cmd = ['autopep8', '-']
+                cmd = ['autopep8', '--select=' + indent_codes, '-']
             
             result = subprocess.run(
                 cmd,
@@ -1448,68 +1544,78 @@ class SyntaxChecker:
         return ''.join(new_lines)
     
     def _run_autopep8_indent_only(self, code: str) -> Optional[str]:
-        """
-        Run autopep8 with comprehensive indent-only fixes.
+            """
+            Run autopep8 with comprehensive indent-only fixes.
         
-        Includes ALL indentation-related error codes:
-        - E1xx: Indentation errors
-        - E121-E131: Continuation line indentation
-        - W191: Indentation contains tabs
-        """
-        import subprocess
+            Includes ALL indentation-related error codes:
+            - E1xx: Indentation errors
+            - E121-E131: Continuation line indentation
+            - W191: Indentation contains tabs
+            """
+            import subprocess
+            import ast
         
-        # Build base args based on project_python_path
-        if self._project_python_path:
-            base_args = [self._project_python_path, '-m', 'autopep8', '--max-line-length', str(self.max_line_length)]
-        else:
-            base_args = ['autopep8', '--max-line-length', str(self.max_line_length)]
-        
-        # Comprehensive indentation error codes
-        indent_codes = (
-            'E101,'  # indentation contains mixed spaces and tabs
-            'E111,'  # indentation is not a multiple of four
-            'E112,'  # expected an indented block
-            'E113,'  # unexpected indentation
-            'E114,'  # indentation is not a multiple of four (comment)
-            'E115,'  # expected an indented block (comment)
-            'E116,'  # unexpected indentation (comment)
-            'E117,'  # over-indented
-            'E121,'  # continuation line under-indented for hanging indent
-            'E122,'  # continuation line missing indentation or outdented
-            'E123,'  # closing bracket does not match indentation of opening bracket\'s line
-            'E124,'  # closing bracket does not match visual indentation
-            'E125,'  # continuation line with same indent as next logical line
-            'E126,'  # continuation line over-indented for hanging indent
-            'E127,'  # continuation line over-indented for visual indent
-            'E128,'  # continuation line under-indented for visual indent
-            'E129,'  # visually indented line with same indent as next logical line
-            'E131,'  # continuation line unaligned for hanging indent
-            'W191'   # indentation contains tabs
-        )
-        
-        try:
-            result = subprocess.run(
-                base_args + ['--select=' + indent_codes, '-'],
-                input=code,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.returncode == 0 and result.stdout:
-                logger.debug(f"autopep8 indent-only fix applied successfully ({len(result.stdout)} chars)")
-                return result.stdout
+            # Build base args based on project_python_path
+            if self._project_python_path:
+                base_args = [self._project_python_path, '-m', 'autopep8', '--max-line-length', str(self.max_line_length)]
             else:
-                if result.stderr:
-                    logger.debug(f"autopep8 indent-only fix failed: {result.stderr}")
-                return None
+                base_args = ['autopep8', '--max-line-length', str(self.max_line_length)]
+        
+            # Comprehensive indentation error codes (E113 and E117 removed as they are too aggressive)
+            indent_codes = (
+                'E101,'  # indentation contains mixed spaces and tabs
+                'E111,'  # indentation is not a multiple of four
+                'E112,'  # expected an indented block
+                'E114,'  # indentation is not a multiple of four (comment)
+                'E115,'  # expected an indented block (comment)
+                'E116,'  # unexpected indentation (comment)
+                'E121,'  # continuation line under-indented for hanging indent
+                'E122,'  # continuation line missing indentation or outdented
+                'E123,'  # closing bracket does not match indentation of opening bracket\'s line
+                'E124,'  # closing bracket does not match visual indentation
+                'E125,'  # continuation line with same indent as next logical line
+                'E126,'  # continuation line over-indented for hanging indent
+                'E127,'  # continuation line over-indented for visual indent
+                'E128,'  # continuation line under-indented for visual indent
+                'E129,'  # visually indented line with same indent as next logical line
+                'E131,'  # continuation line unaligned for hanging indent
+                'W191'   # indentation contains tabs
+            )
+        
+            try:
+                result = subprocess.run(
+                    base_args + ['--select=' + indent_codes, '-'],
+                    input=code,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+            
+                if result.returncode == 0 and result.stdout:
+                    # Safety guard: check if output is different from input
+                    if result.stdout.rstrip() == code.rstrip():
+                        return None
                 
-        except subprocess.TimeoutExpired:
-            logger.debug("autopep8 indent-only fix timed out")
-            return None
-        except Exception as e:
-            logger.debug(f"autopep8 indent-only fix error: {e}")
-            return None
+                    # Validation check: verify that the output is syntactically valid
+                    try:
+                        ast.parse(result.stdout)
+                    except SyntaxError:
+                        logger.debug("autopep8 produced invalid syntax, rejecting output")
+                        return None
+
+                    logger.debug(f"autopep8 indent-only fix applied successfully ({len(result.stdout)} chars)")
+                    return result.stdout
+                else:
+                    if result.stderr:
+                        logger.debug(f"autopep8 indent-only fix failed: {result.stderr}")
+                    return None
+                
+            except subprocess.TimeoutExpired:
+                logger.debug("autopep8 indent-only fix timed out")
+                return None
+            except Exception as e:
+                logger.debug(f"autopep8 indent-only fix error: {e}")
+                return None
     
     
     def _run_black_check_only(self, code: str) -> Optional[str]:

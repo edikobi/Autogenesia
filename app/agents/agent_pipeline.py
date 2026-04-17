@@ -22,16 +22,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
-from app.services.tree_sitter_parser import MultiLanguageParser
+from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING, Union, Set
+import pycodestyle
+from app.services.tree_sitter_parser import MultiLanguageParser, FaultTolerantParser
 from config.settings import cfg
+from app.services.syntax_fixer_agent import attempt_ai_syntax_fix, extract_surrounding_context
 
 # Core services
-from app.services.virtual_fs import VirtualFileSystem, ChangeType, CommitResult
+from app.services.virtual_fs import VirtualFileSystem, ChangeType, CommitResult, PendingChange
 from app.services.backup_manager import BackupManager
 from app.services.change_validator import ChangeValidator, ValidationResult, ValidationLevel
 
@@ -47,6 +50,7 @@ from app.agents.feedback_handler import (
     FeedbackSource,
     ValidatorFeedback,
     TestRunFeedback,
+    StagingErrorType,
 )
 from app.agents.feedback_loop import (
     FeedbackLoopState,
@@ -623,6 +627,23 @@ class AgentPipeline:
         self.ai_validator = AIValidator()
         self.token_counter = TokenCounter()
         self.dependency_manager = DependencyManager(Path(self.project_dir))
+        
+        # Initialize parsers (Mandatory)
+        try:
+            self.ts_parser = FaultTolerantParser()
+            logger.info("FaultTolerantParser (Python) initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize FaultTolerantParser: {e}")
+            print(f"❌ [SYSTEM] Critical Error: Failed to initialize FaultTolerantParser (Python): {e}")
+            self.ts_parser = None
+            
+        try:
+            self.ml_parser = MultiLanguageParser()
+            logger.info("MultiLanguageParser initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize MultiLanguageParser: {e}")
+            print(f"❌ [SYSTEM] Critical Error: Failed to initialize MultiLanguageParser: {e}")
+            self.ml_parser = None
         
         # Ensure formatting tools are available in project venv
         try:
@@ -3458,539 +3479,628 @@ Remember: You can override the validator if you believe the critique is incorrec
 
     def _extract_files_from_instruction(self, instruction: str) -> List[str]:
         """
-        Extract file paths mentioned in instruction.
-        
+        Extract file paths mentioned in instruction for all supported languages.
+    
         Parses patterns like:
         - FILE: path/to/file.py
-        - `path/to/file.py`
-        - modify path/to/file.py
+        - `path/to/file.ts`
+        - modify path/to/file.java
+    
+        Supported extensions: .py, .js, .jsx, .mjs, .ts, .tsx, .java, .go
         """
         import re
-        
+    
         files: List[str] = []
         seen: set = set()
-        
+    
+        # Non-capturing group for supported file extensions
+        ext = r'(?:\.py|\.js|\.jsx|\.mjs|\.ts|\.tsx|\.java|\.go)'
+    
         patterns = [
-            r'FILE:\s*[`"]?([^`"\n\s]+\.py)[`"]?',
-            r'`([^`\n]+\.py)`',
-            r'(?:modify|create|update|edit|change|in|to)\s+[`"]?([a-zA-Z0-9_/\\]+\.py)[`"]?',
+            # Pattern 1: FILE: directive
+            fr'FILE:\s*[`"]?([^`"\n\s]+{ext})[`"]?',
+            # Pattern 2: backtick-quoted paths
+            fr'`([^`\n]+{ext})`',
+            # Pattern 3: action verbs before path (supports dots in directory names)
+            fr'(?:modify|create|update|edit|change|in|to)\s+[`"]?([a-zA-Z0-9_/\\.-]+{ext})[`"]?',
         ]
-        
+    
         for pattern in patterns:
             for match in re.finditer(pattern, instruction, re.IGNORECASE):
                 path = match.group(1).strip()
                 if path not in seen:
                     seen.add(path)
                     files.append(path)
-        
+    
         return files
 
     def _instruction_requires_code(self, instruction: str) -> bool:
-            """
-            Check if the Orchestrator instruction implies code generation.
-
-            Args:
-                instruction: Orchestrator instruction text
-
-            Returns:
-                True if instruction requires code, False otherwise
-            """
-            import re
-            if not instruction:
-                return False
-
-            patterns = [
-                r'\*\*SCOPE:\*\*',
-                r'###\s*FILE:\s*`',
-                r'####\s*ACTION:',
-                r'### FILE:',
-                r'\*\*Operation:\*\*',
-            ]
-
-            try:
-                for pattern in patterns:
-                    if re.search(pattern, instruction):
-                        return True
-                return False
-            except Exception as e:
-                logger.warning(f"Error in _instruction_requires_code: {e}")
-                return True  # Default to True for safety
-
-
-    
-    # ========================================================================
-    # INTERNAL: STAGING
-    # ========================================================================
-    
-    async def _stage_code_blocks(self, code_blocks: List[ParsedCodeBlock]) -> List[Dict[str, Any]]:
         """
-        Stage code blocks to VFS with atomic rollback on failure.
-        
-        IMPROVED: After each block is applied, validates the file structure using tree-sitter.
-        If the structure is broken:
-        1. Remove all tabs from the code block
-        2. Re-apply the block
-        3. Try to fix indentation using tree-sitter context analysis
-        4. If still broken, reject the block but continue with others
-        """
-        errors = []
-        applied_backups = []  # List of (file_path, original_change_obj, backup_content)
-        
-        # Lazy import tree-sitter parser
-        from app.services.tree_sitter_parser import FaultTolerantParser
-        try:
-            ts_parser = FaultTolerantParser()
-        except Exception:
-            ts_parser = None
-        
-        for block in code_blocks:
-            try:
-                # 1. Backup state (store the PendingChange object or None)
-                current_change = self.vfs.get_change(block.file_path)
-                backup_content = self.vfs.read_file(block.file_path)
-                applied_backups.append((block.file_path, current_change, backup_content))
-                
-                # 2. Read content (from VFS or empty if new)
-                existing_content = self.vfs.read_file(block.file_path) or ""
-                
-                # 3. Pre-process code block: remove all tabs
-                original_block_code = block.code
-                if block.code and '\t' in block.code:
-                    block.code = block.code.replace('\t', '    ')
-                    logger.debug(f"Removed tabs from code block for {block.file_path}")
-                
-                # 4. Apply modification
-                result = self.file_modifier.apply_code_block(existing_content, block)
-                
-                if result.success and result.new_content:
-                    # === TREE-SITTER VALIDATION AFTER APPLY ===
-                    structure_valid = True
-                    repair_attempted = False
-                    final_content = result.new_content
-                    
-                    if ts_parser and block.file_path.endswith('.py'):
-                        try:
-                            # Check if tree structure is broken
-                            is_broken, error_details = self._check_tree_structure_broken(
-                                ts_parser, result.new_content, block
-                            )
-                            
-                            if is_broken:
-                                structure_valid = False
-                                repair_attempted = True
-                                logger.warning(f"Tree-sitter detected structural errors in {block.file_path}: {error_details[:2]}")
-                                
-                                # === ATTEMPT REPAIR: tree-sitter context-aware fix ===
-                                repaired_content = self._attempt_structure_repair_with_context(
-                                    existing_content, block, ts_parser
-                                )
-                                
-                                if repaired_content:
-                                    # Verify repair worked
-                                    is_still_broken, _ = self._check_tree_structure_broken(
-                                        ts_parser, repaired_content, block
-                                    )
-                                    
-                                    if not is_still_broken:
-                                        logger.info(f"Structure repair succeeded for {block.file_path}")
-                                        final_content = repaired_content
-                                        structure_valid = True
-                                    else:
-                                        logger.warning(f"Structure repair failed for {block.file_path}")
-                                else:
-                                    logger.warning(f"Structure repair returned None for {block.file_path}")
-                                        
-                        except Exception as e:
-                            logger.debug(f"Tree-sitter validation skipped: {e}")
-                    
-                    # === NEW: Non-Python language validation ===
-                    elif final_content and block.language and block.language in ('javascript', 'typescript', 'go', 'java'):
-                        try:
-                            # Detect language from block or file extension
-                            block_language = block.language
-                            if not block_language:
-                                ext_map = {'.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript',
-                                        '.ts': 'typescript', '.tsx': 'typescript',
-                                        '.go': 'go', '.java': 'java'}
-                                import os
-                                _, ext = os.path.splitext(block.file_path)
-                                block_language = ext_map.get(ext.lower())
-                            
-                            if block_language and block_language in ('javascript', 'typescript', 'go', 'java'):
-                                multi_parser = MultiLanguageParser()
-                                is_valid, errors_list = multi_parser.validate_syntax(final_content, block_language)
-                                
-                                if not is_valid and errors_list:
-                                    structure_valid = False
-                                    logger.warning(f"Tree-sitter syntax validation failed for {block_language}: {errors_list[:3]}")
-                                    
-                                    # Restore original block code
-                                    block.code = original_block_code
-                                    
-                                    from app.agents.feedback_handler import StagingErrorType
-                                    error_dict = block.to_dict()
-                                    error_dict.update({
-                                        "error": f"Tree-sitter syntax validation failed for {block_language}: {'; '.join(errors_list[:3])}",
-                                        "error_type": StagingErrorType.SYNTAX_VALIDATION_FAILED,
-                                        "code_preview": block.code[:100] if block.code else None,
-                                        "full_code": block.code,
-                                    })
-                                    errors.append(error_dict)
-                                    
-                                    # Restore backup for this file
-                                    if backup_content is not None:
-                                        self.vfs.stage_change(block.file_path, backup_content)
-                                    else:
-                                        self.vfs.unstage(block.file_path)
-                                    
-                                    logger.warning(f"Rejected block for {block.file_path}: {block_language} syntax validation failed")
-                                    continue
-                        
-                        except Exception as e:
-                            logger.debug(f"Non-Python language validation skipped: {e}")
-                    
-                    if structure_valid:
-                        # Stage the change
-                        self.vfs.stage_change(block.file_path, final_content)
-                        if repair_attempted:
-                            logger.info(f"Staged (after repair): {block.file_path} ({block.mode})")
-                        else:
-                            logger.info(f"Staged: {block.file_path} ({block.mode})")
-                    else:
-                        # Structure broken and repair failed - reject this block
-                        from app.agents.feedback_handler import StagingErrorType
-                        
-                        # Restore original block code
-                        block.code = original_block_code
-                        
-                        error_dict = block.to_dict()
-                        error_dict.update({
-                            "error": f"Code block breaks file structure. Tree-sitter detected critical errors that could not be repaired.",
-                            "error_type": StagingErrorType.SYNTAX_VALIDATION_FAILED,
-                            "code_preview": block.code[:100] if block.code else None,
-                            "full_code": block.code,
-                        })
-                        errors.append(error_dict)
-                        
-                        # Restore backup for this file
-                        if backup_content is not None:
-                            self.vfs.stage_change(block.file_path, backup_content)
-                        else:
-                            self.vfs.unstage(block.file_path)
-                        
-                        logger.warning(f"Rejected block for {block.file_path}: structure validation failed")
-                        # Continue to next block - don't stop processing
-                        continue
-                            
-                elif result.success:
-                    # Success but no new_content (edge case)
-                    self.vfs.stage_change(block.file_path, result.new_content or existing_content)
-                    logger.info(f"Staged: {block.file_path} ({block.mode})")
-                else:
-                    # Apply failed
-                    # Restore original block code
-                    block.code = original_block_code
-                    
-                    error_dict = block.to_dict()
-                    error_dict.update({
-                        "error": result.message,
-                        "error_type": getattr(result, "error_type", None),
-                        "code_preview": block.code[:100] if block.code else None,
-                        "full_code": block.code,
-                    })
-                    
-                    errors.append(error_dict)
-                    
-                    logger.warning(
-                        f"Failed to apply block to {block.file_path}: {result.message} | "
-                        f"mode={block.mode}, target_class={block.target_class}, "
-                        f"target_method={block.target_method}, target_function={block.target_function}"
-                    )
-                    
-            except Exception as e:
-                error_dict = block.to_dict()
-                error_dict.update({
-                    "error": str(e),
-                    "error_type": None,
-                    "code_preview": block.code[:100] if block.code else None,
-                    "full_code": block.code,
-                })
-                
-                errors.append(error_dict)
-                logger.error(f"Error staging {block.file_path}: {e}")
-        
-        # Note: We no longer do full rollback on errors - each block is handled independently
-        # This allows successful blocks to be staged even if some fail
-                            
-        return errors
-    
-    
-    
-    def _attempt_structure_repair_with_context(
-        self, 
-        existing_content: str, 
-        block: 'ParsedCodeBlock',
-        ts_parser: 'FaultTolerantParser'
-    ) -> Optional[str]:
-        """
-        Attempts to repair Python file structure using tree-sitter context analysis.
-        
-        Process:
-        1. Remove all tabs from the code block
-        2. Determine the correct indentation from the target context
-        3. Re-indent the code block to match the context
-        4. Apply the block and validate with tree-sitter
-        5. If still broken, try autopep8 as fallback
-        
-        Args:
-            existing_content: Original file content before the block was applied
-            block: The code block being inserted
-            ts_parser: Tree-sitter parser instance
-            
-        Returns:
-            Repaired content or None if repair failed
-        """
-        import subprocess
-        
-        if not block.code or not block.code.strip():
-            return None
-        
-        # Determine Python path
-        python_path = getattr(self, '_project_python_path', None) or 'python'
-        
-        # === STEP 1: Remove all tabs from code block ===
-        clean_code = block.code.replace('\t', '    ')
-        
-        # === STEP 2: Determine target indentation from context ===
-        target_indent = self._determine_target_indent(existing_content, block, ts_parser)
-        
-        # === STEP 3: Re-indent the code block ===
-        reindented_code = self._reindent_code_block(clean_code, target_indent)
-        
-        # === STEP 4: Create a modified block and apply ===
-        from app.services.file_modifier import ParsedCodeBlock
-        
-        modified_block = ParsedCodeBlock(
-            file_path=block.file_path,
-            mode=block.mode,
-            code=reindented_code,
-            target_class=block.target_class,
-            target_method=block.target_method,
-            target_function=block.target_function,
-            insert_after=block.insert_after,
-            insert_before=block.insert_before,
-        )
-        
-        result = self.file_modifier.apply_code_block(existing_content, modified_block)
-        
-        if result.success and result.new_content:
-            # Validate with tree-sitter
-            is_broken, _ = self._check_tree_structure_broken(ts_parser, result.new_content, block)
-            
-            if not is_broken:
-                logger.debug("Structure repair via re-indentation succeeded")
-                return result.new_content
-        
-        # === STEP 5: Fallback - try autopep8 on the whole file ===
-        if result.success and result.new_content:
-            try:
-                indent_codes = 'E101,E111,E112,E113,E114,E115,E116,E117,E121,E122,E123,E124,E125,E126,E127,E128,E129,E131,W191'
-                
-                autopep8_result = subprocess.run(
-                    [python_path, '-m', 'autopep8', '--select=' + indent_codes, '-'],
-                    input=result.new_content,
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                
-                if autopep8_result.returncode == 0 and autopep8_result.stdout:
-                    # Validate the autopep8 result
-                    is_broken, _ = self._check_tree_structure_broken(ts_parser, autopep8_result.stdout, block)
-                    
-                    if not is_broken:
-                        logger.debug("Structure repair via autopep8 succeeded")
-                        return autopep8_result.stdout
-                        
-            except subprocess.TimeoutExpired:
-                logger.debug("autopep8 timed out during structure repair")
-            except Exception as e:
-                logger.debug(f"autopep8 failed during structure repair: {e}")
-        
-        return None
-    
-    def _check_tree_structure_broken(
-        self, 
-        ts_parser: 'FaultTolerantParser', 
-        content: str, 
-        block: 'ParsedCodeBlock'
-    ) -> tuple[bool, list]:
-        """
-        Check if the tree structure is broken in a way that would prevent
-        subsequent code blocks from being inserted.
-        
-        Checks:
-        1. Tree-sitter reports critical errors (ERROR nodes)
-        2. Target class is no longer parseable
-        3. Target method/function is no longer parseable
-        4. Methods inside target class have errors
-        
-        Returns:
-            (is_broken, error_details)
-        """
-        error_details = []
-        
-        try:
-            parse_result = ts_parser.parse(content)
-        except Exception as e:
-            return True, [f"Parse failed: {e}"]
-        
-        # Check 1: Critical ERROR nodes in the tree
-        if parse_result.has_errors:
-            for error in parse_result.errors[:5]:
-                error_str = str(error)
-                error_details.append(error_str)
-        
-        # Check 2: Target class is still parseable
-        if block.target_class:
-            target_cls = parse_result.get_class(block.target_class)
-            if target_cls is None:
-                error_details.append(f"Target class '{block.target_class}' not found or broken")
-                return True, error_details
-        
-        # Check 3: Target method/function is still parseable
-        if block.target_method:
-            if block.target_class:
-                target_cls = parse_result.get_class(block.target_class)
-                if target_cls:
-                    method = parse_result.get_method(block.target_class, block.target_method)
-                    if method is None:
-                        error_details.append(f"Target method '{block.target_method}' not found in class")
-                        return True, error_details
-            else:
-                func = parse_result.get_function(block.target_method)
-                if func is None:
-                    error_details.append(f"Target function '{block.target_method}' not found")
-                    return True, error_details
-        
-        elif block.target_function:
-            func = parse_result.get_function(block.target_function)
-            if func is None:
-                error_details.append(f"Target function '{block.target_function}' not found")
-                return True, error_details
-        
-        # Check 4: If we have critical errors, it's broken
-        if error_details and parse_result.has_errors:
-            return True, error_details
-        
-        return False, error_details
-    
-    def _determine_target_indent(
-        self, 
-        existing_content: str, 
-        block: 'ParsedCodeBlock',
-        ts_parser: 'FaultTolerantParser'
-    ) -> int:
-        """
-        Determine the correct indentation level for the code block
-        based on its target context.
-        
-        Args:
-            existing_content: Original file content
-            block: Code block with target information
-            ts_parser: Tree-sitter parser
-            
-        Returns:
-            Number of spaces for indentation (0, 4, 8, 12, etc.)
+        Check if the Orchestrator instruction implies code generation.
         """
         import re
-        
-        # Default: module level (0 spaces)
-        target_indent = 0
+        if not instruction:
+            return False
+            
+        patterns = [
+            r'\*\*SCOPE:\*\*',
+            r'###\s*FILE:\s*`',
+            r'####\s*ACTION:',
+            r'### FILE:',
+            r'\*\*Operation:\*\*',
+        ]
         
         try:
-            parse_result = ts_parser.parse(existing_content)
-        except Exception:
-            return target_indent
+            for pattern in patterns:
+                if re.search(pattern, instruction):
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"Error in _instruction_requires_code: {e}")
+            return True
+
+    def _ensure_parsers_ready(self, file_path: str) -> bool:
+        """
+        Check if the required parser for the file is available.
+        Returns True if ready, False otherwise.
+        """
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
+        if ext == '.py':
+            return self.ts_parser is not None
+        elif ext in {'.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.c', '.cpp', '.cs'}:
+            return self.ml_parser is not None
+        return True
+
+    async def _stage_code_blocks(self, code_blocks: List[ParsedCodeBlock]) -> List[Dict[str, Any]]:
+        """
+        Stage code blocks using 3-pass validation with Atomic Rollback and Pre-check.
+        """
+        final_errors = []
+        structural_queue = []
+        dependency_queue = []
         
-        # If targeting a class method
-        if block.target_class and block.target_method:
-            # Methods inside classes are indented 8 spaces (4 for class, 4 for method body)
-            target_indent = 8
-        
-        # If targeting a class
-        elif block.target_class:
-            # Class body is indented 4 spaces
-            target_indent = 4
-        
-        # If targeting a function
-        elif block.target_method or block.target_function:
-            # Function body is indented 4 spaces
-            target_indent = 4
-        
-        # Try to detect actual indentation from existing code
-        if existing_content:
-            lines = existing_content.split('\n')
+        from app.services.virtual_fs import ChangeType
+        from app.services.file_modifier import classify_staging_error
+
+        SUPPORTED_TS_EXTENSIONS = {'.py', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.c', '.cpp', '.cs'}
+        _lang_map = {
+            '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
+            '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+            '.c': 'c', '.cpp': 'cpp', '.cs': 'c_sharp'
+        }
+
+        # --- PHASE 0: Pre-check file integrity ---
+        logger.info(f"Phase 0: Checking integrity of {len(code_blocks)} target files")
+        pre_corrupted_files: Dict[str, List[str]] = {}  # Map path -> list of error details
+        unique_paths = {b.file_path for b in code_blocks}
+        for path in unique_paths:
+            content = self.vfs.read_file(path)
+            if not content: continue
             
-            # Look for indented lines to detect the pattern
-            for line in lines:
-                if line and not line[0].isspace():
+            is_pre_broken = False
+            error_details = []
+            
+            if not self._ensure_parsers_ready(path):
+                continue
+
+            _, ext = os.path.splitext(path)
+            lang_name = _lang_map.get(ext.lower(), 'unknown') if ext.lower() != '.py' else 'python'
+            parser_obj = self.ts_parser if (ext.lower() == '.py') else self.ml_parser
+            
+            try:
+                is_pre_broken, _, error_details = self._check_tree_structure_broken(
+                    parser_obj, content, language=lang_name
+                )
+            except Exception as e:
+                logger.error(f"Phase 0 Validation crash for {path}: {e}")
+                is_pre_broken = True
+                error_details = [f"System error during integrity check: {str(e)}"]
+            
+            if is_pre_broken:
+                msg = f"Phase 0: File {path} already corrupted. Details: {error_details}"
+                logger.warning(msg)
+                print(f"❌ [STAGING-PHASE-0] {msg}") # Output to terminal as per user instruction
+                pre_corrupted_files[path] = error_details
+
+        # --- PASS 1: Discovery ---
+        logger.info(f"Starting Pass 1 (Discovery) for {len(code_blocks)} blocks")
+        modified_files: set[str] = set()
+        
+        for block_idx, block in enumerate(code_blocks):
+            try:
+                # 1. State Capture
+                current_change = self.vfs.get_change(block.file_path)
+                backup_content = self.vfs.read_file(block.file_path)
+                existing_content = backup_content or ""
+
+                # 2. Phase 0 Guard: Hard-block corrupted files except for full REPLACE_FILE
+                if block.file_path in pre_corrupted_files and block.mode != "REPLACE_FILE":
+                    details = "; ".join(pre_corrupted_files[block.file_path])
+                    logger.error(f"Phase 0 Guard: Block {block_idx+1} rejected due to pre-existing corruption in {block.file_path}. Details: {details}")
+                    msg = f"File {block.file_path} is already broken (pre-existing corruption). Details: {details}. Fix its structure manually or use REPLACE_FILE mode."
+                    final_errors.append(self._format_staging_error(block, "PRE_EXISTING_CORRUPTION", msg, backup_content))
                     continue
-                if line.strip():
-                    # Count leading spaces
-                    spaces = len(line) - len(line.lstrip(' '))
-                    if spaces > 0 and spaces % 4 == 0:
-                        # Found a properly indented line
-                        if block.target_class and block.target_method:
-                            # Look for method inside class
-                            if 'def ' in line:
-                                target_indent = spaces + 4  # Method body
-                                break
-                        elif block.target_class:
-                            # Look for class body
-                            if not line.strip().startswith('def '):
-                                target_indent = spaces
-                                break
-        
-        logger.debug(f"Determined target indent: {target_indent} spaces for {block.target_class or block.target_method or block.target_function}")
-        return target_indent
-    
-    def _reindent_code_block(self, code: str, target_indent: int) -> str:
-        """
-        Re-indent a code block to match the target indentation level.
-        
-        Args:
-            code: Code block to re-indent
-            target_indent: Target indentation in spaces
+
+                # 3. Parser readiness
+                if not self._ensure_parsers_ready(block.file_path):
+                    final_errors.append(self._format_staging_error(block, "STAGING_SYSTEM_ERROR", "Parser unavailable", backup_content))
+                    continue
+
+                # 4. Pre-process
+                if block.code and '\t' in block.code:
+                    block.code = block.code.replace('\t', '    ')
+
+                # 5. Application attempt
+                result = self.file_modifier.apply_code_block(existing_content, block)
+                
+                if result.success and result.new_content is not None:
+                    # 6. Integrity validation [V18.20]
+                    final_content = result.new_content
+                    _, ext = os.path.splitext(block.file_path)
+                    ext = ext.lower()
+                    is_code_file = ext in SUPPORTED_TS_EXTENSIONS
+                    is_python = (ext == '.py')
+
+                    is_broken = False
+                    error_type = "NONE"
+                    error_details = []
+
+                    if is_code_file:
+                        lang_name = block.language or _lang_map.get(ext, 'unknown') if not is_python else 'python'
+                        parser_obj = self.ts_parser if is_python else self.ml_parser
+                        
+                        try:
+                            # [V18.20] Only checks for SYNTAX_ERROR now
+                            is_broken, error_type, error_details = self._check_tree_structure_broken(
+                                parser_obj, final_content, block, language=lang_name
+                            )
+                        except Exception as e:
+                            logger.error(f"Validation crashed: {e}")
+                            is_broken = True
+                            error_type = "SYSTEM_ERROR"
+                            error_details = [f"Validation exception: {str(e)}"]
+
+                    # 7. Classification and Routing [V18.20]
+                    if is_broken:
+                        # [ATOMIC-ROLLBACK] Revert VFS to backup immediately
+                        self.vfs.stage_change(block.file_path, backup_content, current_change.change_type if current_change else ChangeType.MODIFY)
+                        
+                        # [V18.20] Any breakage after successful FileModifier application is a structural/syntax regression.
+                        # These are routed to Pass 2 (AI Fixer).
+                        structural_queue.append((block_idx, block, error_details))
+                        print(f"🔧 [STAGING-P1] Block {block_idx+1} tree corruption ({error_type}). Rolling back and deferring to Pass 2 (AI Fixer)...")
+                    else:
+                        # [DEEP-INTEGRITY-OK] Commit change to VFS
+                        change_type = ChangeType.CREATE if not backup_content else ChangeType.MODIFY
+                        self.vfs.stage_change(block.file_path, final_content, change_type)
+                        modified_files.add(block.file_path)
+                        print(f"✅ [STAGING-P1] Block {block_idx+1}/{len(code_blocks)} staged successfully: {block.file_path}")
+
+                else:
+                    # Application error
+                    self.vfs.stage_change(block.file_path, backup_content, current_change.change_type if current_change else ChangeType.MODIFY)
+                    err_type_obj = classify_staging_error(result.message, block.mode)
+                    err_type = err_type_obj.value
+                    if err_type in ["class_not_found", "method_not_found", "function_not_found", "insert_pattern_not_found"]:
+                        dependency_queue.append((block_idx, block, backup_content, current_change, result.message))
+                    else:
+                        final_errors.append(self._format_staging_error(block, err_type, result.message, backup_content))
+
+            except Exception as e:
+                logger.error(f"Pass 1 exception: {e}")
+                try: self.vfs.stage_change(block.file_path, backup_content, current_change.change_type if current_change else ChangeType.MODIFY)
+                except: pass
+                final_errors.append(self._format_staging_error(block, "SYSTEM_ERROR", str(e), backup_content))
+
+        # --- PASS 2: Structural Repairs ---
+        any_fixes_succeeded = False
+        if structural_queue:
+            logger.info(f"Starting Pass 2 (System Cascade) for {len(structural_queue)} deferred blocks")
+            print(f"\n🔧 [STAGING] Starting Pass 2: System-controlled cascade A->B for {len(structural_queue)} blocks...")
+            import copy
             
-        Returns:
-            Re-indented code
+            # Model references
+            from config.settings import cfg
+            MODEL_A = cfg.MODEL_QWEN3_Coder_Next
+            MODEL_B = cfg.MODEL_NORMAL
+
+            for queue_item in structural_queue:
+                block_idx, block, error_details = queue_item
+                current_vfs_content = self.vfs.read_file(block.file_path) or ""
+                _, ext = os.path.splitext(block.file_path)
+                is_python = (ext == '.py')
+                lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if not is_python else 'python'
+                parser_obj = self.ts_parser if is_python else None
+
+                # 1. CREATE SNAPSHOT
+                snapshot_content = current_vfs_content
+                logger.info(f"Pass 2: Snapshot saved for {block.file_path} before cascade.")
+                
+                fixed_snippet = None
+                attempt_model = None
+
+                # 2. ATTEMPT A (Primary Model)
+                print(f"🤖 [PASS 2-A] Attempting fix with Model A...")
+                fixed_snippet = await self._attempt_ai_structure_fix(
+                    block=block, existing_content=current_vfs_content,
+                    error_details=error_details, language=lang_name,
+                    ts_parser=parser_obj, target_model=MODEL_A
+                )
+
+                if fixed_snippet and fixed_snippet != block.code:
+                    print(f"🤖 [DEBUG] Model A proposed code:\n{fixed_snippet}\n" + "-"*40)
+                    temp_block = copy.copy(block)
+                    temp_block.code = fixed_snippet
+                    temp_res = self.file_modifier.apply_code_block(current_vfs_content, temp_block)
+                    if temp_res.success and temp_res.new_content:
+                        is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name)
+                        if not is_broken:
+                            attempt_model = "A"
+                            print(f"✅ [PASS 2-A] Model A validated.")
+                        else:
+                            print(f"⚠️ [PASS 2-A] Model A failed structural validation after application.")
+                            fixed_snippet = None
+                    else:
+                        print(f"⚠️ [PASS 2-A] Model A failed to apply: {temp_res.message}")
+                        fixed_snippet = None
+                
+                last_attempted_snippet = fixed_snippet or None
+
+                # 3. IF A FAILED -> IMMEDIATE ROLLBACK & ATTEMPT B
+                if fixed_snippet is None:
+                    print(f"⚠️ [PASS 2-A] Model A failed. Rolling back to snapshot...")
+                    from app.services.virtual_fs import ChangeType
+                    self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                    
+                    print(f"🤖 [PASS 2-B] Attempting fix with Fallback Model B...")
+                    fixed_snippet = await self._attempt_ai_structure_fix(
+                        block=block, existing_content=snapshot_content,
+                        error_details=error_details, language=lang_name,
+                        ts_parser=parser_obj, target_model=MODEL_B
+                    )
+
+                    if fixed_snippet and fixed_snippet != block.code:
+                        print(f"🤖 [DEBUG] Model B (Fallback) proposed code:\n{fixed_snippet}\n" + "-"*40)
+                        temp_block = copy.copy(block)
+                        temp_block.code = fixed_snippet
+                        temp_res = self.file_modifier.apply_code_block(snapshot_content, temp_block)
+                        if temp_res.success and temp_res.new_content:
+                            is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name)
+                            if not is_broken:
+                                attempt_model = "B"
+                                print(f"✅ [PASS 2-B] Model B validated.")
+                            else:
+                                print(f"⚠️ [PASS 2-B] Model B failed structural validation after application.")
+                                fixed_snippet = None
+                        else:
+                            print(f"⚠️ [PASS 2-B] Model B failed to apply: {temp_res.message}")
+                            fixed_snippet = None
+                    
+                    if fixed_snippet:
+                        last_attempted_snippet = fixed_snippet
+
+                    # 4. TERMINAL ROLLBACK IF B FAILS
+                    if fixed_snippet is None:
+                        print(f"❌ [PASS 2-B] Model B failed. Terminal rollback for {block.file_path}")
+                        from app.services.virtual_fs import ChangeType
+                        self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                        final_errors.append(self._format_staging_error(
+                            block, "AI_CASCADE_FAILED", 
+                            "Both Model A and Model B failed structural validation.", 
+                            snapshot_content,
+                            ai_fixed_code=last_attempted_snippet
+                        ))
+                        continue
+
+                # 5. COMMIT SUCCESSFUL FIX
+                if fixed_snippet and attempt_model:
+                    from app.services.virtual_fs import ChangeType
+                    repaired_block = copy.copy(block)
+                    repaired_block.code = fixed_snippet
+                    repair_apply_result = self.file_modifier.apply_code_block(snapshot_content, repaired_block)
+
+                    if repair_apply_result.success and repair_apply_result.new_content:
+                        # [V18.25] FINAL INTEGRITY GATEWAY: 
+                        # We MUST validate the final combined content before committing to VFS.
+                        # This prevents silent failures if the patch technically applies but breaks structure.
+                        final_vfs_content = repair_apply_result.new_content
+                        is_broken_final, err_type_final, details_final = self._check_tree_structure_broken(
+                            parser_obj, final_vfs_content, block, language=lang_name
+                        )
+                        
+                        if not is_broken_final:
+                            self.vfs.stage_change(block.file_path, final_vfs_content, ChangeType.MODIFY)
+                            print(f"🔧 [STAGING-P2] Block {block_idx+1} REPAIRED and VALIDATED via {attempt_model}: {block.file_path}")
+                            any_fixes_succeeded = True
+                            modified_files.add(block.file_path)
+                        else:
+                            # AI fix produced invalid structure during final merge!
+                            print(f"❌ [STAGING-P2] Block {block_idx+1} AI fix ({attempt_model}) produced INVALID structure. Rolling back.")
+                            self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                            final_errors.append(self._format_staging_error(
+                                block, "SYNTAX_VALIDATION_FAILED", 
+                                f"AI repair ({attempt_model}) resulted in broken structure during final application: {'; '.join(details_final)}", 
+                                snapshot_content
+                            ))
+                    else:
+                        self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                        final_errors.append(self._format_staging_error(block, "STRUCTURAL_APPLY_FAILED", "Failed to apply validated fix.", snapshot_content))
+
+        # --- PASS 3: Dependency Retry ---
+        if dependency_queue:
+            logger.info(f"Starting Pass 3 (Dependency Retry) for {len(dependency_queue)} deferred blocks")
+            for block_idx, block, backup_content, current_change, first_err_msg in dependency_queue:
+                if not any_fixes_succeeded:
+                    # No chance it works now if nothing was fixed
+                    logger.warning(f"Pass 3: Skipping retry for Block {block_idx+1} (no new successful fixes in Pass 2)")
+                    final_errors.append(self._format_staging_error(block, classify_staging_error(first_err_msg, block.mode).value, first_err_msg, backup_content))
+                    continue
+
+                logger.info(f"Pass 3: Retrying Block {block_idx+1} in {block.file_path} after Pass 2 fixes")
+                try:
+                    # Read current state (potentially updated by Pass 2 fixes)
+                    current_content = self.vfs.read_file(block.file_path) or ""
+                    result = self.file_modifier.apply_code_block(current_content, block)
+                    
+                    if result.success and result.new_content is not None:
+                        # Tree-sitter validation again [V14]
+                        is_broken = False
+                        if block.file_path.endswith('.py') and self.ts_parser:
+                            is_broken, error_type, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block)
+                        elif self.ml_parser and self.ml_parser.is_supported(block.file_path):
+                            _, ext = os.path.splitext(block.file_path)
+                            lang_name = block.language or _lang_map.get(ext.lower(), 'unknown')
+                            is_val, _ = self.ml_parser.validate_syntax(result.new_content, lang_name)
+                            is_broken = not is_val
+                        
+                        if not is_broken:
+                            change_type = ChangeType.MODIFY if current_content else ChangeType.CREATE
+                            self.vfs.stage_change(block.file_path, result.new_content, change_type)
+                            logger.info(f"Pass 3: Block {block_idx+1} staged successfully on retry.")
+                            print(f"🔄 [STAGING-P3] Block {block_idx+1}/{len(code_blocks)} staged on retry: {block.file_path}")
+                        else:
+                            # Still broken structure after target found? Unlikely but possible.
+                            # We don't call AI fixer here as per user instruction: "Для остальных ошибко стейджинга... без вызова ИИ фиксера сразу объявлять ошибку"
+                            logger.error(f"Pass 3: Block {block_idx+1} applied but structure still broken.")
+                            final_errors.append(self._format_staging_error(block, "SYNTAX_VALIDATION_FAILED", "Structural break persists after dependency resolution", backup_content))
+                    else:
+                        logger.error(f"Pass 3: Block {block_idx+1} still failed after retry: {result.message}")
+                        final_errors.append(self._format_staging_error(block, classify_staging_error(result.message, block.mode).value, result.message, backup_content))
+                except Exception as e:
+                    logger.error(f"Pass 3: Exception during retry of block {block_idx+1}: {e}")
+                    final_errors.append(self._format_staging_error(block, "SYSTEM_ERROR", str(e), backup_content))
+
+        # [NEW] TRANSACTIONAL ATOMICITY: Global Rollback if ANY errors remain
+        if final_errors and modified_files:
+            logger.warning(f"❌ Staging batch failed with {len(final_errors)} errors. Rolling back all changes in this batch for project integrity.")
+            print(f"❌ [STAGING] Final staging failed with {len(final_errors)} errors. Rolling back changes for: {', '.join(list(modified_files))}")
+            for file_path in modified_files:
+                self.vfs.discard_file_change(file_path)
+        
+        return final_errors
+
+    def _format_staging_error(
+        self, 
+        block: 'ParsedCodeBlock', 
+        error_type: str, 
+        message: str, 
+        backup_content: Optional[str], 
+        ai_fixed_code: Optional[str] = None,
+        ai_attempts: Optional[List[Dict[str, Any]]] = None,
+        validation_errors: Optional[List[Any]] = None
+    ) -> Dict[str, Any]:
+        """Helper to format error according to the contract."""
+        return {
+            "type": error_type,
+            "file_path": block.file_path,
+            "mode": block.mode,
+            "error": message,
+            "full_code": block.code or "",
+            "error_type": error_type,
+            "target_class": getattr(block, 'target_class', None),
+            "target_method": getattr(block, 'target_method', None),
+            "target_function": getattr(block, 'target_function', None),
+            "insert_after": getattr(block, 'insert_after', None),
+            "insert_before": getattr(block, 'insert_before', None),
+            "replace_pattern": getattr(block, 'replace_pattern', None),
+            "ai_fixed_code": ai_fixed_code,
+            "ai_attempts": ai_attempts or [],
+            "validation_errors": validation_errors or [],
+            "backup_content": backup_content,
+        }
+
+    def _extract_broken_snapshot_robust(self, block: ParsedCodeBlock, content: str) -> Optional[str]:
+        """Helper to extract context around the block for the AI fixer."""
+        try:
+            lines = content.splitlines()
+            if not lines: return None
+            
+            # Simple heuristic: find the insertion point
+            ins_line = -1
+            if block.insert_after and block.insert_after in content:
+                for i, l in enumerate(lines):
+                    if block.insert_after in l:
+                        ins_line = i; break
+            elif block.code:
+                first = block.code.splitlines()[0].strip()
+                if first:
+                    for i, l in enumerate(lines):
+                        if first in l:
+                            ins_line = i; break
+            
+            if ins_line >= 0:
+                start = max(0, ins_line - 20)
+                end = min(len(lines), ins_line + 30)
+                return "\n".join(lines[start:end])
+        except:
+            pass
+        return None
+
+
+    def _add_line_numbers(self, code: str, start_line: int = 1) -> str:
+        """Helper to add line numbers to code blocks for better AI debugging."""
+        if not code:
+            return ""
+        lines = code.splitlines()
+        return "\n".join(f"{i+start_line:4d}: {line}" for i, line in enumerate(lines))
+
+    
+    
+    async def _attempt_ai_structure_fix(
+        self,
+        block: 'ParsedCodeBlock',
+        existing_content: str,
+        error_details: list,
+        language: str,
+        ts_parser,
+        target_model: Optional[str] = None
+    ) -> Optional[str]:
         """
-        lines = code.split('\n')
-        reindented_lines = []
+        Pure function: extracts context and calls the syntax fixer.
+        NO loops, NO validation, NO VFS application.
+        Returns only the proposed fixed code snippet.
+        """
+        try:
+            from app.services.syntax_fixer_agent import _call_syntax_fixer, extract_surrounding_context
+            from pathlib import Path as _Path
+
+            # Determine insertion line
+            insertion_line = None
+            content_lines = existing_content.splitlines()
+            if block.insert_after is not None:
+                for i, line in enumerate(content_lines):
+                    if block.insert_after in line: insertion_line = i + 1; break
+            elif block.insert_before is not None:
+                for i, line in enumerate(content_lines):
+                    if block.insert_before in line: insertion_line = i; break
+            elif getattr(block, 'replace_pattern', None) is not None:
+                for i, line in enumerate(content_lines):
+                    if block.replace_pattern in line: insertion_line = i; break
+
+            context_result = extract_surrounding_context(
+                file_content=existing_content,
+                target_class=block.target_class,
+                target_method=block.target_method,
+                target_function=block.target_function,
+                language=language,
+                mode=block.mode,
+                insertion_line=insertion_line,
+            )
+            surrounding_context = context_result.get("surrounding_context", "")
+
+            # Build neutral context info
+            error_details_str = '; '.join(str(e) for e in error_details) if isinstance(error_details, list) else str(error_details)
+            context_info = {
+                "mode": block.mode,
+                "target_name": block.target_method or block.target_function or block.target_class or "unknown",
+                "error_details": error_details_str,
+                "surrounding_context": self._add_line_numbers(surrounding_context, insertion_line - 50 if insertion_line is not None else 1) if surrounding_context else "",
+                "original_code": block.code,
+            }
+
+            # Call fixer (handles cascade or direct model call)
+            return await _call_syntax_fixer(block.code, language, context_info, target_model=target_model)
+
+        except Exception as e:
+            logger.error(f"Error in _attempt_ai_structure_fix for {block.file_path}: {e}", exc_info=True)
+            return None    
+    
+    def _check_tree_structure_broken(
+        self,
+        parser: Union['FaultTolerantParser', 'MultiLanguageParser'],
+        content: str,
+        block: Optional['ParsedCodeBlock'] = None,
+        language: str = 'python'
+    ) -> Tuple[bool, str, List[str]]:
+        """
+        [V18.20] Validates structural integrity using native tools for Python and Tree-sitter MISSING nodes for others.
+        Returns: (is_broken, error_type, details)
+        """
+        import os
+        import tempfile
+        error_details = []
+        is_python = (language.lower() == 'python')
         
-        # Detect current indentation of the first non-empty line
-        current_indent = 0
-        for line in lines:
-            if line.strip():
-                current_indent = len(line) - len(line.lstrip(' '))
-                break
-        
-        # Calculate difference
-        indent_diff = target_indent - current_indent
-        
-        # Re-indent all lines
-        for line in lines:
-            if not line.strip():
-                # Empty line - keep as is
-                reindented_lines.append(line)
-            else:
-                # Non-empty line - adjust indentation
-                current_spaces = len(line) - len(line.lstrip(' '))
-                new_spaces = max(0, current_spaces + indent_diff)
-                reindented_lines.append(' ' * new_spaces + line.lstrip(' '))
-        
-        return '\n'.join(reindented_lines)
+        if is_python:
+            # 1. Python Syntax & Indentation check via pycodestyle (as per v7.5 plan)
+            tmp_path = None
+            try:
+                # write internal content to temporary file for analysis
+                with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+                    f.write(content.encode('utf-8'))
+                    tmp_path = f.name
+                
+                # [V18.25] Mapping of codes to human-readable structural failure types
+                CODE_MAPPING = {
+                    'E901': 'Fatal Syntax Error / Token Error',
+                    'E101': 'Indentation Error: Mixed spaces and tabs (Fatal in Python 3)',
+                    'E112': 'Indentation Error: Expected an indented block',
+                    'E113': 'Indentation Error: Unexpected indentation',
+                    'E902': 'System Error: Unreadable file (IOError)'
+                }
+
+                # Custom reporter to capture errors in a list
+                class ErrorReporter(pycodestyle.BaseReport):
+                    def __init__(self, options):
+                        super().__init__(options)
+                        self.results = []
+                    def error(self, line_number, offset, text, check):
+                        code = super().error(line_number, offset, text, check)
+                        if code:
+                            desc = CODE_MAPPING.get(code, "Structural anomaly")
+                            self.results.append(f"Line {line_number}:{offset} - {code}: {desc} ({text})")
+                        return code
+
+                # Select only critical nesting/syntax/structural errors as specified in v8.5 plan
+                guide = pycodestyle.StyleGuide(
+                    select=['E901', 'E101', 'E112', 'E113', 'E902'], 
+                    quiet=True,
+                    reporter=ErrorReporter
+                )
+                
+                # Use pycodestyle's StyleGuide to find critical violations
+                report = guide.check_files([tmp_path])
+                
+                if report.total_errors > 0:
+                    # Collect detailed error information from our custom reporter
+                    error_details.extend(report.results)
+                
+            except Exception as e:
+                logger.error(f"Error during Python integrity check using pycodestyle: {e}")
+                error_details.append(f"System evaluation error (pycodestyle): {str(e)}")
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try: os.remove(tmp_path)
+                    except: pass
+        else:
+            # 2. Non-Python: Tree-sitter ERROR and MISSING nodes
+            # parser.validate_syntax already checks for ERROR nodes
+            is_valid, ts_errors = parser.validate_syntax(content, language)
+            
+            # [PLAN COMPLIANCE] Also explicitly get missing nodes via the new method
+            missing_nodes = parser.get_missing_nodes(content, language)
+            
+            if not is_valid or missing_nodes:
+                # Combine distinct errors
+                all_errors = list(set(ts_errors + missing_nodes))
+                error_details.extend([str(e) for e in all_errors[:5]])
+
+        if error_details:
+            # Deduplicate errors
+            seen = set()
+            unique_errors = []
+            for e in error_details:
+                if e not in seen:
+                    unique_errors.append(e)
+                    seen.add(e)
+            return True, "SYNTAX_ERROR", unique_errors
+
+        return False, "NONE", []
+    
+    
+    
+    
     
     # ========================================================================
     # INTERNAL: VALIDATION
@@ -4334,28 +4444,20 @@ Remember: You can override the validator if you believe the critique is incorrec
             parts.append("")
             
             for err in file_errors[:5]:
-                level_str = err.level.value if hasattr(err.level, 'value') else str(err.level)
-
-                # Include language in label if available
-                language = getattr(err, 'language', None)
-                if language:
-                    label = f"[{level_str} | {language}]"
-                else:
-                    label = f"[{level_str}]"
-
-                    parts.append(f"  • **{label}** {loc}")
-                    parts.append(f"    {err.message}")
-
-                    # Add suggestion if available
-                    if hasattr(err, 'suggestion') and err.suggestion:
-                        parts.append(f"    💡 Suggestion: {err.suggestion}")
                 # Format location
                 loc = f"line {err.line}" if err.line else "unknown location"
                 
                 # Format level
                 level_str = err.level.value if hasattr(err.level, 'value') else str(err.level)
                 
-                parts.append(f"  • **[{level_str}]** {loc}")
+                # Include language in label if available
+                language = getattr(err, 'language', None)
+                if language:
+                    label = f"[{level_str} | {language}]"
+                else:
+                    label = f"[{level_str}]"
+                
+                parts.append(f"  • **{label}** {loc}")
                 parts.append(f"    {err.message}")
                 
                 # Add suggestion if available

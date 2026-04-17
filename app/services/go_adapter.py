@@ -184,6 +184,182 @@ class GoAdapter(LanguageAdapter):
         except Exception as e:
             logger.warning(f"Could not read {file_path}: {e}")
             return None
+
+    def ensure_go_mod_in_vfs(self) -> bool:
+        """
+        Ensure a go.mod file exists either in VFS (staged) or on disk.
+
+        If neither exists but Go files are present in VFS or on disk, create a minimal
+        go.mod and stage it into VFS.
+
+        Returns:
+            True if go.mod already exists or was successfully created
+            False if Go toolchain is not available or creation failed
+        """
+        # Check if go.mod exists in VFS
+        if self.vfs is not None:
+            vfs_go_mod = self.vfs.read_file('go.mod')
+            if vfs_go_mod is not None:
+                logger.debug("go.mod already exists in VFS")
+                return True
+
+        # Check if go.mod exists on disk
+        if self.project_root is not None:
+            disk_go_mod = self.project_root / 'go.mod'
+            if disk_go_mod.exists():
+                logger.debug("go.mod already exists on disk")
+                return True
+
+        # Check if any .go files exist in VFS or on disk
+        go_files_exist = False
+
+        # Check VFS for .go files
+        if self.vfs is not None:
+            try:
+                staged_files = self.vfs.get_staged_files()
+                for file_path in staged_files:
+                    if file_path.endswith('.go'):
+                        go_files_exist = True
+                        break
+            except Exception as e:
+                logger.debug(f"Error checking VFS for .go files: {e}")
+
+        # Check disk for .go files
+        if not go_files_exist and self.project_root is not None:
+            try:
+                go_files = list(self.project_root.rglob('*.go'))
+                if go_files:
+                    go_files_exist = True
+            except Exception as e:
+                logger.debug(f"Error checking disk for .go files: {e}")
+
+        # If no .go files found, no need for go.mod
+        if not go_files_exist:
+            logger.debug("No .go files found, skipping go.mod creation")
+            return False
+
+        # Create go.mod in temp directory
+        if not self._go_available:
+            logger.warning("go toolchain not available, cannot create go.mod")
+            return False
+
+        temp_dir = None
+        try:
+            temp_dir = tempfile.mkdtemp()
+
+            # Determine module name
+            if self.project_root is not None:
+                module_name = self.project_root.name
+            else:
+                module_name = "main"
+
+            # Run go mod init in temp directory
+            result = subprocess.run(
+                ['go', 'mod', 'init', module_name],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=30,
+                cwd=temp_dir,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"Failed to create go.mod: {result.stderr}")
+                return False
+
+            # Read generated go.mod content
+            temp_go_mod = Path(temp_dir) / 'go.mod'
+            if not temp_go_mod.exists():
+                logger.warning("go mod init did not create go.mod file")
+                return False
+
+            go_mod_content = temp_go_mod.read_text(encoding='utf-8')
+
+            # Stage to VFS if available
+            if self.vfs is not None:
+                try:
+                    self.vfs.stage_change('go.mod', go_mod_content)
+                    logger.info(f"Created and staged go.mod to VFS: {module_name}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"Failed to stage go.mod to VFS: {e}")
+                    # Fall back to writing to disk
+
+            # Write to disk if VFS not available or staging failed
+            if self.project_root is not None:
+                try:
+                    disk_go_mod = self.project_root / 'go.mod'
+                    disk_go_mod.write_text(go_mod_content, encoding='utf-8')
+                    logger.info(f"Created go.mod on disk: {module_name}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"Failed to write go.mod to disk: {e}")
+                    return False
+
+            return False
+
+        except subprocess.TimeoutExpired:
+            logger.warning("go mod init timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Error creating go.mod: {e}")
+            return False
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def run_go_mod_tidy(self, working_dir: Optional[Path] = None) -> bool:
+        """
+        Run go mod tidy in the given directory to organize and clean up go.mod and go.sum.
+
+        Args:
+            working_dir: Directory where go mod tidy will run. Defaults to self.project_root.
+
+        Returns:
+            True if go mod tidy succeeded (exit code 0)
+            False if not available or failed
+        """
+        if not self._go_available:
+            logger.debug("go toolchain not available")
+            return False
+
+        cwd = working_dir or self.project_root
+
+        if cwd is None or not cwd.exists():
+            logger.debug("Working directory not set or does not exist")
+            return False
+
+        # Check that go.mod exists
+        go_mod = cwd / 'go.mod'
+        if not go_mod.exists():
+            logger.debug(f"go.mod not found in {cwd}")
+            return False
+
+        try:
+            result = subprocess.run(
+                ['go', 'mod', 'tidy'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=120,
+                cwd=str(cwd),
+            )
+
+            if result.returncode == 0:
+                logger.info(f"go mod tidy succeeded in {cwd}")
+                return True
+            else:
+                logger.warning(f"go mod tidy failed: {result.stderr[:300]}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            logger.warning("go mod tidy timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Error running go mod tidy: {e}")
+            return False
     
     
     def get_language_name(self) -> str:
@@ -493,6 +669,13 @@ class GoAdapter(LanguageAdapter):
             Returns:
                 Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
             """
+
+            # Ensure go.mod exists in VFS before compilation
+            if self.vfs is not None:
+                if self.ensure_go_mod_in_vfs():
+                    logger.debug("go.mod ensured in VFS")
+                else:
+                    logger.debug("No go.mod needed or creation skipped")
             if not self._go_available:
                 return {
                     'success': False,

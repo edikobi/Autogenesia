@@ -66,6 +66,11 @@ class PendingChange:
     staged_at: datetime = field(default_factory=datetime.now)
     
     @property
+    def type(self) -> ChangeType:
+        """Alias for change_type for backward/forward compatibility."""
+        return self.change_type
+    
+    @property
     def is_new_file(self) -> bool:
         """Файл создаётся впервые"""
         return self.change_type == ChangeType.CREATE or self.original_content is None
@@ -363,6 +368,25 @@ class VirtualFileSystem:
         logger.info(f"Discarded all changes ({count} files)")
         return count
     
+    def discard_file_change(self, file_path: str) -> bool:
+        """
+        Отменяет pending изменения для конкретного файла.
+        
+        Args:
+            file_path: Путь к файлу
+            
+        Returns:
+            True если изменение было отменено, False если файла не было в стейджинге
+        """
+        normalized = file_path.replace('\\', '/')
+        if normalized in self._pending_changes:
+            del self._pending_changes[normalized]
+            self.invalidate_cache()
+            self._affected_cache = None
+            logger.info(f"Discarded changes for file: {normalized}")
+            return True
+        return False
+
     def discard_modifications_only(self) -> int:
         """
         Discard only MODIFY changes to PRE-EXISTING files.
@@ -416,7 +440,7 @@ class VirtualFileSystem:
         return list(self._pending_changes.keys())
 
 
-    def get_change(self, file_path: str) -> Optional['FileChange']:
+    def get_change(self, file_path: str) -> Optional[PendingChange]:
         """
         Returns the FileChange object for a staged file, or None if not staged.
         

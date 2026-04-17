@@ -105,8 +105,12 @@ class StagingErrorType(Enum):
     INVALID_MODE = "invalid_mode"
     PARSER_UNAVAILABLE = "parser_unavailable"
     
-    # Syntax validation errors
+    # Validation errors
     SYNTAX_VALIDATION_FAILED = "syntax_validation_failed"
+    PRE_EXISTING_CORRUPTION = "pre_existing_corruption"
+    
+    # Structural integrity errors (e.g. unintended code deletion)
+    INTEGRITY_FAILURE = "integrity_failure"
     
     INVALID_CODE_FORMAT = "invalid_code_format"
 
@@ -171,11 +175,23 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "solution": "1. Use REPLACE_FILE mode to replace entire file content. 2. This is a system issue, not instruction issue.",
             "mode_hint": "Use REPLACE_FILE as fallback",
         },
+        StagingErrorType.PRE_EXISTING_CORRUPTION: {
+            "description": "The file was ALREADY syntactically broken (containing ERROR or MISSING nodes) before any changes were applied.",
+            "cause": "Manual file corruption, previous failed staging, or incorrect merge.",
+            "solution": "1. Use read_file to examine the file and identify pre-existing syntax errors. 2. Fix the file FIRST by rewriting the broken part using REPLACE_FILE mode. 3. Ensure the file passes basic syntax check before attempting atomic method/class replacements.",
+            "mode_hint": "Rewrite the file to a valid state using REPLACE_FILE before making granular changes.",
+        },
         StagingErrorType.SYNTAX_VALIDATION_FAILED: {
             "description": "The applied code change breaks the file's syntax structure, making classes/methods unparseable.",
             "cause": "Common causes: 1) Wrong indentation level (Python is indent-sensitive). 2) Incomplete code block (missing closing brackets, quotes, or colons). 3) Previous code block in the same file already broke syntax, causing cascading failures. 4) Code was inserted at wrong position breaking existing structure.",
             "solution": "1. CHECK INDENTATION: Ensure code uses correct indentation (4 spaces for Python). Method bodies must be indented relative to class. 2. CHECK COMPLETENESS: Verify all brackets (), [], {} are balanced. Check all strings are properly closed. 3. CHECK PREVIOUS BLOCKS: If multiple blocks target same file, earlier block may have broken syntax. Fix that block first. 4. USE read_file TOOL: Read the current file content to see exact structure before modification. 5. SIMPLIFY: If complex insertion fails, try REPLACE_METHOD or REPLACE_CLASS to replace entire unit.",
             "mode_hint": "Check indentation (4 spaces), ensure code is complete, consider REPLACE_METHOD instead of INSERT",
+        },
+        StagingErrorType.INTEGRITY_FAILURE: {
+            "description": "Critical code loss detected: The modification removed existing classes/methods that were not targets of the change.",
+            "cause": "The generated code block was incomplete or incorrectly overwrote large sections of the file instead of targeted elements.",
+            "solution": "1. Verify your code block includes all necessary context. 2. If using REPLACE_FILE, ensure you provided the FULL file content. 3. If using REPLACE_METHOD, ensure you are only replacing that specific method, and context around it is preserved. 4. Use read_file to check exactly what elements exist in the file.",
+            "mode_hint": "Ensure your code block is complete and target-specific.",
         },
         StagingErrorType.INVALID_CODE_FORMAT: {
             "description": "Code block for ADD_NEW_FUNCTION must start with 'def' or 'async def'.",
@@ -1012,6 +1028,11 @@ class FeedbackHandler:
         # Sanitize error_type to prevent crashes on None
         if error_type is None:
             error_type = StagingErrorType.UNKNOWN
+        elif isinstance(error_type, str):
+            try:
+                error_type = StagingErrorType(error_type)
+            except ValueError:
+                error_type = StagingErrorType.UNKNOWN
             
         self._staging_errors.append(StagingErrorFeedback(
             file_path=file_path,

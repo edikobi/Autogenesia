@@ -90,7 +90,7 @@ SEARCH_CODE_TOOL: Dict[str, Any] = {
     "function": {
         "name": "search_code",
         "description": (
-            "Search for the definition of a class, function, or method by name in the project's semantic index. "
+            "Search for the definition of a class, function by name in the project's semantic index. (Methods are not indexed – use grep_search for them.)"
             "Returns the file path and line numbers where the element is defined. "
             "Use when you need to quickly locate where a specific component is defined in the codebase."
         ),
@@ -137,7 +137,9 @@ GREP_SEARCH_TOOL: Dict[str, Any] = {
             "- Configuration values, constants, strings "
             "- TODO/FIXME comments "
             "- Import statements or usage of specific libraries "
-            "Returns matches with file paths, line numbers, and context."
+            "Returns matches with file paths, line numbers, and context. "
+            "IMPORTANT: Use is_regex=true when searching with multiple alternatives (e.g., 'error|warning') or patterns like *, +, ^, $. "
+            "IMPORTANT: Use multiline=true for patterns spanning multiple lines (e.g., decorators + function definitions)."
         ),
         "parameters": {
             "type": "object",
@@ -149,11 +151,32 @@ GREP_SEARCH_TOOL: Dict[str, Any] = {
                         "For regex, use Python regex syntax. Example: 'def create_.*' or 'TODO:'"
                     )
                 },
-                "use_regex": {
+                "is_regex": {
                     "type": "boolean",
-                    "description": "Whether pattern is a regular expression. Default: false",
+                    "description": (
+                        "Whether pattern is a regular expression. Default: false. "
+                        "ОБЯЗАТЕЛЬНО установите в true, если используете операторы |, *, +, ?, (, [, ^, $. "
+                        "Без этого флага эти символы будут восприниматься как обычный текст. "
+                        "Для Regex используйте синтаксис Python. Пример: 'ERROR|CRITICAL' или 'def create_.*'"
+                        ),
                     "default": False
                 },
+                "multiline": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable search across multiple lines. Default: false. "
+                        "Use this for structural patterns, e.g., to find a decorator followed by a function: '@pytest\\.mark.*?\\s+def test_'"
+                    ),
+                    "default": False
+                },
+                "language": {
+                    "type": "string",
+                    "description": (
+                        "Filter results by programming language. "
+                        "Example: 'python', 'javascript', 'go', 'java', etc."
+                    )
+                },
+                
                 "case_sensitive": {
                     "type": "boolean",
                     "description": "Case-sensitive search. Default: false",

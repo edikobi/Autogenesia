@@ -395,18 +395,39 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "8",
-        cfg.MODEL_QWEN3_MAX_THINKING,
-        "Qwen3 Max Thinking",
-        "(полная фигня)Обещают золотые горы, но это китайский ИИ с маленьким (200к) контекстным окном"
+        cfg.MODEL_Kimi_K_2_5,
+        "Kimi K 2.5",
+        "Очень неплохой китайский ИИ"
     ),
     (
         "9",
-        cfg.MODEL_QWEN_3_5_Plus,
-        "Qwen3.5 Plus",
-        "Обещают золотые горы, но это китайский ИИ."
+        cfg.MODEL_QWEN_3_6_Plus_Preview,
+        "Qwen3.6 Plus",
+        "Обещают золотые горы, но это китайский ИИ. (зато пока бесплатно)"
+    ),
+    (
+        "10",
+        cfg.MODEL_Xiaomi_MiMo_V2_PRO,
+        "Xiaomi: MiMo-V2-Pro",
+        "Нахваливают эту модель, но должна быть хотя бы топ за свои деньги"
+    ),
+    
+    (
+        "11",
+        cfg.MODEL_GLM_5_1,
+        "GLM 5.1",
+        "Маленький контекст, хз что еще сказать"
+    ),
+    
+    (
+        "12",
+        cfg.MODEL_MiniMax_M2_7,
+        "MiniMAX M2.7",
+        "Надежд на это мало"
     ),
 ]
 
+#  cls.MODEL_MiniMax_M2_7
 
 # Доступные модели генератора для выбора С ПОДРОБНЫМИ ОПИСАНИЯМИ
 # Формат: (key, model_id, short_name, description)
@@ -419,9 +440,9 @@ AVAILABLE_GENERATOR_MODELS = [
     ),
     (
         "2",
-        cfg.MODEL_GLM_4_7,
-        "GLM 4.7",
-        "Китайская модель от Zhipu AI. Хороша для структурированного кода, поддерживает thinking mode(новая модель,есть баг, пока рассуждение не отключается)."
+        cfg.MODEL_GLM_5_Turbo,
+        "GLM 5.0 Turbo",
+        "Китайская модель от Zhipu AI."
     ),
     (
         "3",
@@ -434,7 +455,7 @@ AVAILABLE_GENERATOR_MODELS = [
         "4",
         cfg.MODEL_GEMINI_3_FLASH,
         "Gemini 3.0 flash",
-        "Быстрая модель Google через OpenRouter. Хорошо подходит для генерации кода(но чуть хуже Haiku, не так хорошо следует командам)"
+        "(крайне рекомендуется)Быстрая модель Google через OpenRouter. Хорошо подходит для генерации кода"
     ),
 
     (
@@ -442,6 +463,27 @@ AVAILABLE_GENERATOR_MODELS = [
         cfg.MODEL_GPT_5_1_Codex_MINI,
         "GPT-5.1-Codex-Mini",
         "Младшая модель CODEX от OpenAI, минимально думает"
+    ),
+    
+    (
+        "6",
+        cfg.MODEL_Grok_4_20,
+        "Grok 4.20",
+        "Контекстное окно 2 млн., хз что еще."
+    ),
+
+    (
+        "7",
+        cfg.MODEL_Nemotron_3_Plus_Super,
+        "Nemotron 3 Super",
+        "Халява от NVIDIA, но вроде обещают много агентов внутри одной модели"
+    ),
+
+    (
+        "8",
+        cfg.MODEL_QWEN3_Coder_Next,
+        "Qwen3 Coder Next",
+        "Это открытая причинно-следственная языковая модель, оптимизированная для программистов и локальных рабочих процессов разработки"
     ),
 
 ]
@@ -1572,10 +1614,40 @@ def _extract_search_results(output: str, max_results: int = 3) -> str:
 
 
 def print_code_block(code: str, filepath: str = "", language: str = "python"):
-    """Отображает блок кода с подсветкой синтаксиса"""
-    syntax = Syntax(code, language, theme="monokai", line_numbers=True)
-    title = f"📄 {filepath}" if filepath else "Сгенерированный код"
+    """
+    Отображает блок кода с подсветкой синтаксиса.
+    Усекает вывод, если количество строк превышает лимит, сохраняя читаемость терминала.
+    """
+    MAX_DISPLAY_LINES = 100
+    lines = code.splitlines()
+    total_lines = len(lines)
+    
+    # Формируем заголовок с общим количеством строк
+    if filepath:
+        title = f"📄 {filepath} [dim]({total_lines} строк)[/]"
+    else:
+        title = f"Сгенерированный код [dim]({total_lines} строк)[/]"
+
+    # Определяем отображаемый код
+    if total_lines <= MAX_DISPLAY_LINES:
+        display_code = code
+        is_truncated = False
+    else:
+        display_code = "\n".join(lines[:MAX_DISPLAY_LINES])
+        is_truncated = True
+
+    # Рендерим Syntax и Panel
+    syntax = Syntax(display_code, language, theme="monokai", line_numbers=True)
     console.print(Panel(syntax, title=title, border_style=COLORS['success']))
+
+    # Если код был усечён, выводим информационное сообщение
+    if is_truncated:
+        hidden_lines = total_lines - MAX_DISPLAY_LINES
+        msg = f"[dim]... [ещё {hidden_lines} строк скрыто][/]"
+        if filepath:
+            msg += f" [dim]📄 Полный код: {filepath}[/]"
+        console.print(msg)
+
 
 
 def print_diff_preview(diffs: Dict[str, str]):
@@ -6571,7 +6643,7 @@ async def setup_mode_session(mode: str) -> bool:
         try:
             choice = prompt_with_navigation(
                 "Выбор",
-                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9","10", "11", "12", "13"],
                 default="r"
             )
         except BackException:
@@ -6685,7 +6757,7 @@ async def setup_mode_session(mode: str) -> bool:
     try:
         model_choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"],
             default="r"
         )
     except BackException:
