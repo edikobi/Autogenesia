@@ -550,6 +550,75 @@ class FaultTolerantParser:
         
         return 0
 
+    def find_element(self, source_code: str, language: str, name: str, element_type: str = "all") -> Optional[Dict[str, Any]]:
+        """
+        Generic element finder for Python (implements same interface as MultiLanguageParser).
+        """
+        if language != "python":
+            return None
+            
+        result = self.parse(source_code)
+        
+        target = None
+        if element_type == "class":
+            target = result.get_class(name)
+        elif element_type in ("function", "method"):
+            # Check for functions first
+            target = result.get_function(name)
+            if not target:
+                # Check all classes for the method
+                for cls in result.classes:
+                    target = result.get_method(cls.name, name)
+                    if target: break
+        else: # "all"
+            target = result.get_class(name) or result.get_function(name)
+            if not target:
+                for cls in result.classes:
+                    target = result.get_method(cls.name, name)
+                    if target: break
+                    
+        if target:
+            content = self.get_node_text(source_code, target.span)
+            return {
+                "name": target.name,
+                "type": "class" if isinstance(target, ParsedClass) else "function",
+                "content": content,
+                "start_line": target.span.start_line,
+                "end_line": target.span.end_line
+            }
+        return None
+
+    def get_used_identifiers(self, source_code: str, language: str) -> set[str]:
+        """Extract identifiers from Python code using tree-sitter."""
+        try:
+            ts_parser, _ = _get_parser()
+            tree = ts_parser.parse(source_code.encode('utf-8'))
+            identifiers = set()
+            
+            # Simple walk to collect all identifiers
+            def walk(node):
+                if node.type in ("identifier", "attribute"):
+                    name = source_code.encode('utf-8')[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
+                    if name: identifiers.add(name)
+                for child in node.children: walk(child)
+            
+            walk(tree.root_node)
+            return identifiers
+        except Exception as e:
+            logger.warning(f"Error extracting Python identifiers: {e}")
+            return set()
+
+    def get_defined_elements(self, source_code: str, language: str) -> set[str]:
+        """Get names of all classes and functions defined in Python code."""
+        result = self.parse(source_code)
+        names = set()
+        for cls in result.classes:
+            names.add(cls.name)
+            for m in cls.methods: names.add(m.name)
+        for f in result.functions:
+            names.add(f.name)
+        return names
+
 # ============================================================================
 # MODULE-LEVEL INSTANCE
 # ============================================================================
@@ -564,6 +633,16 @@ def get_parser() -> FaultTolerantParser:
     if _default_parser is None:
         _default_parser = FaultTolerantParser()
     return _default_parser
+
+
+_ml_parser: Optional[MultiLanguageParser] = None
+
+def get_multi_language_parser() -> MultiLanguageParser:
+    """Returns singleton instance of MultiLanguageParser."""
+    global _ml_parser
+    if _ml_parser is None:
+        _ml_parser = MultiLanguageParser()
+    return _ml_parser
 
 
 class MultiLanguageParser:
@@ -814,19 +893,19 @@ class MultiLanguageParser:
         Returns:
             Identifier string or None if not found
         """
-        # Default behavior: return first identifier child
+        # Default behavior: return first identifier or property_identifier or type_identifier child
         if node.type != 'method_declaration' and node.type != 'type_declaration':
             for child in node.children:
-                if child.type == "identifier":
+                if child.type in ("identifier", "property_identifier", "type_identifier"):
                     return source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
             return None
     
         # Special handling for method_declaration (Java and Go)
         if node.type == 'method_declaration':
-            # Collect all identifier and field_identifier children (direct children only)
+            # Collect all identifier nodes (direct children only)
             identifiers = []
             for child in node.children:
-                if child.type in ('identifier', 'field_identifier'):
+                if child.type in ('identifier', 'field_identifier', 'type_identifier'):
                     identifiers.append(child)
         
             if identifiers:
@@ -841,9 +920,9 @@ class MultiLanguageParser:
             # Find first type_spec child
             for child in node.children:
                 if child.type == 'type_spec':
-                    # Find first identifier in type_spec
+                    # Find first identifier or type_identifier in type_spec
                     for spec_child in child.children:
-                        if spec_child.type == 'identifier':
+                        if spec_child.type in ('identifier', 'type_identifier'):
                             return source_bytes[spec_child.start_byte:spec_child.end_byte].decode('utf-8', errors='ignore')
         
             return None
@@ -1174,6 +1253,44 @@ class MultiLanguageParser:
             return elements
         except Exception as e:
             logger.warning(f"Error extracting elements for {language}: {e}")
+            return set()
+
+    def get_used_identifiers(self, source_code: str, language: str) -> set[str]:
+        """
+        Extract all identifier names used in the source code using tree-sitter.
+        Useful for dependency analysis of specific functions/classes.
+        """
+        try:
+            # Get parser
+            ts_parser, _ = self._get_parser_for_language(language)
+            source_bytes = source_code.encode('utf-8')
+            tree = ts_parser.parse(source_bytes)
+            
+            identifiers = set()
+            
+            # Types that represent usage of an entity
+            usage_types = {
+                "identifier", "property_identifier", "type_identifier", 
+                "field_identifier", "scoped_identifier", "member_expression"
+            }
+            
+            def walk(node):
+                if node.type in usage_types:
+                    # For complex types like member_expression, we might want to drill down,
+                    # but usually individual identifiers inside them are enough.
+                    name = source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
+                    if name:
+                        # Filter out very short or purely numeric identifiers if needed,
+                        # but usually better to return all for the tool to decide.
+                        identifiers.add(name)
+                
+                for child in node.children:
+                    walk(child)
+            
+            walk(tree.root_node)
+            return identifiers
+        except Exception as e:
+            logger.warning(f"Error extracting used identifiers for {language}: {e}")
             return set()
         
 

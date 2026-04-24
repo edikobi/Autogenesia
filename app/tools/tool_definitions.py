@@ -329,13 +329,15 @@ FILE_RELATIONS_TOOL: Dict[str, Any] = {
     "function": {
         "name": "show_file_relations",
         "description": (
-            "Analyzes and displays all structural relationships of the requested file within the project: "
-            "- IMPORTS: Which files this file depends on (outgoing dependencies). "
-            "- IMPORTED BY: Which files depend on this file (incoming usage). "
-            "- TESTS: Associated test files. "
-            "- SIBLINGS: Other files in the same directory. "
-            "Operates with awareness of staged changes in VFS. "
-            "Use this tool to quickly understand the impact radius and context of a file."
+            "Analyzes and displays all structural relationships of the target file within the project. "
+            "Supported languages: Python, JavaScript/TypeScript, Go, Java. "
+            "Categories include: "
+            "- IMPORTS: Files this file depends on (outgoing dependencies). "
+            "- IMPORTED BY: Files that depend on this file (incoming usage/impact radius). "
+            "- TESTS: Associated test files for verifying the target file. "
+            "- SIBLINGS: Other files in the same directory for architectural context. "
+            "Works with the Virtual File System (VFS) and accounts for staged/pending changes. "
+            "Use this tool to understand the role of a file in the project architecture and evaluate the impact of changes."
         ),
         "parameters": {
             "type": "object",
@@ -361,6 +363,16 @@ FILE_RELATIONS_TOOL: Dict[str, Any] = {
                     "type": "integer",
                     "description": "Maximum number of relations to return per category (0 = all).",
                     "default": 20
+                },
+                "element_name": {
+                    "type": "string",
+                    "description": "Optional: Name of a specific class, function, or method to analyze within the file."
+                },
+                "element_type": {
+                    "type": "string",
+                    "enum": ["all", "class", "function", "method"],
+                    "description": "Optional: Type of the element to analyze. Default: 'all'.",
+                    "default": "all"
                 }
             },
             "required": ["file_path"]

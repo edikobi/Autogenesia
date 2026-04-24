@@ -312,6 +312,61 @@ class FeedbackLoopState:
             was_fix_attempted=was_fix_attempted,
         )
         logger.info(f"FeedbackLoop: Added Java syntax error for {file_path}")
+
+    def add_js_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """
+        Add JavaScript syntax error feedback.
+        """
+        self.feedback_handler.add_js_syntax_error(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        )
+        logger.info(f"FeedbackLoop: Added JS syntax error for {file_path}")
+
+    def add_ts_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """
+        Add TypeScript syntax error feedback.
+        """
+        self.feedback_handler.add_ts_syntax_error(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        )
+        logger.info(f"FeedbackLoop: Added TS syntax error for {file_path}")
+
+    def add_go_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """
+        Add Go syntax error feedback.
+        """
+        self.feedback_handler.add_go_syntax_error(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        )
+        logger.info(f"FeedbackLoop: Added Go syntax error for {file_path}")
+
     
     
     # ... конец метода add_test_error ...

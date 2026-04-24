@@ -1424,6 +1424,63 @@ class AgentPipeline:
                                         )
 
                                         logger.info(f"[PIPELINE] Routing {len(java_syntax_issues)} Java syntax errors through dedicated feedback channel")
+
+# === Route JS syntax errors through dedicated feedback channel ===
+                            js_syntax_issues = [
+                                issue for issue in blocking_errors
+                                if getattr(issue, 'code', None) == "javascript_syntax_error"
+                                and getattr(issue, 'language', None) == "javascript"
+                            ]
+                            if js_syntax_issues:
+                                from collections import defaultdict
+                                js_issues_by_file = defaultdict(list)
+                                for issue in js_syntax_issues:
+                                    js_issues_by_file[issue.file_path].append(issue)
+                                for file_path, file_issues in js_issues_by_file.items():
+                                    self.feedback_loop.add_js_syntax_error(
+                                        file_path=file_path,
+                                        errors=[i.message for i in file_issues],
+                                        error_lines=[i.line for i in file_issues],
+                                    )
+                                logger.info(f"[PIPELINE] Routing {len(js_syntax_issues)} JS syntax errors through dedicated feedback channel")
+
+                            # === Route TS syntax errors through dedicated feedback channel ===
+                            ts_syntax_issues = [
+                                issue for issue in blocking_errors
+                                if getattr(issue, 'code', None) == "typescript_syntax_error"
+                                and getattr(issue, 'language', None) == "typescript"
+                            ]
+                            if ts_syntax_issues:
+                                from collections import defaultdict
+                                ts_issues_by_file = defaultdict(list)
+                                for issue in ts_syntax_issues:
+                                    ts_issues_by_file[issue.file_path].append(issue)
+                                for file_path, file_issues in ts_issues_by_file.items():
+                                    self.feedback_loop.add_ts_syntax_error(
+                                        file_path=file_path,
+                                        errors=[i.message for i in file_issues],
+                                        error_lines=[i.line for i in file_issues],
+                                    )
+                                logger.info(f"[PIPELINE] Routing {len(ts_syntax_issues)} TS syntax errors through dedicated feedback channel")
+
+                            # === Route Go syntax errors through dedicated feedback channel ===
+                            go_syntax_issues = [
+                                issue for issue in blocking_errors
+                                if getattr(issue, 'code', None) == "go_syntax_error"
+                                and getattr(issue, 'language', None) == "go"
+                            ]
+                            if go_syntax_issues:
+                                from collections import defaultdict
+                                go_issues_by_file = defaultdict(list)
+                                for issue in go_syntax_issues:
+                                    go_issues_by_file[issue.file_path].append(issue)
+                                for file_path, file_issues in go_issues_by_file.items():
+                                    self.feedback_loop.add_go_syntax_error(
+                                        file_path=file_path,
+                                        errors=[i.message for i in file_issues],
+                                        error_lines=[i.line for i in file_issues],
+                                    )
+                                logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
                             feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
                         
                             working_history.append({
@@ -2662,6 +2719,63 @@ Please analyze this feedback and provide a revised instruction.""",
                                 )
 
                                 logger.info(f"[PIPELINE] Routing {len(java_syntax_issues)} Java syntax errors through dedicated feedback channel")
+
+# === Route JS syntax errors through dedicated feedback channel ===
+                    js_syntax_issues = [
+                        issue for issue in blocking_errors
+                        if getattr(issue, 'code', None) == "javascript_syntax_error"
+                        and getattr(issue, 'language', None) == "javascript"
+                    ]
+                    if js_syntax_issues:
+                        from collections import defaultdict
+                        js_issues_by_file = defaultdict(list)
+                        for issue in js_syntax_issues:
+                            js_issues_by_file[issue.file_path].append(issue)
+                        for file_path, file_issues in js_issues_by_file.items():
+                            self.feedback_loop.add_js_syntax_error(
+                                file_path=file_path,
+                                errors=[i.message for i in file_issues],
+                                error_lines=[i.line for i in file_issues],
+                            )
+                        logger.info(f"[PIPELINE] Routing {len(js_syntax_issues)} JS syntax errors through dedicated feedback channel")
+
+                    # === Route TS syntax errors through dedicated feedback channel ===
+                    ts_syntax_issues = [
+                        issue for issue in blocking_errors
+                        if getattr(issue, 'code', None) == "typescript_syntax_error"
+                        and getattr(issue, 'language', None) == "typescript"
+                    ]
+                    if ts_syntax_issues:
+                        from collections import defaultdict
+                        ts_issues_by_file = defaultdict(list)
+                        for issue in ts_syntax_issues:
+                            ts_issues_by_file[issue.file_path].append(issue)
+                        for file_path, file_issues in ts_issues_by_file.items():
+                            self.feedback_loop.add_ts_syntax_error(
+                                file_path=file_path,
+                                errors=[i.message for i in file_issues],
+                                error_lines=[i.line for i in file_issues],
+                            )
+                        logger.info(f"[PIPELINE] Routing {len(ts_syntax_issues)} TS syntax errors through dedicated feedback channel")
+
+                    # === Route Go syntax errors through dedicated feedback channel ===
+                    go_syntax_issues = [
+                        issue for issue in blocking_errors
+                        if getattr(issue, 'code', None) == "go_syntax_error"
+                        and getattr(issue, 'language', None) == "go"
+                    ]
+                    if go_syntax_issues:
+                        from collections import defaultdict
+                        go_issues_by_file = defaultdict(list)
+                        for issue in go_syntax_issues:
+                            go_issues_by_file[issue.file_path].append(issue)
+                        for file_path, file_issues in go_issues_by_file.items():
+                            self.feedback_loop.add_go_syntax_error(
+                                file_path=file_path,
+                                errors=[i.message for i in file_issues],
+                                error_lines=[i.line for i in file_issues],
+                            )
+                        logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
                     feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
                     
                     working_history.append({

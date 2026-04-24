@@ -124,7 +124,7 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.CLASS_NOT_FOUND: {
             "description": "The class specified in TARGET_CLASS does not exist in the file.",
             "cause": "Typo in class name, wrong file, or class was renamed/removed.",
-            "solution": "1. Use read_file to verify the exact class name. 2. Check for typos (case-sensitive). 3. If class doesn't exist, use ADD_CLASS mode instead of REPLACE_CLASS. 4. If class is in different file, update FILE path.",
+            "solution": "1. Use read_file to verify the exact class name. 2. Check for typos (case-sensitive). 3. If class doesn't exist, use ADD_NEW_CLASS mode instead of REPLACE_CLASS. 4. If class is in different file, update FILE path.",
             "mode_hint": "Consider ADD_CLASS if creating new class",
         },
         StagingErrorType.METHOD_NOT_FOUND: {
@@ -166,7 +166,7 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.INVALID_MODE: {
             "description": "The specified MODE is not recognized.",
             "cause": "Typo in mode name or using unsupported mode.",
-            "solution": "1. Use one of valid modes: REPLACE_FILE, REPLACE_CLASS, REPLACE_METHOD, REPLACE_FUNCTION, ADD_METHOD, ADD_FUNCTION, ADD_CLASS, INSERT_IMPORT, APPEND_FILE. 2. Check spelling and case.",
+            "solution": "1. Use one of valid modes: REPLACE_FILE, REPLACE_CLASS, ADD_NEW_CLASS, REPLACE_METHOD, REPLACE_FUNCTION, ADD_METHOD, ADD_FUNCTION, ADD_CLASS, INSERT_IMPORT, APPEND_FILE. 2. Check spelling and case.",
             "mode_hint": "Valid modes: REPLACE_FILE, REPLACE_METHOD, ADD_METHOD, etc.",
         },
         StagingErrorType.PARSER_UNAVAILABLE: {
@@ -941,6 +941,11 @@ class FeedbackHandler:
         self._staging_errors: List[StagingErrorFeedback] = []
         self._java_syntax_errors: List[JavaSyntaxErrorFeedback] = []
 
+        self._js_syntax_errors: List[JavaSyntaxErrorFeedback] = []
+        self._ts_syntax_errors: List[JavaSyntaxErrorFeedback] = []
+        self._go_syntax_errors: List[JavaSyntaxErrorFeedback] = []
+
+
     
     def add_validator_feedback(self, feedback: ValidatorFeedback) -> None:
         """Add feedback from AI Validator."""
@@ -1069,6 +1074,55 @@ class FeedbackHandler:
             was_fix_attempted=was_fix_attempted,
         ))
         logger.info(f"FeedbackHandler: Added Java syntax error for {file_path} ({len(errors)} errors)")
+
+    def add_js_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """Add JavaScript syntax error feedback."""
+        self._js_syntax_errors.append(JavaSyntaxErrorFeedback(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        ))
+        logger.info(f"FeedbackHandler: Added JS syntax error for {file_path} ({len(errors)} errors)")
+
+    def add_ts_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """Add TypeScript syntax error feedback."""
+        self._ts_syntax_errors.append(JavaSyntaxErrorFeedback(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        ))
+        logger.info(f"FeedbackHandler: Added TS syntax error for {file_path} ({len(errors)} errors)")
+
+    def add_go_syntax_error(
+        self,
+        file_path: str,
+        errors: List[str],
+        error_lines: List[Optional[int]],
+        was_fix_attempted: bool = True,
+    ) -> None:
+        """Add Go syntax error feedback."""
+        self._go_syntax_errors.append(JavaSyntaxErrorFeedback(
+            file_path=file_path,
+            errors=errors,
+            error_lines=error_lines,
+            was_fix_attempted=was_fix_attempted,
+        ))
+        logger.info(f"FeedbackHandler: Added Go syntax error for {file_path} ({len(errors)} errors)")
+
     
     
     
@@ -1122,6 +1176,19 @@ class FeedbackHandler:
         if self._java_syntax_errors:
             parts = [e.to_prompt_format() for e in self._java_syntax_errors]
             result["java_syntax_errors"] = "\n\n".join(parts)
+
+        if self._js_syntax_errors:
+            parts = [e.to_prompt_format().replace("JAVA", "JS") for e in self._js_syntax_errors]
+            result["js_syntax_errors"] = "\n\n".join(parts)
+
+        if self._ts_syntax_errors:
+            parts = [e.to_prompt_format().replace("JAVA", "TS") for e in self._ts_syntax_errors]
+            result["ts_syntax_errors"] = "\n\n".join(parts)
+
+        if self._go_syntax_errors:
+            parts = [e.to_prompt_format().replace("JAVA", "GO") for e in self._go_syntax_errors]
+            result["go_syntax_errors"] = "\n\n".join(parts)
+
         
         return result
         
@@ -1148,6 +1215,11 @@ class FeedbackHandler:
         self._runtime_test_feedback = None  # NEW
         self._staging_errors = []
         self._java_syntax_errors = []
+
+        self._js_syntax_errors = []
+        self._ts_syntax_errors = []
+        self._go_syntax_errors = []
+
         logger.info("FeedbackHandler: Cleared all feedback")
     
     

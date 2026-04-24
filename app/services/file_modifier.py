@@ -133,6 +133,7 @@ class ModifyMode(Enum):
     REPLACE_IN_FUNCTION = "replace_in_function" # Заменить код внутри функции
     ADD_NEW_FUNCTION = "add_new_function"      # Добавить новую функцию
     REPLACE_GLOBAL = "replace_global"          # Заменить глобальную переменную/константу
+    ADD_NEW_CLASS = "add_new_class"            # Добавить новый класс
 
 
 @dataclass
@@ -394,6 +395,8 @@ class FileModifier:
         "REPLACE_GLOBAL": ModifyMode.REPLACE_GLOBAL,
         "MODIFY_GLOBAL": ModifyMode.REPLACE_GLOBAL,  # Алиас
         "REPLACE_CONSTANT": ModifyMode.REPLACE_GLOBAL,  # Алиас
+        
+        "ADD_NEW_CLASS": ModifyMode.ADD_NEW_CLASS,
     }
     
     # DIFF modes for non-Python languages (handled separately via apply_multilang_diff)
@@ -483,6 +486,9 @@ class FileModifier:
             
             elif mode == ModifyMode.REPLACE_GLOBAL:
                 result = self._replace_global(existing_content, instruction)
+            
+            elif mode == ModifyMode.ADD_NEW_CLASS:
+                result = self._add_new_class(existing_content, instruction)
             
             else:
                 result = ModifyResult(
@@ -2310,6 +2316,70 @@ class FileModifier:
             changes_made=[f"Replaced class {target_class}"],
             lines_added=max(0, new_lines_count - old_lines_count),
             lines_removed=max(0, old_lines_count - new_lines_count),
+        )
+    
+    
+    def _add_new_class(
+        self,
+        existing_content: str,
+        instruction: "ModifyInstruction"
+    ) -> "ModifyResult":
+        """
+        Добавляет новый класс в файл после указанного объекта.
+        Строго соблюдает правило AS IS (без нормализации отступов).
+        """
+        from app.agents.feedback_handler import StagingErrorType
+        
+        insert_after = instruction.insert_after
+        code = instruction.code
+        
+        if not insert_after:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Missing required parameter 'INSERT_AFTER' for ADD_NEW_CLASS mode.",
+                error_type=StagingErrorType.INSERT_PATTERN_NOT_FOUND
+            )
+        
+        lines = existing_content.splitlines(keepends=True)
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Tree-sitter parser not available",
+            )
+        
+        parse_result = ts_parser.parse(existing_content)
+        
+        # Поиск якоря (класс или функция)
+        target_info = parse_result.get_class(insert_after) or parse_result.get_function(insert_after)
+        
+        if target_info is None:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message=f"Anchor '{insert_after}' not found in file (need an existing class or function).",
+                error_type=StagingErrorType.INSERT_PATTERN_NOT_FOUND
+            )
+        
+        # Позиция вставки (после целевого объекта)
+        insert_idx = target_info.span.end_line
+        
+        # Подготовка кода: обеспечиваем 2 пустые строки (PEP8) перед новым классом
+        # Вставляем AS IS, как требует план.
+        formatted_code = "\n\n" + code.strip() + "\n"
+        
+        # Сборка
+        new_lines = lines[:insert_idx] + [formatted_code] + lines[insert_idx:]
+        new_content = "".join(new_lines)
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=f"Added new class after '{insert_after}'",
+            changes_made=[f"Added new class after {insert_after}"],
+            lines_added=len(formatted_code.splitlines())
         )
    
     

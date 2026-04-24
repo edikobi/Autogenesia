@@ -681,6 +681,31 @@ class ChangeValidator:
     
                 logger.info(f"[SYNTAX] Batch compiling {len(language_files)} {language} files together")
 
+# Handle JS/TS/Go using tree-sitter syntax checks
+                if language in ('javascript', 'js', 'typescript', 'ts', 'go'):
+                    for code, file_path in language_files:
+                        if language in ('javascript', 'js'):
+                            check_result = self.syntax_checker.check_javascript(code, auto_fix=False)
+                        elif language in ('typescript', 'ts'):
+                            check_result = self.syntax_checker.check_typescript(code, auto_fix=False)
+                        elif language == 'go':
+                            check_result = self.syntax_checker.check_go(code, auto_fix=False)
+                        
+                        if not check_result.is_valid:
+                            for issue in check_result.issues:
+                                issues.append(ValidationIssue(
+                                    level=ValidationLevel.SYNTAX,
+                                    severity=IssueSeverity.ERROR,
+                                    file_path=file_path,
+                                    message=issue.message,
+                                    line=issue.line,
+                                    language=language,
+                                    code=f"{language}_syntax_error"
+                                ))
+                        else:
+                            logger.info(f"[SYNTAX] {language.capitalize()} file valid: {file_path}")
+                    
+                    continue
                 if language == 'java':
                     for code, file_path in language_files:
                         # PHASE 2A: Check for syntax errors WITHOUT auto-fixing

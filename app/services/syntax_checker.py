@@ -420,6 +420,130 @@ class SyntaxChecker:
         except Exception as e:
             logger.warning(f"Tree-sitter validation failed for Java: {e}")
             return SyntaxCheckResult(is_valid=True, original_content=code)
+
+    def check_javascript(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
+        """
+        Validates JavaScript source code syntax using tree-sitter.
+
+        Args:
+            code: JavaScript source code string
+            auto_fix: Accepted for interface compatibility but not implemented for JS
+
+        Returns:
+            SyntaxCheckResult with validation results
+        """
+        try:
+            from app.services.tree_sitter_parser import MultiLanguageParser
+            ts_parser = MultiLanguageParser()
+            
+            is_valid, errors = ts_parser.validate_syntax(code, 'javascript')
+            
+            if is_valid:
+                return SyntaxCheckResult(is_valid=True, original_content=code)
+            
+            result = SyntaxCheckResult(is_valid=False, original_content=code)
+            for error_msg in errors:
+                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                line_num = int(line_match.group(1)) if line_match else None
+                
+                issue = SyntaxIssue(
+                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                    message=error_msg,
+                    line=line_num,
+                    is_critical=True,
+                )
+                result.issues.append(issue)
+            return result
+
+        except (ImportError, ValueError) as e:
+            logger.warning(f"Tree-sitter not available for JavaScript: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+        except Exception as e:
+            logger.warning(f"Unexpected error during JavaScript syntax check: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+
+    def check_typescript(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
+        """
+        Validates TypeScript source code syntax using tree-sitter.
+
+        Args:
+            code: TypeScript source code string
+            auto_fix: Accepted for interface compatibility but not implemented for TS
+
+        Returns:
+            SyntaxCheckResult with validation results
+        """
+        try:
+            from app.services.tree_sitter_parser import MultiLanguageParser
+            ts_parser = MultiLanguageParser()
+            
+            is_valid, errors = ts_parser.validate_syntax(code, 'typescript')
+            
+            if is_valid:
+                return SyntaxCheckResult(is_valid=True, original_content=code)
+            
+            result = SyntaxCheckResult(is_valid=False, original_content=code)
+            for error_msg in errors:
+                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                line_num = int(line_match.group(1)) if line_match else None
+                
+                issue = SyntaxIssue(
+                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                    message=error_msg,
+                    line=line_num,
+                    is_critical=True,
+                )
+                result.issues.append(issue)
+            return result
+
+        except (ImportError, ValueError) as e:
+            logger.warning(f"Tree-sitter not available for TypeScript: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+        except Exception as e:
+            logger.warning(f"Unexpected error during TypeScript syntax check: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+
+    def check_go(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
+        """
+        Validates Go source code syntax using tree-sitter.
+
+        Args:
+            code: Go source code string
+            auto_fix: Accepted for interface compatibility but not implemented for Go
+
+        Returns:
+            SyntaxCheckResult with validation results
+        """
+        try:
+            from app.services.tree_sitter_parser import MultiLanguageParser
+            ts_parser = MultiLanguageParser()
+            
+            is_valid, errors = ts_parser.validate_syntax(code, 'go')
+            
+            if is_valid:
+                return SyntaxCheckResult(is_valid=True, original_content=code)
+            
+            result = SyntaxCheckResult(is_valid=False, original_content=code)
+            for error_msg in errors:
+                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                line_num = int(line_match.group(1)) if line_match else None
+                
+                issue = SyntaxIssue(
+                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                    message=error_msg,
+                    line=line_num,
+                    is_critical=True,
+                )
+                result.issues.append(issue)
+            return result
+
+        except (ImportError, ValueError) as e:
+            logger.warning(f"Tree-sitter not available for Go: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+        except Exception as e:
+            logger.warning(f"Unexpected error during Go syntax check: {e}")
+            return SyntaxCheckResult(is_valid=True, original_content=code)
+
     
     def check_by_extension(self, content: str, file_path: str, 
                           auto_fix: bool = False) -> SyntaxCheckResult:
@@ -438,9 +562,15 @@ class SyntaxChecker:
     
         if ext == '.py':
             return self.check_python(content, auto_fix=auto_fix)
-        elif ext == '.json':
-            return self.check_json(content)
         elif ext == '.java':
+            return self.check_java(content, auto_fix=auto_fix)
+        elif ext in ('.js', '.jsx', '.mjs'):
+            return self.check_javascript(content, auto_fix=auto_fix)
+        elif ext in ('.ts', '.tsx'):
+            return self.check_typescript(content, auto_fix=auto_fix)
+        elif ext == '.go':
+            return self.check_go(content, auto_fix=auto_fix)
+            return self.check_go(content, auto_fix=auto_fix)
             return self.check_java(content, auto_fix=auto_fix)
         else:
             # Для неизвестных типов — просто возвращаем "валидно"

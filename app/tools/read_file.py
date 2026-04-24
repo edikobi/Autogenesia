@@ -308,7 +308,7 @@ def read_code_chunk_tool(file_path: str, chunk_name: str, project_dir: str, inde
                     break
             
             if not found_chunk:
-                available = [c.name for c in chunks if c.kind != "imports"]
+                available = [f"{c.name} ({c.kind})" for c in chunks if c.kind != "imports"]
                 return f"<error>Chunk '{chunk_name}' not found in {file_path}. Available: {available}</error>"
             
             return f"""<code_chunk>
