@@ -682,10 +682,52 @@ EXTRACT_MEDIA_TOOL: Dict[str, Any] = {
     }
 }
 # ============================================================================
+# LIST FILES TOOL
+# ============================================================================
+
+LIST_FILES_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_files",
+        "description": (
+            "List files and directories in the project. "
+            "Use this tool to explore the project structure, especially in new or unindexed projects. "
+            "It shows both files on disk and pending changes in the Virtual File System (VFS). "
+            "Returns a structured XML list of items with their paths, types, sizes, and sources."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "directory_path": {
+                    "type": "string",
+                    "description": (
+                        "Directory to list, relative to project root. "
+                        "Example: '.' (root), 'app/', 'tests/unit/'"
+                    ),
+                    "default": "."
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Whether to list subdirectories recursively. Default: true.",
+                    "default": True
+                },
+                "show_hidden": {
+                    "type": "boolean",
+                    "description": "Whether to show hidden files (starting with .). Default: false.",
+                    "default": False
+                }
+            }
+        }
+    }
+}
+
+
+# ============================================================================
 # COMBINED TOOLS LIST
 # ============================================================================
 
 ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
+    LIST_FILES_TOOL,
     READ_CODE_CHUNK_TOOL,
     READ_FILE_TOOL,
     SEARCH_CODE_TOOL,
@@ -711,6 +753,7 @@ ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
 def get_tool_by_name(name: str) -> Dict[str, Any]:
     """Get tool definition by name."""
     tools_map = {
+        "list_files": LIST_FILES_TOOL,
         "read_code_chunk": READ_CODE_CHUNK_TOOL,
         "read_file": READ_FILE_TOOL,
         "search_code": SEARCH_CODE_TOOL,
@@ -736,6 +779,7 @@ def get_tool_by_name(name: str) -> Dict[str, Any]:
 def get_tool_names() -> List[str]:
     """Get list of all available tool names."""
     return [
+        "list_files",
         "read_code_chunk",
         "read_file",
         "search_code",

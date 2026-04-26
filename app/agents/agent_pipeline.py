@@ -1995,7 +1995,7 @@ class AgentPipeline:
             # ============================================================
             # STEP B: Stage to VFS
             # ============================================================
-            self.vfs.discard_all()  # Clear previous attempt
+            # self.vfs.discard_all()  # [Cumulative Staging] Preserve successes across iterations
             apply_errors_data = await self._stage_code_blocks(code_blocks)
             
             if apply_errors_data:
@@ -2013,11 +2013,16 @@ class AgentPipeline:
                 if self.feedback_loop.can_revise_instruction():
                     feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
                     staging_text = feedback_dump.get("staging_errors", "Staging failed")
+                    staged_info = feedback_dump.get("staged_files_info", "")
                     
+                    error_report = f"Staging errors:\n{staging_text}"
+                    if staged_info:
+                        error_report += f"\n\n{staged_info}"
+
                     current_instruction = await self._request_instruction_fix(
                         user_request=user_request,
                         history=history,
-                        error=f"Staging errors:\n{staging_text}",
+                        error=error_report,
                         feedback=feedback_dump
                     )
                     # Очищаем
@@ -3673,11 +3678,11 @@ Remember: You can override the validator if you believe the critique is incorrec
         final_errors = []
         structural_queue = []
         dependency_queue = []
+        broken_contents: dict = {}  # {block_idx: broken_file_content} — only for non-Python DIFF failures
         
         from app.services.virtual_fs import ChangeType
         from app.services.file_modifier import classify_staging_error
 
-        SUPPORTED_TS_EXTENSIONS = {'.py', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.c', '.cpp', '.cs'}
         _lang_map = {
             '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
             '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
@@ -3753,7 +3758,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                     final_content = result.new_content
                     _, ext = os.path.splitext(block.file_path)
                     ext = ext.lower()
-                    is_code_file = ext in SUPPORTED_TS_EXTENSIONS
+                    # [PLAN_SQL_EXCLUSION] Only validate if it's one of OUR languages
+                    is_code_file = ext in self.file_modifier.SUPPORTED_CODE_EXTENSIONS
                     is_python = (ext == '.py')
 
                     is_broken = False
@@ -3789,6 +3795,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                         change_type = ChangeType.CREATE if not backup_content else ChangeType.MODIFY
                         self.vfs.stage_change(block.file_path, final_content, change_type)
                         modified_files.add(block.file_path)
+                        # [Point 5] Record success in feedback handler
+                        self.feedback_loop.feedback_handler.add_successfully_staged_file(block.file_path)
                         print(f"✅ [STAGING-P1] Block {block_idx+1}/{len(code_blocks)} staged successfully: {block.file_path}")
 
                 else:
@@ -3796,8 +3804,22 @@ Remember: You can override the validator if you believe the critique is incorrec
                     self.vfs.stage_change(block.file_path, backup_content, current_change.change_type if current_change else ChangeType.MODIFY)
                     err_type_obj = classify_staging_error(result.message, block.mode)
                     err_type = err_type_obj.value
+                    is_python = block.file_path.endswith('.py')
+                    
                     if err_type in ["class_not_found", "method_not_found", "function_not_found", "insert_pattern_not_found"]:
                         dependency_queue.append((block_idx, block, backup_content, current_change, result.message))
+                    elif err_type == "syntax_validation_failed" and not is_python:
+                        # ПЕРЕХВАТ: отправляем проваленный diff в Pass 2 (AI Fixer) ТОЛЬКО для не-Python!
+                        # Parse concrete error lines from the message (strip the preamble)
+                        raw_errors_str = result.message.split("Errors: ")[-1]
+                        error_details = [e.strip() for e in raw_errors_str.split("; ") if e.strip()]
+                        if not error_details:
+                            error_details = [result.message]
+                        # Store broken_content (merged file that failed validation) for AI fixer context
+                        if getattr(result, 'broken_content', None):
+                            broken_contents[block_idx] = result.broken_content
+                        structural_queue.append((block_idx, block, error_details))
+                        print(f"🔧 [STAGING-P1] Block {block_idx+1} DIFF tree corruption. Rolling back and deferring to Pass 2 (AI Fixer)...")
                     else:
                         final_errors.append(self._format_staging_error(block, err_type, result.message, backup_content))
 
@@ -3807,6 +3829,11 @@ Remember: You can override the validator if you believe the critique is incorrec
                 except: pass
                 final_errors.append(self._format_staging_error(block, "SYSTEM_ERROR", str(e), backup_content))
 
+        # --- PASS 1 Results & Snapshots ---
+        last_good_states: Dict[str, str] = {}
+        for fp in modified_files:
+            last_good_states[fp] = self.vfs.read_file(fp) or ""
+        
         # --- PASS 2: Structural Repairs ---
         any_fixes_succeeded = False
         if structural_queue:
@@ -3821,13 +3848,17 @@ Remember: You can override the validator if you believe the critique is incorrec
 
             for queue_item in structural_queue:
                 block_idx, block, error_details = queue_item
+                # [Partial Staging] Capture current state as backup for this specific fix attempt
                 current_vfs_content = self.vfs.read_file(block.file_path) or ""
+                if block.file_path not in last_good_states:
+                    last_good_states[block.file_path] = current_vfs_content
+
                 _, ext = os.path.splitext(block.file_path)
                 is_python = (ext == '.py')
                 lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if not is_python else 'python'
-                parser_obj = self.ts_parser if is_python else None
+                parser_obj = self.ts_parser if is_python else self.ml_parser
 
-                # 1. CREATE SNAPSHOT
+                # 1. CREATE SNAPSHOT (state before THIS fix attempt)
                 snapshot_content = current_vfs_content
                 logger.info(f"Pass 2: Snapshot saved for {block.file_path} before cascade.")
                 
@@ -3839,7 +3870,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                 fixed_snippet = await self._attempt_ai_structure_fix(
                     block=block, existing_content=current_vfs_content,
                     error_details=error_details, language=lang_name,
-                    ts_parser=parser_obj, target_model=MODEL_A
+                    ts_parser=parser_obj, target_model=MODEL_A,
+                    broken_content=broken_contents.get(block_idx, None),
                 )
 
                 if fixed_snippet and fixed_snippet != block.code:
@@ -3864,14 +3896,14 @@ Remember: You can override the validator if you believe the critique is incorrec
                 # 3. IF A FAILED -> IMMEDIATE ROLLBACK & ATTEMPT B
                 if fixed_snippet is None:
                     print(f"⚠️ [PASS 2-A] Model A failed. Rolling back to snapshot...")
-                    from app.services.virtual_fs import ChangeType
-                    self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                    self.vfs.stage_change(block.file_path, snapshot_content)
                     
                     print(f"🤖 [PASS 2-B] Attempting fix with Fallback Model B...")
                     fixed_snippet = await self._attempt_ai_structure_fix(
                         block=block, existing_content=snapshot_content,
                         error_details=error_details, language=lang_name,
-                        ts_parser=parser_obj, target_model=MODEL_B
+                        ts_parser=parser_obj, target_model=MODEL_B,
+                        broken_content=broken_contents.get(block_idx, None),
                     )
 
                     if fixed_snippet and fixed_snippet != block.code:
@@ -3894,103 +3926,98 @@ Remember: You can override the validator if you believe the critique is incorrec
                     if fixed_snippet:
                         last_attempted_snippet = fixed_snippet
 
-                    # 4. TERMINAL ROLLBACK IF B FAILS
+                    # 4. TERMINAL ROLLBACK TO LAST GOOD STATE IF B FAILS
                     if fixed_snippet is None:
-                        print(f"❌ [PASS 2-B] Model B failed. Terminal rollback for {block.file_path}")
-                        from app.services.virtual_fs import ChangeType
-                        self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                        print(f"❌ [PASS 2-B] Model B failed. Rolling back to last stable version of {block.file_path}")
+                        self.vfs.stage_change(block.file_path, last_good_states.get(block.file_path, snapshot_content))
                         final_errors.append(self._format_staging_error(
                             block, "AI_CASCADE_FAILED", 
                             "Both Model A and Model B failed structural validation.", 
-                            snapshot_content,
-                            ai_fixed_code=last_attempted_snippet
+                            last_good_states.get(block.file_path, snapshot_content),
+                            ai_fixed_code=last_attempted_snippet,
+                            validation_errors=error_details
                         ))
                         continue
 
-                # 5. COMMIT SUCCESSFUL FIX
+                # 5. COMMIT SUCCESSFUL FIX & UPDATE LAST GOOD STATE
                 if fixed_snippet and attempt_model:
-                    from app.services.virtual_fs import ChangeType
                     repaired_block = copy.copy(block)
                     repaired_block.code = fixed_snippet
                     repair_apply_result = self.file_modifier.apply_code_block(snapshot_content, repaired_block)
 
                     if repair_apply_result.success and repair_apply_result.new_content:
-                        # [V18.25] FINAL INTEGRITY GATEWAY: 
-                        # We MUST validate the final combined content before committing to VFS.
-                        # This prevents silent failures if the patch technically applies but breaks structure.
                         final_vfs_content = repair_apply_result.new_content
-                        is_broken_final, err_type_final, details_final = self._check_tree_structure_broken(
+                        is_broken_final, _, details_final = self._check_tree_structure_broken(
                             parser_obj, final_vfs_content, block, language=lang_name
                         )
                         
                         if not is_broken_final:
-                            self.vfs.stage_change(block.file_path, final_vfs_content, ChangeType.MODIFY)
+                            self.vfs.stage_change(block.file_path, final_vfs_content)
+                            last_good_states[block.file_path] = final_vfs_content  # Update stable version
                             print(f"🔧 [STAGING-P2] Block {block_idx+1} REPAIRED and VALIDATED via {attempt_model}: {block.file_path}")
                             any_fixes_succeeded = True
                             modified_files.add(block.file_path)
+                            # [Point 5] Record success in feedback handler
+                            self.feedback_loop.feedback_handler.add_successfully_staged_file(block.file_path)
                         else:
-                            # AI fix produced invalid structure during final merge!
-                            print(f"❌ [STAGING-P2] Block {block_idx+1} AI fix ({attempt_model}) produced INVALID structure. Rolling back.")
-                            self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
+                            print(f"❌ [STAGING-P2] Block {block_idx+1} AI fix ({attempt_model}) produced INVALID structure. Rolling back to stable.")
+                            self.vfs.stage_change(block.file_path, last_good_states.get(block.file_path, snapshot_content))
                             final_errors.append(self._format_staging_error(
                                 block, "SYNTAX_VALIDATION_FAILED", 
                                 f"AI repair ({attempt_model}) resulted in broken structure during final application: {'; '.join(details_final)}", 
-                                snapshot_content
+                                last_good_states.get(block.file_path, snapshot_content),
+                                validation_errors=details_final
                             ))
                     else:
-                        self.vfs.stage_change(block.file_path, snapshot_content, ChangeType.MODIFY)
-                        final_errors.append(self._format_staging_error(block, "STRUCTURAL_APPLY_FAILED", "Failed to apply validated fix.", snapshot_content))
+                        self.vfs.stage_change(block.file_path, last_good_states.get(block.file_path, snapshot_content))
+                        final_errors.append(self._format_staging_error(block, "STRUCTURAL_APPLY_FAILED", "Failed to apply validated fix.", last_good_states.get(block.file_path, snapshot_content)))
 
         # --- PASS 3: Dependency Retry ---
         if dependency_queue:
             logger.info(f"Starting Pass 3 (Dependency Retry) for {len(dependency_queue)} deferred blocks")
             for block_idx, block, backup_content, current_change, first_err_msg in dependency_queue:
                 if not any_fixes_succeeded:
-                    # No chance it works now if nothing was fixed
                     logger.warning(f"Pass 3: Skipping retry for Block {block_idx+1} (no new successful fixes in Pass 2)")
-                    final_errors.append(self._format_staging_error(block, classify_staging_error(first_err_msg, block.mode).value, first_err_msg, backup_content))
+                    final_errors.append(self._format_staging_error(block, classify_staging_error(first_err_msg, block.mode).value, first_err_msg, last_good_states.get(block.file_path, backup_content)))
                     continue
 
                 logger.info(f"Pass 3: Retrying Block {block_idx+1} in {block.file_path} after Pass 2 fixes")
                 try:
-                    # Read current state (potentially updated by Pass 2 fixes)
                     current_content = self.vfs.read_file(block.file_path) or ""
                     result = self.file_modifier.apply_code_block(current_content, block)
                     
                     if result.success and result.new_content is not None:
-                        # Tree-sitter validation again [V14]
                         is_broken = False
                         if block.file_path.endswith('.py') and self.ts_parser:
-                            is_broken, error_type, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block)
+                            is_broken, _, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block)
                         elif self.ml_parser and self.ml_parser.is_supported(block.file_path):
                             _, ext = os.path.splitext(block.file_path)
-                            lang_name = block.language or _lang_map.get(ext.lower(), 'unknown')
+                            lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if ext.lower() != '.py' else 'python'
                             is_val, _ = self.ml_parser.validate_syntax(result.new_content, lang_name)
                             is_broken = not is_val
                         
                         if not is_broken:
                             change_type = ChangeType.MODIFY if current_content else ChangeType.CREATE
                             self.vfs.stage_change(block.file_path, result.new_content, change_type)
+                            last_good_states[block.file_path] = result.new_content
                             logger.info(f"Pass 3: Block {block_idx+1} staged successfully on retry.")
                             print(f"🔄 [STAGING-P3] Block {block_idx+1}/{len(code_blocks)} staged on retry: {block.file_path}")
+                            modified_files.add(block.file_path)
+                            # [Point 5] Record success in feedback handler
+                            self.feedback_loop.feedback_handler.add_successfully_staged_file(block.file_path)
                         else:
-                            # Still broken structure after target found? Unlikely but possible.
-                            # We don't call AI fixer here as per user instruction: "Для остальных ошибко стейджинга... без вызова ИИ фиксера сразу объявлять ошибку"
-                            logger.error(f"Pass 3: Block {block_idx+1} applied but structure still broken.")
-                            final_errors.append(self._format_staging_error(block, "SYNTAX_VALIDATION_FAILED", "Structural break persists after dependency resolution", backup_content))
+                            self.vfs.stage_change(block.file_path, last_good_states.get(block.file_path, current_content))
+                            final_errors.append(self._format_staging_error(block, "SYNTAX_VALIDATION_FAILED", "Structural break persists after dependency resolution", last_good_states.get(block.file_path, current_content)))
                     else:
-                        logger.error(f"Pass 3: Block {block_idx+1} still failed after retry: {result.message}")
-                        final_errors.append(self._format_staging_error(block, classify_staging_error(result.message, block.mode).value, result.message, backup_content))
+                        final_errors.append(self._format_staging_error(block, classify_staging_error(result.message, block.mode).value, result.message, last_good_states.get(block.file_path, current_content)))
                 except Exception as e:
                     logger.error(f"Pass 3: Exception during retry of block {block_idx+1}: {e}")
-                    final_errors.append(self._format_staging_error(block, "SYSTEM_ERROR", str(e), backup_content))
+                    final_errors.append(self._format_staging_error(block, "SYSTEM_ERROR", str(e), last_good_states.get(block.file_path, "")))
 
-        # [NEW] TRANSACTIONAL ATOMICITY: Global Rollback if ANY errors remain
+        # [PARTIAL STAGING] Final report without global rollback (Point 3 & 5 of the plan)
         if final_errors and modified_files:
-            logger.warning(f"❌ Staging batch failed with {len(final_errors)} errors. Rolling back all changes in this batch for project integrity.")
-            print(f"❌ [STAGING] Final staging failed with {len(final_errors)} errors. Rolling back changes for: {', '.join(list(modified_files))}")
-            for file_path in modified_files:
-                self.vfs.discard_file_change(file_path)
+            print(f"⚠️ [STAGING] Partial success: {len(modified_files)} files staged, but {len(final_errors)} blocks failed. Keeping successful changes.")
+            logger.warning(f"Partial staging: {len(final_errors)} errors remaining, but {len(modified_files)} files modified.")
         
         return final_errors
 
@@ -4068,7 +4095,8 @@ Remember: You can override the validator if you believe the critique is incorrec
         error_details: list,
         language: str,
         ts_parser,
-        target_model: Optional[str] = None
+        target_model: Optional[str] = None,
+        broken_content: Optional[str] = None,
     ) -> Optional[str]:
         """
         Pure function: extracts context and calls the syntax fixer.
@@ -4082,6 +4110,8 @@ Remember: You can override the validator if you believe the critique is incorrec
             # Determine insertion line
             insertion_line = None
             content_lines = existing_content.splitlines()
+            is_python = language.lower() == 'python'
+            
             if block.insert_after is not None:
                 for i, line in enumerate(content_lines):
                     if block.insert_after in line: insertion_line = i + 1; break
@@ -4089,9 +4119,79 @@ Remember: You can override the validator if you believe the critique is incorrec
                 for i, line in enumerate(content_lines):
                     if block.insert_before in line: insertion_line = i; break
             elif getattr(block, 'replace_pattern', None) is not None:
-                for i, line in enumerate(content_lines):
-                    if block.replace_pattern in line: insertion_line = i; break
+                if is_python:
+                    for i, line in enumerate(content_lines):
+                        if block.replace_pattern in line: insertion_line = i; break
+                else:
+                    first_line = next((l.strip() for l in block.replace_pattern.splitlines() if l.strip()), None)
+                    if first_line:
+                        for i, line in enumerate(content_lines):
+                            if first_line in line: insertion_line = i; break
+            elif getattr(block, 'code', None) is not None:
+                if is_python:
+                    pass
+                else:
+                    first_line = next((l.strip() for l in block.code.splitlines() if l.strip()), None)
+                    if first_line:
+                        for i, line in enumerate(content_lines):
+                            if first_line in line: insertion_line = i; break
 
+            # ----------------------------------------------------------------
+            # CONTEXT BUILDING: non-Python gets broken_content-based context
+            # ----------------------------------------------------------------
+            if not is_python:
+                # Use broken_content (merged file that failed) if available; else fall back to clean file
+                base_content = broken_content if broken_content else existing_content
+                base_lines = base_content.splitlines()
+                surrounding_context = None
+
+                # Priority 1: extract full target element (method/function/class) from broken file
+                target_name = block.target_method or block.target_function or block.target_class
+                target_type = "method" if block.target_method else ("class" if block.target_class else "function")
+                if target_name and self.ml_parser:
+                    try:
+                        element = self.ml_parser.find_element(
+                            base_content, language, target_name, element_type=target_type
+                        )
+                        if element:
+                            surrounding_context = element.get('content', '')
+                    except Exception:
+                        surrounding_context = None
+
+                # Priority 2: whole file if ≤ 15k tokens (~60k chars), else 500 lines around replace_pattern
+                if not surrounding_context:
+                    if len(base_content) <= 60000:
+                        surrounding_context = base_content
+                    else:
+                        # Find replace_pattern line in broken content
+                        anchor_line = insertion_line  # already computed above from existing_content
+                        if anchor_line is None:
+                            if getattr(block, 'replace_pattern', None):
+                                first_line = next((l.strip() for l in block.replace_pattern.splitlines() if l.strip()), None)
+                                if first_line:
+                                    for i, line in enumerate(base_lines):
+                                        if first_line in line:
+                                            anchor_line = i
+                                            break
+                        if anchor_line is None:
+                            anchor_line = len(base_lines) // 2
+                        start = max(0, anchor_line - 500)
+                        end = min(len(base_lines), anchor_line + 500)
+                        surrounding_context = '\n'.join(base_lines[start:end])
+
+                error_details_str = '; '.join(str(e) for e in error_details) if isinstance(error_details, list) else str(error_details)
+                context_info = {
+                    "mode": block.mode,
+                    "target_name": target_name or "unknown",
+                    "error_details": error_details_str,
+                    "surrounding_context": surrounding_context or "",
+                    "original_code": block.code,
+                }
+                return await _call_syntax_fixer(block.code, language, context_info, target_model=target_model)
+
+            # ----------------------------------------------------------------
+            # Python path — unchanged, uses extract_surrounding_context as before
+            # ----------------------------------------------------------------
             context_result = extract_surrounding_context(
                 file_content=existing_content,
                 target_class=block.target_class,

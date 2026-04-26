@@ -164,7 +164,7 @@ def extract_surrounding_context(
     Context strategy depends on the modification mode:
       - "inside" modes (PATCH_METHOD, INSERT_IN_FUNCTION, DIFF_INSERT, etc.):
         Show the ENTIRE enclosing method/function body so AI sees full structure.
-      - "replace" modes (REPLACE_METHOD, REPLACE_FUNCTION, DIFF_REPLACE, etc.):
+      - "replace" modes (REPLACE_METHOD, REPLACE_FUNCTION, DIFF_REPLACE, DIFF_REPLACE_TARGET, etc.):
         Show the OLD method/function being replaced.
       - "insert new" modes (INSERT_CLASS, ADD_METHOD, ADD_NEW_FUNCTION, etc.):
         Return brief explanatory context only.
@@ -181,7 +181,7 @@ def extract_surrounding_context(
         target_method: Target method name (if applicable)
         target_function: Target function name (if applicable)
         language: Programming language
-        mode: CODE_BLOCK mode string (e.g. "REPLACE_METHOD", "DIFF_REPLACE")
+        mode: CODE_BLOCK mode string (e.g. "REPLACE_METHOD", "DIFF_REPLACE_TARGET")
         insertion_line: 0-indexed line number of the insertion/replacement point (for fallback context)
         
     Returns:
@@ -207,7 +207,7 @@ def extract_surrounding_context(
     REPLACE_MODES = {
         "REPLACE_METHOD", "MODIFY_METHOD",
         "REPLACE_FUNCTION", "MODIFY_FUNCTION",
-        "DIFF_REPLACE",
+        "DIFF_REPLACE", "DIFF_REPLACE_TARGET",
     }
     INSERT_NEW_MODES = {
         "INSERT_CLASS", "ADD_METHOD",

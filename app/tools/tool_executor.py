@@ -13,6 +13,7 @@ from pathlib import Path
 from app.advice.advice_loader import execute_get_advice
 
 from app.tools.read_file import read_file_tool
+from app.tools.list_files import list_files_tool
 from app.tools.search_code import search_code_tool
 from app.tools.web_search import web_search_tool
 from app.tools.grep_search import grep_search_tool
@@ -90,6 +91,8 @@ class ToolExecutor:
             # Built-in tools
             if tool_name == "read_code_chunk": # Добавили блок
                 return self._execute_read_code_chunk(arguments)
+            elif tool_name == "list_files":
+                return self._execute_list_files(arguments)
             elif tool_name == "read_file":
                 return self._execute_read_file(arguments)
            
@@ -130,6 +133,16 @@ class ToolExecutor:
             logger.error(f"Tool execution error ({tool_name}): {e}")
             return self._format_error(f"Tool execution failed: {e}")
     
+    
+    def _execute_list_files(self, arguments: Dict[str, Any]) -> str:
+        """Execute list_files tool"""
+        return list_files_tool(
+            directory_path=arguments.get("directory_path", "."),
+            recursive=arguments.get("recursive", True),
+            project_dir=self.project_dir,
+            virtual_fs=self.virtual_fs,
+            show_hidden=arguments.get("show_hidden", False)
+        )
     
     def _execute_read_code_chunk(self, arguments: Dict[str, Any]) -> str:
         """

@@ -797,32 +797,62 @@ class GoAdapter(LanguageAdapter):
                     if self.vfs is not None:
                         go_mod_content = self.vfs.read_file('go.mod')
             
+                    go_mod_staged = False
                     if go_mod_content is not None:
                         # Write go.mod from VFS to temp dir
                         temp_go_mod = Path(temp_dir) / 'go.mod'
                         temp_go_mod.write_text(go_mod_content, encoding='utf-8')
                         go_mod_copied = True
-                        logger.debug(f"Copied go.mod from VFS to {temp_dir}")
+                        go_mod_staged = True
+                        logger.debug(f"Copied STAGED go.mod from VFS to {temp_dir}")
                     elif go_mod_path.exists():
                         # Copy go.mod from disk to temp dir
                         shutil.copy(str(go_mod_path), str(Path(temp_dir) / 'go.mod'))
                         go_mod_copied = True
                         logger.debug(f"Copied go.mod from disk to {temp_dir}")
             
-                    # Check VFS for go.sum first (might be staged)
-                    go_sum_content = None
-                    if self.vfs is not None:
-                        go_sum_content = self.vfs.read_file('go.sum')
-            
-                    if go_sum_content is not None:
-                        # Write go.sum from VFS to temp dir
-                        temp_go_sum = Path(temp_dir) / 'go.sum'
-                        temp_go_sum.write_text(go_sum_content, encoding='utf-8')
-                        logger.debug(f"Copied go.sum from VFS to {temp_dir}")
-                    elif go_sum_path.exists():
+                    # ============================================================
+                    # CRITICAL: DO NOT copy go.sum from VFS (AI edits).
+                    # AI cannot provide valid hashes, often provides stubs/comments.
+                    # We only copy if it exists on DISK, otherwise we let tidy handle it.
+                    # ============================================================
+                    if go_sum_path.exists():
                         # Copy go.sum from disk to temp dir
                         shutil.copy(str(go_sum_path), str(Path(temp_dir) / 'go.sum'))
                         logger.debug(f"Copied go.sum from disk to {temp_dir}")
+                    
+                    # ============================================================
+                    # PRE-FLIGHT: If go.mod was staged by AI, run tidy IMMEDIATELY
+                    # to ensure we don't start with malformed stubs or missing entries.
+                    # ============================================================
+                    if go_mod_staged:
+                        logger.info("go.mod was modified by AI. Running pre-flight 'go mod tidy' to generate/sync go.sum...")
+                        tidy_result = subprocess.run(
+                            [shutil.which('go') or 'go', 'mod', 'tidy'],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            timeout=60,
+                            cwd=temp_dir,
+                        )
+                        if tidy_result.returncode == 0:
+                            # Sync back BOTH go.mod and go.sum to VFS immediately
+                            if self.vfs is not None:
+                                try:
+                                    temp_go_mod = Path(temp_dir) / 'go.mod'
+                                    if temp_go_mod.exists():
+                                        self.vfs.stage_change('go.mod', temp_go_mod.read_text(encoding='utf-8'))
+                                        logger.debug("Successfully synced pre-flight go.mod back to VFS")
+                                    
+                                    temp_go_sum = Path(temp_dir) / 'go.sum'
+                                    if temp_go_sum.exists():
+                                        self.vfs.stage_change('go.sum', temp_go_sum.read_text(encoding='utf-8'))
+                                        logger.debug("Successfully synced pre-flight go.sum back to VFS")
+                                except Exception as e:
+                                    logger.warning(f"Failed to sync pre-flight go.mod/go.sum: {e}")
+                        else:
+                            logger.warning(f"Pre-flight 'go mod tidy' failed: {tidy_result.stderr}")
             
                     # Run go mod download if go.mod was copied
                     if go_mod_copied:
@@ -949,6 +979,63 @@ class GoAdapter(LanguageAdapter):
                     timeout=60,
                     cwd=temp_dir,
                 )
+        
+                # ================================================================
+                # STEP 3.5: Auto-healing for go.sum and missing modules
+                # ================================================================
+                if result.returncode != 0 and result.stderr:
+                    err_lower = result.stderr.lower()
+                    if any(p in err_lower for p in [
+                        "missing go.sum entry", 
+                        "no required module provides package",
+                        "malformed go.sum",
+                        "wrong number of fields"
+                    ]):
+                        logger.info("Detected missing dependency or go.sum entry. Attempting auto-healing via 'go mod tidy'...")
+                        
+                        tidy_result = subprocess.run(
+                            [shutil.which('go') or 'go', 'mod', 'tidy'],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            timeout=60,
+                            cwd=temp_dir,
+                        )
+                        
+                        if tidy_result.returncode == 0:
+                            logger.info("Auto-healing 'go mod tidy' succeeded. Syncing go.mod and go.sum to VFS...")
+                            
+                            # Sync go.mod and go.sum back to VFS if we have VFS
+                            if self.vfs is not None:
+                                try:
+                                    temp_go_mod = Path(temp_dir) / 'go.mod'
+                                    if temp_go_mod.exists():
+                                        self.vfs.stage_change('go.mod', temp_go_mod.read_text(encoding='utf-8'))
+                                    
+                                    temp_go_sum = Path(temp_dir) / 'go.sum'
+                                    if temp_go_sum.exists():
+                                        self.vfs.stage_change('go.sum', temp_go_sum.read_text(encoding='utf-8'))
+                                except Exception as e:
+                                    logger.warning(f"Failed to sync healed go.mod/go.sum to VFS: {e}")
+                            
+                            logger.info("Re-running compilation after auto-healing...")
+                            # Re-run compilation!
+                            result = subprocess.run(
+                                [shutil.which('go') or 'go', 'build', './...'],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=60,
+                                cwd=temp_dir,
+                            )
+                            if result.returncode == 0:
+                                logger.info("Auto-healing successful and re-compilation passed!")
+                            else:
+                                logger.warning("Re-compilation failed despite auto-healing.")
+                        else:
+                            logger.warning(f"'go mod tidy' auto-healing failed: {tidy_result.stderr}")
         
                 # Build individual results for the STAGED files only
                 # (these are the files the caller cares about)

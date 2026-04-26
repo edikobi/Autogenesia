@@ -845,6 +845,15 @@ class MultiLanguageParser:
             if name:
                 content = self._get_node_content(node, source_bytes)
                 kind = "method" if parent_name else "function"
+                
+                # [Go Specific] Strictly isolated override for Go method receivers
+                # We re-assign local variables ONLY for Go to keep the following call identical to original
+                if language == 'go' and node.type == 'method_declaration':
+                    receiver_type = self._get_go_receiver_type(node, source_bytes)
+                    if receiver_type:
+                        parent_name = receiver_type
+                        kind = "method"
+                
                 chunks.append(MultiLanguageChunk(
                     file_path=file_path,
                     kind=kind,
@@ -861,6 +870,40 @@ class MultiLanguageParser:
         # Recursively process children
         for child in node.children:
             self._walk_tree(child, source_bytes, file_path, language, config, chunks, parent_name=parent_name)
+
+    def _get_go_receiver_type(self, node, source_bytes: bytes) -> Optional[str]:
+        """
+        Extract receiver type name from Go method_declaration node.
+        Handles both (s Type) and (s *Type).
+        """
+        if node.type != 'method_declaration':
+            return None
+            
+        # Find the receiver parameter_list (the first one)
+        receiver_list = None
+        for child in node.children:
+            if child.type == 'parameter_list':
+                receiver_list = child
+                break
+        
+        if not receiver_list:
+            return None
+            
+        # Inside receiver_list, find the parameter_declaration
+        for child in receiver_list.children:
+            if child.type == 'parameter_declaration':
+                # Find type_identifier or pointer_type -> type_identifier
+                # Traverse children of parameter_declaration to find the type
+                def find_type_id(n):
+                    if n.type == 'type_identifier':
+                        return source_bytes[n.start_byte:n.end_byte].decode('utf-8', errors='ignore')
+                    for c in n.children:
+                        res = find_type_id(c)
+                        if res: return res
+                    return None
+                
+                return find_type_id(child)
+        return None
 
     def _extract_imports_block(self, tree, source_bytes: bytes, config: Dict) -> Optional[str]:
         """Extract imports block from tree"""

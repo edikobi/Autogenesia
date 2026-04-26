@@ -95,6 +95,9 @@ class StagingErrorType(Enum):
     METHOD_NOT_FOUND = "method_not_found"
     FUNCTION_NOT_FOUND = "function_not_found"
     INSERT_PATTERN_NOT_FOUND = "insert_pattern_not_found"
+    REPLACE_PATTERN_NOT_FOUND = "replace_pattern_not_found"
+    INSERT_AFTER_TARGET_NOT_FOUND = "insert_after_target_not_found"
+    INSERT_BEFORE_TARGET_NOT_FOUND = "insert_before_target_not_found"
 
     # Missing required parameters
     MISSING_TARGET_CLASS = "missing_target_class"
@@ -113,6 +116,12 @@ class StagingErrorType(Enum):
     INTEGRITY_FAILURE = "integrity_failure"
     
     INVALID_CODE_FORMAT = "invalid_code_format"
+
+    # Ambiguous pattern — matched more than one location
+    AMBIGUOUS_REPLACE_PATTERN = "ambiguous_replace_pattern"
+    
+    # Ambiguous method target — uniquely not found within class, but multiple exist globally
+    AMBIGUOUS_TARGET_METHOD = "ambiguous_target_method"
 
     # Generic fallback
     UNKNOWN = "unknown"
@@ -142,8 +151,20 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.INSERT_PATTERN_NOT_FOUND: {
             "description": "The pattern specified in INSERT_AFTER or INSERT_BEFORE was not found in the target.",
             "cause": "Pattern text doesn't match exactly, or target code structure changed.",
-            "solution": "1. Read the current file content. 2. Find the exact text you want to insert after/before. 3. Use a unique substring that exists in the file. 4. Consider using a different insertion strategy (APPEND_FILE, or specific line reference).",
-            "mode_hint": "Use APPEND_FILE to add at end, or specify exact line content",
+            "solution": "1. Read the current file content. 2. Find the exact text you want to insert after/before. 3. Use a unique substring that exists in the file. 4. Consider using a different insertion strategy (DIFF_INSERT_TARGET with INSERT_AFTER_TARGET).",
+            "mode_hint": "Use DIFF_INSERT_TARGET to insert relative to methods/classes by name",
+        },
+        StagingErrorType.INSERT_AFTER_TARGET_NOT_FOUND: {
+            "description": "The target entity (method, class, or function) specified in INSERT_AFTER_TARGET was not found.",
+            "cause": "Typo in target name, or the entity does not exist in this file.",
+            "solution": "1. Verify the exact name of the method/class you want to insert after. 2. Use read_file to check the file structure. 3. Ensure the target name is correctly spelled.",
+            "mode_hint": "Use INSERT_AFTER_TARGET: <name>",
+        },
+        StagingErrorType.INSERT_BEFORE_TARGET_NOT_FOUND: {
+            "description": "The target entity (method, class, or function) specified in INSERT_BEFORE_TARGET was not found.",
+            "cause": "Typo in target name, or the entity does not exist in this file.",
+            "solution": "1. Verify the exact name of the method/class you want to insert before. 2. Use read_file to check the file structure. 3. Ensure the target name is correctly spelled.",
+            "mode_hint": "Use INSERT_BEFORE_TARGET: <name>",
         },
         StagingErrorType.MISSING_TARGET_CLASS: {
             "description": "MODE requires TARGET_CLASS but it was not provided.",
@@ -198,6 +219,24 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "cause": "Code doesn't start with function definition or has syntax error.",
             "solution": "1. Ensure code starts with 'def function_name():' or 'async def function_name():'. 2. Check for syntax errors. 3. Provide complete function definition.",
             "mode_hint": "ADD_NEW_FUNCTION requires a complete function definition",
+        },
+        StagingErrorType.AMBIGUOUS_REPLACE_PATTERN: {
+            "description": "The REPLACE_PATTERN or INSERT anchor matched more than one location in the file.",
+            "cause": "The pattern text is too short or non-unique — it appears identically two or more times in the file.",
+            "solution": "1. Use read_file to find all occurrences of the pattern. 2. Make the pattern longer and more specific so it matches exactly ONE location. 3. Include surrounding context lines in the pattern (e.g., the preceding or following line) to make it unique.",
+            "mode_hint": "Use a longer, context-specific replace_pattern that uniquely identifies one location",
+        },
+        StagingErrorType.REPLACE_PATTERN_NOT_FOUND: {
+            "description": "The pattern specified in REPLACE_PATTERN was not found in the target file (or within the specified TARGET_METHOD/CLASS scope).",
+            "cause": "The pattern text does not match any code lines in the search scope. This often happens due to whitespace mismatches or because the pattern includes too many lines.",
+            "solution": "1. Ensure the REPLACE_PATTERN exactly matches 1-2 lines from the file (ignoring indentation). 2. Do not include large blocks in REPLACE_PATTERN. 3. If a target scope (method/class) was provided, verify the pattern exists inside that specific scope.",
+            "mode_hint": "Use a shorter (1-2 lines) and more accurate REPLACE_PATTERN",
+        },
+        StagingErrorType.AMBIGUOUS_TARGET_METHOD: {
+            "description": "Target method was not found with the specified TARGET_CLASS, but multiple methods with this exact name exist globally in the file.",
+            "cause": "Incorrect or missing TARGET_CLASS for a method that has multiple overloads or implementations in different structs/classes.",
+            "solution": "1. Use read_file to check exactly which struct/class this method belongs to. 2. Provide the correct TARGET_CLASS.",
+            "mode_hint": "Verify TARGET_CLASS context for the method",
         },
         StagingErrorType.UNKNOWN: {
             "description": "An unexpected staging error occurred.",
@@ -442,9 +481,11 @@ class StagingErrorFeedback:
         parts.append("Ensure the revised instruction uses the correct mode.")
         parts.append("")
         
-        # Required action
+        # REQUIRED ACTION
         parts.append("REQUIRED ACTION:")
-        parts.append("Write a corrected instruction with fixed MODE, TARGET, or file path.")
+        parts.append("1. Analyze the cause of the failure below.")
+        parts.append("2. If this was a partial success, look at 'SUCCESSFULLY STAGED FILES' section.")
+        parts.append("3. Provide a REVISED instruction ONLY for the failed blocks or needed changes.")
         parts.append("This error does NOT count against your iteration limit.")
         parts.append("=" * 60)
         
@@ -944,6 +985,7 @@ class FeedbackHandler:
         self._js_syntax_errors: List[JavaSyntaxErrorFeedback] = []
         self._ts_syntax_errors: List[JavaSyntaxErrorFeedback] = []
         self._go_syntax_errors: List[JavaSyntaxErrorFeedback] = []
+        self._successfully_staged_files: List[str] = []
 
 
     
@@ -1123,9 +1165,13 @@ class FeedbackHandler:
         ))
         logger.info(f"FeedbackHandler: Added Go syntax error for {file_path} ({len(errors)} errors)")
 
-    
-    
-    
+
+    def add_successfully_staged_file(self, file_path: str) -> None:
+        """NEW: Record a file that was successfully updated in VFS during partial staging."""
+        if file_path not in self._successfully_staged_files:
+            self._successfully_staged_files.append(file_path)
+            logger.info(f"FeedbackHandler: Marked {file_path} as SUCCESSFULLY STAGED")
+
     
     def get_feedback_for_orchestrator(self) -> Dict[str, str]:
         """
@@ -1189,6 +1235,18 @@ class FeedbackHandler:
             parts = [e.to_prompt_format().replace("JAVA", "GO") for e in self._go_syntax_errors]
             result["go_syntax_errors"] = "\n\n".join(parts)
 
+        # NEW: Successfully staged files report (Point 5 of the plan)
+        if self._successfully_staged_files:
+            parts = [
+                "✅ SUCCESSFULLY STAGED FILES",
+                "=" * 60,
+                "The following files were successfully updated in VFS and contain the requested changes:",
+            ]
+            for f in self._successfully_staged_files:
+                parts.append(f"  • {f}")
+            parts.append("\nNOTE: Do NOT regenerate code for these files unless you need further modifications.")
+            parts.append("=" * 60)
+            result["staged_files_info"] = "\n".join(parts)
         
         return result
         
@@ -1219,6 +1277,7 @@ class FeedbackHandler:
         self._js_syntax_errors = []
         self._ts_syntax_errors = []
         self._go_syntax_errors = []
+        self._successfully_staged_files = []
 
         logger.info("FeedbackHandler: Cleared all feedback")
     

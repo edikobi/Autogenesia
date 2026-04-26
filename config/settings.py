@@ -2,6 +2,8 @@
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+from openai import OpenAI
+
 
 # Находим .env и загружаем его
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -13,7 +15,7 @@ class Config:
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     MODEL_NORMAL = os.getenv("MODEL_NORMAL", "deepseek-chat")
-    MODEL_DEEPSEEK_REASONER = "deepseek-reasoner"
+    MODEL_DEEPSEEK_REASONER = "deepseek-v4-pro"
 
     # OpenRouter
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -56,32 +58,46 @@ class Config:
     # ID модели в RouterAI/OpenRouter для версии 3.0 Pro
     MODEL_GEMINI_3_PRO = "google/gemini-3.1-pro-preview"     
     
+    MODEL_MiniMax_M2_7 = "minimax/minimax-m2.7"
+    
 # Gemini 2.0 Flash (для роутера и сжатия истории)
     MODEL_GEMINI_2_FLASH = "google/gemini-2.0-flash-001"
     
     # Gemini 2.5 Flash-Lite
     MODEL_GEMINI_FLASH_LITE = "google/gemini-2.5-flash-lite-preview-09-2025"
     
+    MODEL_Gemma_4_31B = "google/gemma-4-31b-it"
+    
+    MODEL_GLM_5_1 = "z-ai/glm-5.1"
+    
+    MODEL_Kimi_K_2_6 = "moonshotai/kimi-k2.6"
     
 # !!! НОВАЯ МОДЕЛЬ QWEN3 MAX THINKING !!!
     MODEL_QWEN3_MAX_THINKING = "qwen/qwen3-max-thinking"    
     
     MODEL_QWEN_3_5_Plus = "qwen/qwen3.5-plus-02-15"    
+    
+    MODEL_QWEN3_Coder_Next = "qwen/qwen3-coder-next"
 
-    MODEL_Kimi_K_2_5 = "moonshotai/kimi-k2.5"
+    MODEL_Xiaomi_MiMo_V2_5_PRO = "xiaomi/mimo-v2.5-pro"
+
+    MODEL_QWEN_3_6_Plus_Preview = "qwen/qwen3.6-plus"
+    
+    MODEL_Nemotron_3_Plus_Super = "nvidia/nemotron-3-super-120b-a12b:free"
 
     # ============ НОВЫЕ МОДЕЛИ ГЕНЕРАТОРА (OpenRouter) ============
-    MODEL_GLM_4_7 = "z-ai/glm-4.7"                # GLM 4.7
+    MODEL_GLM_5_Turbo = "z-ai/glm-5-turbo"                # GLM 4.7
     MODEL_HAIKU_4_5 = "anthropic/claude-haiku-4.5" # Claude Haiku 4.5
     MODEL_GEMINI_3_FLASH = "google/gemini-3-flash-preview"
     MODEL_GPT_5_1_Codex_MINI = "openai/gpt-5.1-codex-mini"
     MODEL_QWEN_3_5 = "qwen/qwen3.5-397b-a17b"
+    MODEL_Grok_4_20 = "x-ai/grok-4.20"
 
     # ============ ПЕРЕКЛЮЧАТЕЛЬ ГЕНЕРАТОРА ============
     # Чтобы сменить модель, просто раскомментируйте нужную строку ниже:
     
     SELECTED_GENERATOR_MODEL = MODEL_NORMAL      # <--- Включен DeepSeek (по умолчанию)
-    SELECTED_GENERATOR_MODEL = MODEL_GLM_4_7     # <--- Раскомментируйте для GLM 4.7
+    SELECTED_GENERATOR_MODEL = MODEL_GLM_5_Turbo     # <--- Раскомментируйте для GLM 4.7
     SELECTED_GENERATOR_MODEL = MODEL_HAIKU_4_5   # <--- Раскомментируйте для Haiku 4.5
     SELECTED_GENERATOR_MODEL = MODEL_GEMINI_3_FLASH
     SELECTED_GENERATOR_MODEL = MODEL_GPT_5_1_Codex_MINI
@@ -125,11 +141,19 @@ class Config:
 
             # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
             # Для OpenAI-совместимых API, таких как OpenRouter, используется параметр reasoning_effort [citation:10].
-            "extra_params": {
-                "reasoning_effort": "xhigh"  # Или "medium", "max" для максимальной глубины.
-                # Вы можете поэкспериментировать с разными уровнями.
-            }
+            "reasoning": {"effort": "xhigh"}
         },
+        
+        "minimax/minimax-m2.7": {  # Используем ID модели
+            "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
+            "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
+            "provider_name": "OPENROUTER",    # Название провайдера для отображения
+
+            # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
+            # Для OpenAI-совместимых API, таких как OpenRouter, используется параметр reasoning_effort [citation:10].
+            "reasoning": {"effort": "xhigh"}
+        },
+        
         
         # Конфигурация для Qwen3.5 Plus (НОВАЯ!)
         "qwen/qwen3.5-plus-02-15": {
@@ -139,23 +163,35 @@ class Config:
             
             # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
             # Используем параметр "reasoning" как указано в документации OpenRouter [citation:1]
-            "extra_params": {
-                "reasoning": {
-                    "enabled": True  # Включаем показ мыслительного процесса модели
-                    # При необходимости можно добавить "budget_tokens" для контроля длины рассуждений
-                }
-            }
+            "reasoning": {"effort": "xhigh"}
         },
         
-        "moonshotai/kimi-k2.5": {
+        "moonshotai/kimi-k2.6": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
-            "extra_params": {
-                "reasoning": {
-                    "effort": "medium"
-                }
-            }
+            "reasoning": {"effort": "xhigh"}
+        },
+        
+        "xiaomi/mimo-v2.5-pro": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "reasoning": {"effort": "xhigh"}
+        },
+        
+        "z-ai/glm-5.1": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "reasoning": {"effort": "high"}
+        },
+        
+        "qwen/qwen3.6-plus": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "reasoning": {"effort": "high"}
         },
         
         
@@ -165,11 +201,14 @@ class Config:
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
-            "extra_params": {
-                "reasoning": {
-                    "effort": "medium"
-                }
-            }
+           "reasoning": {"effort": "high"}
+        },
+        
+        "nvidia/nemotron-3-super-120b-a12b:free": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "reasoning": {"effort": "medium"}
         },
         
         
@@ -185,7 +224,7 @@ class Config:
             "provider_name": "OPENROUTER",
             
             # Extended thinking для Opus 4.6 (оптимальный бюджет для средних задач)
-            "extra_params": {
+            "extra_body": {
                 "thinking": {
                     "type": "enabled",
                     "budget_tokens": 45000  # Сбалансированный бюджет: достаточно для анализа, не избыточно
@@ -229,9 +268,7 @@ class Config:
             "provider_name": "OPENROUTER",
             
             # Настройка максимального рассуждения для GPT-5.1
-            "extra_params": {
-                "reasoning_effort": "xhigh"  # Варианты: "medium", "high", "xhigh"
-            }
+            "reasoning": {"effort": "xhigh"}
         },
         
         "openai/gpt-5.1-codex-mini": {
@@ -240,8 +277,7 @@ class Config:
             "provider_name": "OpenRouter",
             
             # Настройка максимального рассуждения для GPT-5.1
-            "extra_params": {
-                "reasoning_effort": "low",  # Варианты: "medium", "high", "xhigh"
+            "extra_body": {
                 "max_tokens": 3000
             },
         },
@@ -249,14 +285,11 @@ class Config:
         
 # === ГРУППА ГЕНЕРАТОРОВ (OPENROUTER) ===
         # GLM 4.7 (Thinking В)
-        "z-ai/glm-4.7": {
+        "z-ai/glm-5-turbo": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Zhipu)",
             "extra_params": {
-                "reasoning": {
-                    "effort": "medium"
-                }
             }
         },
         
@@ -265,14 +298,21 @@ class Config:
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Anthropic)",
-            "extra_params": {
+            "extra_ищвн": {
                 "thinking": {
                     "type": "enabled",
-                    "budget_tokens": 6500  # Сбалансированный бюджет: достаточно для анализа, не избыточно
+                    "budget_tokens": 7500  # Сбалансированный бюджет: достаточно для анализа, не избыточно
                 }
             }
         },
 
+        "x-ai/grok-4.20": {
+            "api_key": OPENROUTER_API_KEY,
+            "base_url": OPENROUTER_BASE_URL,
+            "provider_name": "OpenRouter",
+            "extra_params": {
+            }
+        },
 
         "google/gemini-3-flash-preview": {
             "api_key": OPENROUTER_API_KEY,
@@ -514,7 +554,11 @@ class Config:
             cls.MODEL_DEEPSEEK_REASONER,
             cls.MODEL_QWEN3_MAX_THINKING,
             cls.MODEL_QWEN_3_5_Plus,
-            cls.MODEL_Kimi_K_2_5,
+            cls.MODEL_QWEN_3_6_Plus_Preview,
+            cls.MODEL_Xiaomi_MiMo_V2_5_PRO,
+            cls.MODEL_Kimi_K_2_6,
+            cls.MODEL_GLM_5_1,
+            cls.MODEL_MiniMax_M2_7,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
         ]
     
@@ -554,9 +598,13 @@ class Config:
             cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
-            cls.MODEL_Kimi_K_2_5: "Kimi K2.5",
+            cls.MODEL_Kimi_K_2_6: "Kimi K2.5",
+            cls.MODEL_QWEN_3_6_Plus_Preview: "Qwen3.6 Plus Preview",
+            cls.MODEL_Xiaomi_MiMo_V2_5_PRO: "Xiaomi: MiMo-V2-Pro",
+            cls. MODEL_GLM_5_1: "GLM 5.1",
+            cls.MODEL_MiniMax_M2_7: "MiniMAX M2.7",
             # Модели генератора
-            cls.MODEL_GLM_4_7: "GLM 4.7 (OpenRouter)",
+            cls.MODEL_GLM_5_Turbo: "GLM 4.7 (OpenRouter)",
             cls.MODEL_HAIKU_4_5: "Claude Haiku 4.5 (OpenRouter)",
             cls.MODEL_GEMINI_3_FLASH : "Gemini 3.0 flash",
             cls.MODEL_GPT_5_1_Codex_MINI : "GPT-5.1-Codex-Mini"
@@ -615,7 +663,7 @@ class Config:
          
          
             # Доступные модели генератора для выбора
-# Формат: (key, model_id, short_name, description)
+# Формат: (key, model_id, short_name, description), а вообще это мусор, все так как список генераторов есть в точке входа
 AVAILABLE_GENERATOR_MODELS = [
     (
         "1",
@@ -625,7 +673,7 @@ AVAILABLE_GENERATOR_MODELS = [
     ),
     (
         "2",
-        "z-ai/glm-4.7",
+        "z-ai/glm-5-turbo",
         "GLM 4.7",
         "Китайская модель от Zhipu AI. Хороша для структурированного кода, поддерживает thinking mode."
     ),

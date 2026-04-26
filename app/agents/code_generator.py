@@ -1478,6 +1478,8 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         TARGET_ATTRIBUTE: attribute_name (optional)
         INSERT_AFTER: element_name (optional)
         INSERT_BEFORE: element_name (optional)
+        INSERT_AFTER_TARGET: target_entity_name (optional)
+        INSERT_BEFORE_TARGET: target_entity_name (optional)
         REPLACE_PATTERN: pattern_to_find (optional)
         
         <code here>
@@ -1530,6 +1532,8 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         target_attribute = _extract_field(block_content, "TARGET_ATTRIBUTE")
         insert_after = _extract_field(block_content, "INSERT_AFTER")
         insert_before = _extract_field(block_content, "INSERT_BEFORE")
+        insert_after_target = _extract_field(block_content, "INSERT_AFTER_TARGET")
+        insert_before_target = _extract_field(block_content, "INSERT_BEFORE_TARGET")
         replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
         
         # Извлекаем код из code fence
@@ -1558,6 +1562,8 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             target_attribute=target_attribute,
             insert_after=insert_after,
             insert_before=insert_before,
+            insert_after_target=insert_after_target,
+            insert_before_target=insert_before_target,
             replace_pattern=replace_pattern,
             language=language,
         ))
@@ -1587,8 +1593,12 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
         match = re.search(pattern, content, re.MULTILINE | re.IGNORECASE)
         if match:
             value = match.group(1).strip()
-            # Убираем backticks если есть
             value = value.strip('`')
+            
+            # Декодируем литеральный \n для многострочных паттернов
+            if field_name.upper() == "REPLACE_PATTERN" and '\\n' in value:
+                value = value.replace('\\n', '\n')
+                
             return value
     
     return None

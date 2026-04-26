@@ -25,6 +25,12 @@ Autogenesia - Главная точка входа
 
 from __future__ import annotations
 from app.agents.pre_filter import analyze_query, PreFilterMode, PreFilterAdvice
+from app.llm.prompt_templates import (
+    _build_prefilter_advice_section,
+    _build_prefilter_advice_section_agent,
+    _build_prefilter_advice_section_new_project_agent,
+)
+
 
 import re
 import os
@@ -61,7 +67,7 @@ import logging
 import signal
 import traceback
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Callable
 from datetime import datetime
 
 # Rich для красивого терминального интерфейса
@@ -395,20 +401,20 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "8",
-        cfg.MODEL_Kimi_K_2_5,
-        "Kimi K 2.5",
+        cfg.MODEL_Kimi_K_2_6,
+        "Kimi K 2.6",
         "Очень неплохой китайский ИИ"
     ),
     (
         "9",
         cfg.MODEL_QWEN_3_6_Plus_Preview,
         "Qwen3.6 Plus",
-        "Обещают золотые горы, но это китайский ИИ. (зато пока бесплатно)"
+        "ИИ от китайцев, дешевый с неплохим знанием кода"
     ),
     (
         "10",
-        cfg.MODEL_Xiaomi_MiMo_V2_PRO,
-        "Xiaomi: MiMo-V2-Pro",
+        cfg.MODEL_Xiaomi_MiMo_V2_5_PRO,
+        "Xiaomi: MiMo-V2.5-Pro",
         "Нахваливают эту модель, но должна быть хотя бы топ за свои деньги"
     ),
     
@@ -427,7 +433,7 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
 ]
 
-#  cls.MODEL_MiniMax_M2_7
+# 
 
 # Доступные модели генератора для выбора С ПОДРОБНЫМИ ОПИСАНИЯМИ
 # Формат: (key, model_id, short_name, description)
@@ -481,7 +487,7 @@ AVAILABLE_GENERATOR_MODELS = [
 
     (
         "8",
-        cfg.MODEL_QWEN3_Coder_Next,
+        cfg.MODEL_QWEN3_MAX_THINKING,
         "Qwen3 Coder Next",
         "Это открытая причинно-следственная языковая модель, оптимизированная для программистов и локальных рабочих процессов разработки"
     ),
@@ -1211,12 +1217,37 @@ def print_prefilter_advice(advice: 'PreFilterAdvice', mode: str, tool_calls: int
         ))
 
 
+def _prefilter_streaming_handler(name: str, args: Dict[str, Any], result: str, success: bool):
+    """Визуализация вызова инструмента Pre-filter в реальном времени"""
+    icons = {
+        "read_code_chunk": "📖",
+        "read_file": "📄",
+        "search_code": "🔍",
+        "grep_search": "🔎",
+        "show_file_relations": "🔗",
+        "list_files": "📂",
+        "web_search": "🌐"
+    }
+    icon = icons.get(name, "🛠️")
+    
+    # Сокращаем длинные аргументы для красоты
+    args_str = str(args)
+    if len(args_str) > 80:
+        args_str = args_str[:77] + "..."
+    
+    status = "[green]OK[/]" if success else "[red]FAIL[/]"
+    
+    console.print(f"   [cyan]Stage:[/] {icon} [bold]{name}[/]([dim]{args_str}[/]) -> {status}")
+
 async def run_prefilter_analysis(
     user_query: str,
     project_dir: str,
     project_index: Dict[str, Any],
     mode: str = "normal",
     model: Optional[str] = None,
+    is_planning: bool = False,
+    is_new_project: bool = False,
+    on_tool_call: Optional[Callable] = None,
 ) -> Tuple[str, Optional[PreFilterAdvice]]:
     """
     Запускает Pre-filter анализ запроса и возвращает советы для Оркестратора.
@@ -1328,6 +1359,9 @@ async def run_prefilter_analysis(
                 index=project_index,
                 mode=prefilter_mode,
                 model=actual_model,
+                is_planning=is_planning,
+                is_new_project=is_new_project,
+                on_tool_call=on_tool_call
             )
         
         llm_elapsed = _time.time() - llm_start
@@ -1355,9 +1389,25 @@ async def run_prefilter_analysis(
             console.print(f"   [red]   ❌ analyze_query вернул None![/]")
             logger.warning("[PRE-FILTER] Analysis returned None")
         
-        # Визуализируем результаты
         if advice and advice.raw_response:
-            print_prefilter_advice(advice, mode, advice.tool_calls_made)
+            if is_planning:
+                console.print("\n[bold green]📋 Отчет Pre-filter (Комментарии + План):[/]")
+                from rich.markdown import Markdown
+                
+                # Print the full response to show commentary, but save only the extracted plan
+                full_text = getattr(advice, 'full_response', advice.raw_response)
+                console.print(Markdown(full_text))
+                
+                if project_dir:
+                    try:
+                        plan_path = Path(project_dir) / ".ai-agent" / "current_plan.md"
+                        plan_path.parent.mkdir(parents=True, exist_ok=True)
+                        plan_path.write_text(advice.raw_response, encoding="utf-8")
+                        console.print(f"[dim]План сохранён в {plan_path}[/]")
+                    except Exception as e:
+                        console.print(f"[yellow]Не удалось сохранить план: {e}[/]")
+            else:
+                print_prefilter_advice(advice, mode, advice.tool_calls_made)
             console.print(f"[green]   ✓ Pre-filter завершён успешно[/]")
         else:
             console.print("[yellow]   ⚠️ Pre-filter не вернул рекомендаций (raw_response пуст)[/]")
@@ -1365,7 +1415,11 @@ async def run_prefilter_analysis(
                 console.print(f"[dim]   Сырой ответ ({len(advice.raw_response)} символов): {advice.raw_response[:200]}...[/]")
         
         # Форматируем советы в строку для Оркестратора
-        advice_str = _format_prefilter_advice_for_orchestrator(advice) if advice else ""
+        advice_str = _format_prefilter_advice_for_orchestrator(
+            advice, 
+            is_planning=is_planning, 
+            is_new_project=is_new_project
+        ) if advice else ""
         
         # Логируем что передаём Оркестратору
         total_elapsed = _time.time() - pf_start
@@ -1406,14 +1460,15 @@ async def run_prefilter_analysis(
         return "", None
 
 
-def _format_prefilter_advice_for_orchestrator(advice: PreFilterAdvice) -> str:
+def _format_prefilter_advice_for_orchestrator(
+    advice: PreFilterAdvice, 
+    is_planning: bool = False,
+    is_new_project: bool = False
+) -> str:
     """
     Форматирует PreFilterAdvice в строку для передачи Оркестратору.
     
-    Если структурированные поля пусты (LLM вернул свободный текст),
-    используем raw_response напрямую.
-    
-    ИСПРАВЛЕНО: Всегда возвращаем raw_response если он есть и структурированные поля пусты.
+    Использует соответствующие шаблоны из prompt_templates.py в зависимости от режима.
     """
     if not advice:
         return ""
@@ -1421,7 +1476,19 @@ def _format_prefilter_advice_for_orchestrator(advice: PreFilterAdvice) -> str:
     # Если raw_response пуст — нечего передавать
     if not advice.raw_response:
         return ""
+        
+    # ВЕТКА ПЛАНИРОВАНИЯ (ADVANCED MODE)
+    if is_planning:
+        if is_new_project:
+            return _build_prefilter_advice_section_new_project_agent().format(
+                prefilter_advice=advice.raw_response.strip()
+            )
+        else:
+            return _build_prefilter_advice_section_agent().format(
+                prefilter_advice=advice.raw_response.strip()
+            )
     
+    # ВЕТКА ОБЫЧНОГО АНАЛИЗА (NORMAL MODE)
     parts = []
     
     if advice.clarified_query and advice.clarified_query.strip():
@@ -1446,15 +1513,14 @@ def _format_prefilter_advice_for_orchestrator(advice: PreFilterAdvice) -> str:
     if advice.tool_calls_made > 0:
         parts.append(f"TOOL_CALLS_MADE: {advice.tool_calls_made}")
     
-    # ИСПРАВЛЕНО: Если структурированные поля пусты, но raw_response есть —
-    # передаём raw_response напрямую (LLM вернул свободный текст)
+    # Собираем контент
     if not parts:
-        logger.info(f"Pre-filter: No structured fields parsed, using raw_response ({len(advice.raw_response)} chars)")
-        return advice.raw_response.strip()
-    
-    # FIX: Ранее здесь отсутствовал return — функция возвращала None,
-    # из-за чего советы Pre-filter никогда не доходили до Оркестратора
-    return "\n".join(parts)
+        content = advice.raw_response.strip()
+    else:
+        content = "\n".join(parts)
+        
+    # Оборачиваем в оригинальный блок "🔮 PRE-ANALYSIS ADVISORY"
+    return _build_prefilter_advice_section().format(prefilter_advice=content)
     
 
 
@@ -4232,6 +4298,8 @@ async def handle_ask_mode(query: str):
                 project_index=project_index,
                 mode=state.prefilter_mode,
                 model=state.prefilter_model,
+                is_new_project=state.is_new_project,
+                on_tool_call=_prefilter_streaming_handler
             )
             
             trace_stage("PREFILTER_ANALYSIS", {
@@ -4787,26 +4855,87 @@ async def handle_agent_mode(query: str):
             )
 
     # =====================================================================
-    # PRE-FILTER АНАЛИЗ (СОВЕТЫ ДЛЯ ОРКЕСТРАТОРА)
+    # PRE-FILTER АНАЛИЗ ИЛИ ПЛАНИРОВАНИЕ
     # =====================================================================
-    console.print("\n[bold cyan]💡 Pre-filter анализ...[/]")
+    is_planning = state.prefilter_mode == 'advanced'
+    
+    if is_planning:
+        console.print("\n[bold cyan]💡 Этап планирования архитектуры (Pre-filter)...[/]")
+    else:
+        console.print("\n[bold cyan]💡 Pre-filter анализ...[/]")
     
     prefilter_advice_str = ""
+    prefilter_advice_obj = None
     
     try:
-        prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
-            user_query=query,
-            project_dir=state.project_dir or ".",
-            project_index=state.project_index or {},
-            mode=state.prefilter_mode,
-            model=state.prefilter_model,
-        )
-        
-        log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter completed", {
-            "mode": state.prefilter_mode,
-            "has_advice": bool(prefilter_advice_str),
-            "tool_calls": prefilter_advice_obj.tool_calls_made if prefilter_advice_obj else 0,
-        })
+        if is_planning:
+            plan_accepted = False
+            current_query = query
+            
+            while not plan_accepted:
+                prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
+                    user_query=current_query,
+                    project_dir=state.project_dir or ".",
+                    project_index=state.project_index or {},
+                    mode=state.prefilter_mode,
+                    model=state.prefilter_model,
+                    is_planning=True,
+                    is_new_project=state.is_new_project,
+                    on_tool_call=_prefilter_streaming_handler
+                )
+                
+                log_pipeline_stage("PLANNING", f"Planning completed", {
+                    "has_advice": bool(prefilter_advice_str),
+                })
+                
+                # Validation of plan existence
+                if state.project_dir:
+                    plan_path = Path(state.project_dir) / ".ai-agent" / "current_plan.md"
+                    if plan_path.exists():
+                        console.print("\n[green]✓ План успешно передан в Pipeline. Файл: .ai-agent/current_plan.md[/]")
+                    else:
+                        console.print("\n[yellow]⚠️ План .ai-agent/current_plan.md не найден. Продолжаю работу в обычном режиме.[/]")
+                        # Не выходим из функции, позволяем pipeline продолжаться без плана
+                        plan_accepted = True 
+                        break
+                
+                # Ask user for feedback
+                from rich.prompt import Prompt
+                console.print("\n[bold yellow]План готов. Введите '!ok' для утверждения плана и начала реализации.[/]")
+                console.print("[dim]Введите '!cancel' для отмены или напишите свои правки к плану (они будут переданы планировщику для доработки).[/]")
+                
+                user_input = Prompt.ask("Ваше решение")
+                
+                if user_input.strip() == "!ok":
+                    plan_accepted = True
+                elif user_input.strip() == "!cancel":
+                    console.print("[yellow]Отмена операции планирования.[/]")
+                    return
+                else:
+                    # Preserve context by passing the original query, previous plan, and new feedback
+                    current_query = (
+                        f"{query}\n\n"
+                        f"--- PREVIOUS PLAN ---\n{prefilter_advice_str}\n\n"
+                        f"--- USER FEEDBACK FOR IMPROVEMENT ---\n{user_input}"
+                    )
+                    console.print("[cyan]Отправляю правки планировщику...[/]")
+        else:
+            prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
+                user_query=query,
+                project_dir=state.project_dir or ".",
+                project_index=state.project_index or {},
+                mode=state.prefilter_mode,
+                model=state.prefilter_model,
+                is_planning=False,
+                is_new_project=state.is_new_project,
+                on_tool_call=_prefilter_streaming_handler
+            )
+            
+            log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter completed", {
+                "mode": state.prefilter_mode,
+                "has_advice": bool(prefilter_advice_str),
+                "tool_calls": prefilter_advice_obj.tool_calls_made if prefilter_advice_obj else 0,
+            })
     except Exception as e:
         logger.warning(f"Pre-filter analysis failed: {e}")
         log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter failed: {e}")
@@ -6643,7 +6772,7 @@ async def setup_mode_session(mode: str) -> bool:
         try:
             choice = prompt_with_navigation(
                 "Выбор",
-                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9","10", "11", "12", "13"],
+                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
                 default="r"
             )
         except BackException:
@@ -6757,7 +6886,7 @@ async def setup_mode_session(mode: str) -> bool:
     try:
         model_choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="r"
         )
     except BackException:

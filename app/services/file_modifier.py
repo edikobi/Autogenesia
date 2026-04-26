@@ -62,14 +62,22 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
     
     # 1. SPECIFIC TARGETING ERRORS (Highest priority)
     # If something is "not found", it's a targeting error, even if it caused structure breakage
+    if "ambiguous_target_method" in error_lower:
+        return StagingErrorType.AMBIGUOUS_TARGET_METHOD
     if "method" in error_lower and "not found" in error_lower:
         return StagingErrorType.METHOD_NOT_FOUND
     if "function" in error_lower and "not found" in error_lower:
         return StagingErrorType.FUNCTION_NOT_FOUND
     if "class" in error_lower and "not found" in error_lower:
         return StagingErrorType.CLASS_NOT_FOUND
-    if "pattern" in error_lower and "not found" in error_lower:
+    if ("pattern" in error_lower or "anchor" in error_lower) and "not found" in error_lower:
+        if mode == "DIFF_REPLACE":
+            return StagingErrorType.REPLACE_PATTERN_NOT_FOUND
         return StagingErrorType.INSERT_PATTERN_NOT_FOUND
+    if "insert_after_target" in error_lower and "not found" in error_lower:
+        return StagingErrorType.INSERT_AFTER_TARGET_NOT_FOUND
+    if "insert_before_target" in error_lower and "not found" in error_lower:
+        return StagingErrorType.INSERT_BEFORE_TARGET_NOT_FOUND
     if "attribute" in error_lower and "not found" in error_lower:
         return StagingErrorType.INSERT_PATTERN_NOT_FOUND
 
@@ -102,10 +110,16 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
         return StagingErrorType.INVALID_MODE
     if "parser" in error_lower and "not available" in error_lower:
         return StagingErrorType.PARSER_UNAVAILABLE
+    if "no operation specified" in error_lower:
+        return StagingErrorType.INVALID_CODE_FORMAT
     
     if mode == "ADD_NEW_FUNCTION" or mode == "CREATE_FUNCTION":
         if "must be a function definition" in error_lower:
             return StagingErrorType.INVALID_CODE_FORMAT
+    
+    # 6. AMBIGUOUS PATTERN
+    if "ambiguous" in error_lower and ("replace pattern" in error_lower or "insert anchor" in error_lower):
+        return StagingErrorType.AMBIGUOUS_REPLACE_PATTERN
     
     return StagingErrorType.UNKNOWN
 
@@ -166,6 +180,7 @@ class ModifyResult:
     lines_added: int = 0
     lines_removed: int = 0
     error_type: Optional[Any] = None  # StagingErrorType when validation fails
+    broken_content: Optional[str] = None  # The merged result that failed validation (non-Python AI fixer use)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -189,6 +204,7 @@ class ApplyResult:
     changes_made: List[str]
     error_type: Optional[StagingErrorType] = None
     new_content: Optional[str] = None
+    broken_content: Optional[str] = None  # The merged result that failed validation (non-Python AI fixer use)
 
 
 # ============================================================================
@@ -222,6 +238,8 @@ class ParsedCodeBlock:
         target_function: Целевая функция
         insert_after: Вставить после элемента
         insert_before: Вставить перед элементом
+        insert_after_target: Вставить после указанной сущности (метод, класс, функция)
+        insert_before_target: Вставить перед указанной сущностью
         replace_pattern: Паттерн для поиска и замены
     """
     def __init__(
@@ -235,6 +253,8 @@ class ParsedCodeBlock:
         target_attribute: Optional[str] = None,
         insert_after: Optional[str] = None,
         insert_before: Optional[str] = None,
+        insert_after_target: Optional[str] = None,
+        insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
         language: Optional[str] = None,
     ):
@@ -247,6 +267,8 @@ class ParsedCodeBlock:
         self.target_attribute = target_attribute
         self.insert_after = insert_after
         self.insert_before = insert_before
+        self.insert_after_target = insert_after_target
+        self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
         self.language = language  # Programming language (python, javascript, typescript, go, java)
     
@@ -262,6 +284,8 @@ class ParsedCodeBlock:
             'target_attribute': self.target_attribute,
             'insert_after': self.insert_after,
             'insert_before': self.insert_before,
+            'insert_after_target': self.insert_after_target,
+            'insert_before_target': self.insert_before_target,
             'replace_pattern': self.replace_pattern,
             'language': self.language,
         }
@@ -279,7 +303,10 @@ class MultiLangDiffInstruction:
         target_function: Optional[str] = None,
         insert_after: Optional[str] = None,
         insert_before: Optional[str] = None,
+        insert_after_target: Optional[str] = None,
+        insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
+        mode: str = "DIFF_INSERT",
     ):
         """Initialize multi-language diff instruction."""
         self.file_path = file_path
@@ -290,7 +317,10 @@ class MultiLangDiffInstruction:
         self.target_function = target_function
         self.insert_after = insert_after
         self.insert_before = insert_before
+        self.insert_after_target = insert_after_target
+        self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
+        self.mode = mode
 
 # ============================================================================
 # MAIN CLASS
@@ -400,12 +430,16 @@ class FileModifier:
     }
     
     # DIFF modes for non-Python languages (handled separately via apply_multilang_diff)
-    DIFF_MODES: set = {"DIFF_INSERT", "DIFF_REPLACE"}
-    # Extensions for non-code files that bypass Tree-sitter validation
-    PLAIN_TEXT_EXTENSIONS: frozenset[str] = frozenset({
-        '.md', '.markdown', '.txt', '.rst', '.mod', '.sum', 
-        '.xml', '.toml', '.yaml', '.yml', '.ini', '.env', '.cfg', '.conf'
+    DIFF_MODES: set = {"DIFF_INSERT", "DIFF_REPLACE", "DIFF_REPLACE_TARGET", "DIFF_INSERT_TARGET"}
+    # Extensions for code files that REQUIRE Tree-sitter/Syntax validation
+    SUPPORTED_CODE_EXTENSIONS: frozenset[str] = frozenset({
+        '.py', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.c', '.cpp', '.cs'
     })
+
+    def is_plain_text_file(self, file_path: str) -> bool:
+        """Returns True if the file should be treated as plain text (no structural validation)."""
+        ext = Path(file_path).suffix.lower()
+        return ext not in self.SUPPORTED_CODE_EXTENSIONS
 
     def __init__(self, default_indent: int = 4, project_python_path: Optional[str] = None):
         """
@@ -724,7 +758,7 @@ class FileModifier:
             file_ext = Path(file_path).suffix.lower()
 
             # BRANCH A: plain-text files — skip all validation, stage directly
-            if file_ext in self.PLAIN_TEXT_EXTENSIONS:
+            if self.is_plain_text_file(file_path):
                 if result.success:
                     change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
                     vfs.stage_change(file_path, result.new_content, change_type)
@@ -895,7 +929,10 @@ class FileModifier:
                     target_function=block.target_function,
                     insert_after=block.insert_after,
                     insert_before=block.insert_before,
+                    insert_after_target=block.insert_after_target,
+                    insert_before_target=block.insert_before_target,
                     replace_pattern=block.replace_pattern,
+                    mode=block.mode,
                 )
                 
                 # Apply multi-language diff
@@ -906,6 +943,7 @@ class FileModifier:
                 result.message = modify_result.message
                 result.changes_made = modify_result.changes_made
                 result.new_content = modify_result.new_content
+                result.broken_content = modify_result.broken_content  # propagate for non-Python AI fixer
                 
                 if not result.success:
                     result.error_type = classify_staging_error(result.message, block.mode)
@@ -1015,6 +1053,7 @@ class FileModifier:
                     insert_after=block.insert_after,
                     insert_before=block.insert_before,
                     replace_pattern=block.replace_pattern,
+                    mode=block.mode,
                 )
         
                 result = self.apply_multilang_diff(existing_content, diff_instruction)
@@ -1023,13 +1062,30 @@ class FileModifier:
                     change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
                     vfs.stage_change(block.file_path, result.new_content, change_type)
                     logger.info(f"Staged DIFF modification to {block.file_path}")
+                elif "Syntax validation failed" in result.message:
+                    # AI syntax fix for non-Python languages in DIFF modes
+                    logger.info(f"Syntax validation failed for DIFF mode in {block.file_path}, attempting AI repair...")
+                    fixed_result = self._try_ai_syntax_fix_for_block(
+                        block=block,
+                        existing_content=existing_content,
+                        language=language,
+                        original_block_code=block.code,
+                        error_details=result.message.split("Errors: ")[-1],
+                        max_attempts=2,
+                        is_python=False,
+                    )
+                    if fixed_result is not None:
+                        change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
+                        vfs.stage_change(block.file_path, fixed_result.new_content, change_type)
+                        logger.info(f"Staged AI-fixed DIFF modification to {block.file_path}")
+                        return fixed_result
         
                 return result
 
             result = self.apply_code_block(existing_content, block)
 
             file_ext = Path(block.file_path).suffix.lower()
-            if file_ext in self.PLAIN_TEXT_EXTENSIONS:
+            if self.is_plain_text_file(block.file_path):
                 if result.success:
                     change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
                     vfs.stage_change(block.file_path, result.new_content, change_type)
@@ -1420,19 +1476,21 @@ class FileModifier:
         Returns:
             ModifyResult with success status and modified content
         """
+        is_code_file = not self.is_plain_text_file(instruction.file_path)
+        
         try:
-            # === VALIDATION: Language support ===
+            # === VALIDATION: Language support (Only for code files) ===
             supported_langs = ['javascript', 'typescript', 'go', 'java']
-            if instruction.language not in supported_langs:
+            if is_code_file and instruction.language not in supported_langs:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
-                    message=f"Unsupported language: {instruction.language}. Supported: {', '.join(supported_langs)}"
+                    message=f"Unsupported language for structural validation: {instruction.language}. Supported: {', '.join(supported_langs)}"
                 )
             
             # === INITIALIZATION ===
             from app.services.tree_sitter_parser import MultiLanguageParser
-            parser = MultiLanguageParser()
+            parser = MultiLanguageParser() if is_code_file else None
             source_bytes = existing_content.encode('utf-8')
             lines = existing_content.split('\n')
             
@@ -1442,14 +1500,15 @@ class FileModifier:
                 target_info = None
                 target_name = instruction.target_function or instruction.target_method
                 
-                if instruction.target_function or instruction.target_class or instruction.target_method:
+                if is_code_file and (instruction.target_function or instruction.target_class or instruction.target_method):
                     target_info = self._find_multilang_target(
                         parser,
                         source_bytes,
                         instruction.language,
                         instruction.target_class,
                         instruction.target_method,
-                        instruction.target_function
+                        instruction.target_function,
+                        target_name=target_name
                     )
                     
                     # Fallback: if target not found by full specification, try to find function by name
@@ -1465,6 +1524,13 @@ class FileModifier:
                         )
                         if target_info:
                             logger.info(f"DIFF_INSERT: Found function '{target_name}' as fallback target")
+                    
+                    if target_info and 'error' in target_info:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"DIFF_INSERT: AMBIGUOUS_TARGET_METHOD: Method '{target_name}' not found uniquely in context, multiple global matches exist."
+                        )
                     
                     if not target_info:
                         return ModifyResult(
@@ -1525,30 +1591,169 @@ class FileModifier:
                 modified_lines = lines[:insert_line] + indented_lines + lines[insert_line:]
                 modified_content = '\n'.join(modified_lines)
                 
-                # === CRITICAL: Validate syntax with tree-sitter ===
-                is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
-                if not is_valid:
-                    return ModifyResult(
-                        success=False,
-                        new_content=existing_content,
-                        message=f"DIFF_INSERT: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
-                    )
+                # === CRITICAL: Validate syntax (Only for code files) ===
+                if is_code_file:
+                    is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                    if not is_valid:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"DIFF_INSERT: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
+                        )
                 
                 return ModifyResult(
                     success=True,
                     new_content=modified_content,
                     message=f"DIFF_INSERT: Inserted code for {instruction.language}",
-                    changes_made=[f"Inserted code at line {insert_line}"]
+                    changes_made=[f"Inserted code at line {insert_line + 1}"]
                 )
             
-            # === MODE 2: DIFF_REPLACE ===
+            # === MODE 1.5: DIFF_INSERT_TARGET ===
+            elif instruction.mode == "DIFF_INSERT_TARGET":
+                target_name = instruction.insert_after_target or instruction.insert_before_target
+                if not target_name:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message="DIFF_INSERT_TARGET: No target specified (INSERT_AFTER_TARGET or INSERT_BEFORE_TARGET required)"
+                    )
+                
+                if is_code_file:
+                    target_info = self._find_multilang_target(
+                        parser,
+                        source_bytes,
+                        instruction.language,
+                        instruction.target_class,
+                        instruction.target_method,
+                        instruction.target_function,
+                        target_name=target_name
+                    )
+                else:
+                    target_info = None
+                
+                if target_info and 'error' in target_info:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"DIFF_INSERT_TARGET: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
+                    )
+                
+                if not target_info:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"DIFF_INSERT_TARGET: Target entity '{target_name}' not found in source file"
+                    )
+                
+                # Determine insertion line
+                if instruction.insert_after_target:
+                    insert_line = target_info['end_line']
+                else:
+                    insert_line = target_info['start_line'] - 1
+                
+                # Clean multi-line insertion
+                new_lines = instruction.code.split('\n')
+                # Ensure trailing blank line
+                if new_lines and new_lines[-1].strip() != "":
+                    new_lines.append("")
+                
+                modified_lines = lines[:insert_line] + new_lines + lines[insert_line:]
+                modified_content = '\n'.join(modified_lines)
+                
+                # === CRITICAL: Validate syntax (Only for code files) ===
+                if is_code_file:
+                    is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                    if not is_valid:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            broken_content=modified_content,
+                            message=f"DIFF_INSERT_TARGET: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
+                        )
+                
+                return ModifyResult(
+                    success=True,
+                    new_content=modified_content,
+                    message=f"DIFF_INSERT_TARGET: Inserted code relative to '{target_name}' for {instruction.language}",
+                    changes_made=[f"Inserted code at line {insert_line + 1}"]
+                )
+            
+            # === MODE 2: DIFF_REPLACE_TARGET ===
+            elif instruction.mode == "DIFF_REPLACE_TARGET":
+                if not (instruction.target_function or instruction.target_class or instruction.target_method):
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message="DIFF_REPLACE_TARGET: Target must be specified (TARGET_FUNCTION, TARGET_METHOD, or TARGET_CLASS)"
+                    )
+                
+                if is_code_file:
+                    target_name = instruction.target_function or instruction.target_method or instruction.target_class
+                    target_info = self._find_multilang_target(
+                        parser,
+                        source_bytes,
+                        instruction.language,
+                        instruction.target_class,
+                        instruction.target_method,
+                        instruction.target_function,
+                        target_name=target_name
+                    )
+                else:
+                    target_info = None
+                
+                if target_info and 'error' in target_info:
+                    target_name = instruction.target_function or instruction.target_method or instruction.target_class
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"DIFF_REPLACE_TARGET: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
+                    )
+                
+                if not target_info:
+                    target_name = instruction.target_function or instruction.target_method or instruction.target_class
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"DIFF_REPLACE_TARGET: Target '{target_name}' not found in source file"
+                    )
+                
+                start_line = target_info['start_line'] - 1  # Convert to 0-indexed
+                end_line = target_info['end_line']
+                
+                new_lines = instruction.code.split('\n')
+                # Ensure trailing blank line
+                if new_lines and new_lines[-1].strip() != "":
+                    new_lines.append("")
+                
+                modified_lines = lines[:start_line] + new_lines + lines[end_line:]
+                modified_content = '\n'.join(modified_lines)
+                
+                # === CRITICAL: Validate syntax (Only for code files) ===
+                if is_code_file:
+                    is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                    if not is_valid:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            broken_content=modified_content,
+                            message=f"DIFF_REPLACE_TARGET: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
+                        )
+                
+                return ModifyResult(
+                    success=True,
+                    new_content=modified_content,
+                    message=f"DIFF_REPLACE_TARGET: Replaced target block for {instruction.language}",
+                    changes_made=[f"Replaced target block from line {start_line + 1} to {end_line}"]
+                )
+            
+            # === MODE 3: DIFF_REPLACE ===
             elif instruction.replace_pattern:
                 # Find target scope if specified
                 search_start = 0
                 search_end = len(lines)
                 target_name = instruction.target_function or instruction.target_method
                 
-                if instruction.target_function or instruction.target_class or instruction.target_method:
+                if is_code_file and (instruction.target_function or instruction.target_class or instruction.target_method):
                     target_info = self._find_multilang_target(
                         parser,
                         source_bytes,
@@ -1558,6 +1763,14 @@ class FileModifier:
                         instruction.target_function
                     )
                     
+                    if target_info and 'error' in target_info:
+                        target_name = instruction.target_function or instruction.target_method or instruction.target_class
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"DIFF_REPLACE: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
+                        )
+                        
                     if target_info:
                         search_start = target_info['start_line'] - 1  # Convert to 0-indexed
                         search_end = target_info['end_line']
@@ -1568,24 +1781,32 @@ class FileModifier:
                 if result['found'] and result['unique']:
                     # Found and unique in target scope
                     replace_line = result['line_number']
-                    modified_lines = lines.copy()
-                    modified_lines[replace_line] = instruction.code
+                    match_end = result['match_end']
+                    
+                    new_lines = instruction.code.split('\n')
+                    # Ensure trailing blank line
+                    if new_lines and new_lines[-1].strip() != "":
+                        new_lines.append("")
+                    
+                    modified_lines = lines[:replace_line] + new_lines + lines[match_end:]
                     modified_content = '\n'.join(modified_lines)
                     
-                    # === CRITICAL: Validate syntax with tree-sitter ===
-                    is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
-                    if not is_valid:
-                        return ModifyResult(
-                            success=False,
-                            new_content=existing_content,
-                            message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
-                        )
+                    # === CRITICAL: Validate syntax (Only for code files) ===
+                    if is_code_file:
+                        is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                        if not is_valid:
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                broken_content=modified_content,  # preserve merged result for AI fixer
+                                message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
+                            )
                     
                     return ModifyResult(
                         success=True,
                         new_content=modified_content,
                         message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
-                        changes_made=[f"Replaced line {replace_line + 1}"]
+                        changes_made=[f"Replaced lines {replace_line + 1} to {match_end}"]
                     )
                 
                 # Fallback: if target was specified but pattern not found in scope, search by replace_pattern only
@@ -1596,24 +1817,32 @@ class FileModifier:
                     if result['found'] and result['unique']:
                         # Found unique pattern in full file
                         replace_line = result['line_number']
-                        modified_lines = lines.copy()
-                        modified_lines[replace_line] = instruction.code
+                        match_end = result['match_end']
+                        
+                        new_lines = instruction.code.split('\n')
+                        # Ensure trailing blank line
+                        if new_lines and new_lines[-1].strip() != "":
+                            new_lines.append("")
+                        
+                        modified_lines = lines[:replace_line] + new_lines + lines[match_end:]
                         modified_content = '\n'.join(modified_lines)
                         
-                        # === CRITICAL: Validate syntax with tree-sitter ===
-                        is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
-                        if not is_valid:
-                            return ModifyResult(
-                                success=False,
-                                new_content=existing_content,
-                                message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
-                            )
+                        # === CRITICAL: Validate syntax (Only for code files) ===
+                        if is_code_file:
+                            is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
+                            if not is_valid:
+                                return ModifyResult(
+                                    success=False,
+                                    new_content=existing_content,
+                                    broken_content=modified_content,  # preserve merged result for AI fixer
+                                    message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
+                                )
                         
                         return ModifyResult(
                             success=True,
                             new_content=modified_content,
                             message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
-                            changes_made=[f"Replaced line {replace_line + 1} (outside target scope)"],
+                            changes_made=[f"Replaced lines {replace_line + 1} to {match_end} (outside target scope)"],
                             warnings=["Pattern found outside target scope"]
                         )
                     
@@ -1649,7 +1878,7 @@ class FileModifier:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
-                    message="DIFF_REPLACE: No operation specified (no insert_after, insert_before, or replace_pattern)"
+                    message=f"{instruction.mode}: No operation specified (no insert_after, insert_before, or replace_pattern)"
                 )
         
         except Exception as e:
@@ -1667,7 +1896,8 @@ class FileModifier:
             language: str,
             target_class: Optional[str],
             target_method: Optional[str],
-            target_function: Optional[str]
+            target_function: Optional[str],
+            target_name: Optional[str] = None
         ) -> Optional[Dict[str, Any]]:
             """Find a target element (class, method, function) in non-Python code using tree-sitter."""
             try:
@@ -1689,7 +1919,46 @@ class FileModifier:
                     if is_class or is_function:
                         node_name = parser._extract_node_name(node, source_bytes, language)
             
-                    # If we are looking for a class and found it
+                    # Update current class context - FIX: Only update if is_class AND node_name is not None
+                    next_class = node_name if (is_class and node_name is not None) else current_class
+                    
+                    # [Go Specific] Override context for Go methods (via receiver)
+                    if language == 'go' and is_function and node.type == 'method_declaration':
+                        receiver_type = parser._get_go_receiver_type(node, source_bytes)
+                        if receiver_type:
+                            next_class = receiver_type
+
+                    # 1. Universal search by target_name (if no specific types given)
+                    if target_name and not (target_class or target_method or target_function):
+                        # [Go Specific] Structural signature matching
+                        if language == 'go' and is_function and target_name.startswith('func'):
+                            content = source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
+                            decl_line = content.split('\n')[0].strip()
+                            
+                            def norm(s):
+                                import re
+                                s = s.replace('* ', '*').replace(' *', '*')
+                                return re.sub(r'\s+', ' ', s).strip()
+                            
+                            if norm(decl_line).startswith(norm(target_name)):
+                                return {
+                                    'node': node,
+                                    'start_line': node.start_point[0] + 1,
+                                    'end_line': node.end_point[0] + 1,
+                                    'name': node_name,
+                                    'kind': 'function'
+                                }
+
+                        if (is_class or is_function) and node_name == target_name:
+                            return {
+                                'node': node,
+                                'start_line': node.start_point[0] + 1,
+                                'end_line': node.end_point[0] + 1,
+                                'name': node_name,
+                                'kind': 'class' if is_class else 'function'
+                            }
+
+                    # 2. If we are looking for a class specifically and found it
                     if target_class and not target_method and is_class and node_name == target_class:
                         return {
                             'node': node,
@@ -1699,13 +1968,10 @@ class FileModifier:
                             'kind': 'class'
                         }
             
-                    # Update current class context - FIX: Only update if is_class AND node_name is not None
-                    next_class = node_name if (is_class and node_name is not None) else current_class
-            
-                    # If we are looking for a method/function and found it
+                    # 3. If we are looking for a method/function specifically and found it
                     target_func_name = target_function or target_method
                     if target_func_name and is_function and node_name == target_func_name:
-                        # If target_class is specified, we must be inside it
+                        # If target_class is specified, we must be inside it (or have it as receiver for Go)
                         if not target_class or next_class == target_class:
                             return {
                                 'node': node,
@@ -1722,8 +1988,38 @@ class FileModifier:
                             return result
             
                     return None
-        
-                return walk_tree(tree.root_node)
+            
+                result = walk_tree(tree.root_node)
+                
+                # Custom fallback for Go/JS/TS: if target class and method provided, but method not found in class context
+                if result is None and target_class and target_method and language in ('go', 'javascript', 'typescript'):
+                    global_matches = []
+                    
+                    def find_global_matches(node):
+                        is_func = node.type in function_types
+                        if is_func:
+                            n_name = parser._extract_node_name(node, source_bytes, language)
+                            if n_name == target_method:
+                                global_matches.append({
+                                    'node': node,
+                                    'start_line': node.start_point[0] + 1,
+                                    'end_line': node.end_point[0] + 1,
+                                    'name': n_name,
+                                    'kind': 'function'
+                                })
+                        for child in node.children:
+                            find_global_matches(child)
+                            
+                    find_global_matches(tree.root_node)
+                    
+                    if len(global_matches) == 1:
+                        # Only exactly one such method globally, assume it is intended
+                        return global_matches[0]
+                    elif len(global_matches) > 1:
+                        # Ambiguous
+                        return {'error': 'ambiguous_target_method'}
+                
+                return result
         
             except Exception as e:
                 logger.warning(f"Error finding multilang target: {e}")
@@ -1746,6 +2042,7 @@ class FileModifier:
                 - found: bool - whether pattern was found at all
                 - unique: bool - whether pattern is unique (exactly one match)
                 - line_number: int - line index of match (or -1 if not found/not unique)
+                - match_end: int - line index of the end of the match (exclusive)
                 - count: int - number of matches found
         """
         if end_line is None:
@@ -1759,16 +2056,16 @@ class FileModifier:
                 matches.append(i)
     
         if len(matches) == 1:
-            return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+            return {'found': True, 'unique': True, 'line_number': matches[0], 'match_end': matches[0] + 1, 'count': 1}
         elif len(matches) > 1:
-            return {'found': True, 'unique': False, 'line_number': -1, 'count': len(matches)}
+            return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(matches)}
     
         # SECONDARY STRATEGY: Multiline pattern support
         if '\n' in pattern:
             try:
                 # Split pattern by newlines and strip each part
                 pattern_lines = [line.strip() for line in pattern.split('\n')]
-                pattern_lines = [line for line in pattern_lines if line]  # Filter empty lines
+                # REMOVED: pattern_lines = [line for line in pattern_lines if line]  # Do NOT filter empty lines anymore
             
                 if len(pattern_lines) == 1:
                     # After filtering, only one line left - search for that stripped element
@@ -1778,11 +2075,11 @@ class FileModifier:
                             matches.append(i)
                 
                     if len(matches) == 0:
-                        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+                        return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
                     elif len(matches) == 1:
-                        return {'found': True, 'unique': True, 'line_number': matches[0], 'count': 1}
+                        return {'found': True, 'unique': True, 'line_number': matches[0], 'match_end': matches[0] + 1, 'count': 1}
                     else:
-                        return {'found': True, 'unique': False, 'line_number': -1, 'count': len(matches)}
+                        return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(matches)}
             
                 elif len(pattern_lines) > 1:
                     # Multiple pattern lines - perform sliding window search
@@ -1797,7 +2094,14 @@ class FileModifier:
                                 if i + j >= len(lines):
                                     all_match = False
                                     break
-                                if p_line not in lines[i + j].strip():
+                                
+                                # If pattern line is empty, matching line in file must also be empty (after strip)
+                                if not p_line:
+                                    if lines[i + j].strip() != "":
+                                        all_match = False
+                                        break
+                                # If pattern line is NOT empty, it must be a substring of the file line (after strip)
+                                elif p_line not in lines[i + j].strip():
                                     all_match = False
                                     break
                         
@@ -1805,18 +2109,18 @@ class FileModifier:
                                 multiline_matches.append(i)
                 
                     if len(multiline_matches) == 0:
-                        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+                        return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
                     elif len(multiline_matches) == 1:
-                        return {'found': True, 'unique': True, 'line_number': multiline_matches[0], 'count': 1}
+                        return {'found': True, 'unique': True, 'line_number': multiline_matches[0], 'match_end': multiline_matches[0] + len(pattern_lines), 'count': 1}
                     else:
-                        return {'found': True, 'unique': False, 'line_number': -1, 'count': len(multiline_matches)}
+                        return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(multiline_matches)}
         
             except Exception as e:
                 logger.debug(f"Multiline pattern search failed: {e}")
-                return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+                return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
     
         # No matches found
-        return {'found': False, 'unique': False, 'line_number': -1, 'count': 0}
+        return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
     
     
     def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:

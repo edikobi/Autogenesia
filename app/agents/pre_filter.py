@@ -19,21 +19,20 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from enum import Enum
 from app.tools.tool_definitions import ORCHESTRATOR_TOOLS
 from app.tools.tool_executor import ToolExecutor, parse_tool_call
-from app.llm.api_client import call_llm_with_tools, call_llm
+from app.llm.api_client import call_llm_with_tools, call_llm, get_model_for_role
 from app.llm.prompt_templates import (
     _build_prefilter_analysis_system_prompt_normal,
     _build_prefilter_analysis_system_prompt_advanced,
     _build_prefilter_analysis_user_prompt,
+    _build_prefilter_planning_system_prompt
 )
 
 
 from config.settings import cfg
-from app.llm.api_client import call_llm, get_model_for_role
-from app.llm.prompt_templates import PREFILTER_SYSTEM_PROMPT, PREFILTER_USER_PROMPT
 from app.services.project_map_builder import get_project_map_for_prompt
 from app.utils.token_counter import TokenCounter
 
@@ -55,9 +54,14 @@ class PreFilterAdvice:
     additional_context: str
     tool_calls_made: int
     raw_response: str
+    # [NEW] Дополнительные поля для расширенной диагностики
+    full_response: str = ""
+    model_used: str = ""
 
-def _get_prefilter_analysis_system_prompt(mode: PreFilterMode) -> str:
+def _get_prefilter_analysis_system_prompt(mode: PreFilterMode, is_planning: bool = False) -> str:
     """Get system prompt for Pre-filter analysis based on mode."""
+    if is_planning and mode == PreFilterMode.ADVANCED:
+        return _build_prefilter_planning_system_prompt()
     if mode == PreFilterMode.ADVANCED:
         return _build_prefilter_analysis_system_prompt_advanced()
     return _build_prefilter_analysis_system_prompt_normal()
@@ -149,6 +153,9 @@ async def analyze_query(
     index: Dict[str, Any],
     mode: PreFilterMode = PreFilterMode.NORMAL,
     model: str = None,
+    is_planning: bool = False,
+    is_new_project: bool = False,
+    on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
 ) -> PreFilterAdvice:
     """Анализирует запрос пользователя и готовит рекомендации для Оркестратора.
 
@@ -174,7 +181,14 @@ async def analyze_query(
         logger.info(f"[PRE-FILTER] analyze_query called: mode={mode.value}, model={model}")
         
         # Сформировать системный промпт
-        system_prompt = _get_prefilter_analysis_system_prompt(mode)
+        system_prompt = _get_prefilter_analysis_system_prompt(mode, is_planning)
+        
+        # [FIX] Форматируем системный промпт, если он содержит плейсхолдеры
+        try:
+            system_prompt = system_prompt.format(compact_index=compact_index)
+        except (KeyError, IndexError):
+            # Если формат не удался или плейсхолдера нет - оставляем как есть
+            pass
         
         # Сформировать user промпт
         user_prompt = _get_prefilter_analysis_user_prompt(
@@ -211,22 +225,54 @@ async def analyze_query(
             return advice
         
         elif mode == PreFilterMode.ADVANCED:
-            # Продвинутый режим - с инструментами
             tool_executor = ToolExecutor(project_dir=project_dir, index=index)
-            final_response, tool_calls_made = await _run_advanced_prefilter(
-                messages=messages,
-                model=model,
-                tool_executor=tool_executor,
-                max_tool_calls=10,
-            )
             
-            elapsed = time.time() - start_time
-            logger.info(f"[PRE-FILTER] Advanced mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, response_len={len(final_response)} chars")
-            
-            advice = _parse_prefilter_advice(final_response)
-            advice.tool_calls_made = tool_calls_made
-            advice.raw_response = final_response
-            return advice
+            if is_planning:
+                # Режим планирования: используем run_planning_loop
+                final_response, tool_calls_made, final_model = await run_planning_loop(
+                    messages=messages,
+                    model=model,
+                    tool_executor=tool_executor,
+                    max_tool_calls=50,
+                    on_tool_call=on_tool_call,
+                )
+                elapsed = time.time() - start_time
+                logger.info(f"[PRE-FILTER] Planning mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
+                
+                # Извлекаем план
+                plan = extract_plan(final_response)
+                
+                advice = PreFilterAdvice(
+                    clarified_query=user_query,
+                    possible_cause="[Planning Mode]",
+                    recommended_actions=[],
+                    files_to_check=[],
+                    additional_context="[Planning Mode]",
+                    tool_calls_made=tool_calls_made,
+                    raw_response=plan, 
+                    full_response=final_response,
+                    model_used=final_model
+                )
+                return advice
+            else:
+                # Обычный продвинутый режим
+                final_response, tool_calls_made, final_model = await _run_advanced_prefilter(
+                    messages=messages,
+                    model=model,
+                    tool_executor=tool_executor,
+                    max_tool_calls=10,
+                    on_tool_call=on_tool_call,
+                )
+                
+                elapsed = time.time() - start_time
+                logger.info(f"[PRE-FILTER] Advanced mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
+                
+                advice = _parse_prefilter_advice(final_response)
+                advice.tool_calls_made = tool_calls_made
+                advice.raw_response = final_response
+                advice.full_response = final_response
+                advice.model_used = final_model
+                return advice
         
         else:
             # Неизвестный режим
@@ -273,7 +319,8 @@ async def _run_advanced_prefilter(
     model: str,
     tool_executor: ToolExecutor,
     max_tool_calls: int = 10,
-) -> tuple[str, int]:
+    on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
+) -> tuple:
     """Запускает продвинутый режим Pre-filter с доступом к инструментам.
 
     Args:
@@ -309,7 +356,7 @@ async def _run_advanced_prefilter(
             
             # Если нет вызовов инструментов - вернуть ответ
             if not tool_calls:
-                return content, tool_calls_count
+                return content, tool_calls_count, model
             
             # Собираем assistant tool_calls и результаты для правильного формата сообщений
             assistant_tool_calls = []
@@ -326,10 +373,19 @@ async def _run_advanced_prefilter(
                     # ToolExecutor.execute() — СИНХРОННЫЙ метод
                     result = tool_executor.execute(func_name, func_args)
                     tool_calls_count += 1
+                    success = True
                 except Exception as e:
                     logger.error(f"Tool execution error in pre-filter: {e}", exc_info=True)
                     result = f"Tool execution failed: {str(e)}"
                     tool_calls_count += 1
+                    success = False
+                
+                # [STREAMING] Вызов коллбэка для визуализации в реальном времени
+                if on_tool_call:
+                    try:
+                        on_tool_call(func_name, func_args, result, success)
+                    except Exception as e:
+                        logger.warning(f"Error in pre-filter streaming callback: {e}")
                 
                 assistant_tool_calls.append(tc)
                 tool_results.append({
@@ -370,7 +426,7 @@ async def _run_advanced_prefilter(
             max_tokens=2000,
         )
         
-        return final_response, tool_calls_count
+        return final_response, tool_calls_count, model
     
     except Exception as e:
         error_type = type(e).__name__
@@ -380,8 +436,203 @@ async def _run_advanced_prefilter(
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: выводим ошибку в консоль
         print(f"\n⚠️  [PRE-FILTER ADVANCED ERROR] {error_type}: {error_msg}")
         
-        return "", tool_calls_count
+        return "", tool_calls_count, model
 
+
+def extract_plan(response: str) -> str:
+    """Извлекает план из ответа LLM по маркерам ###Plan##### с fallback-логикой."""
+    start_marker = "###Plan#####"
+    end_marker = "###Plan#####"
+    
+    start_idx = response.find(start_marker)
+    if start_idx == -1:
+        # Fallback 1: Если нет маркера, весь ответ считается планом
+        plan_text = response.strip()
+    else:
+        start_idx += len(start_marker)
+        end_idx = response.find(end_marker, start_idx)
+        
+        if end_idx == -1:
+            # Fallback 2: Если есть начальный маркер, но нет конечного
+            plan_text = response[start_idx:].strip()
+        else:
+            plan_text = response[start_idx:end_idx].strip()
+        
+    return plan_text
+
+
+async def run_planning_loop(
+    messages: List[Dict[str, str]],
+    model: str,
+    tool_executor: ToolExecutor,
+    max_tool_calls: int = 50,
+    on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
+) -> tuple:
+    """Запускает продвинутый цикл планирования с fallback-логикой."""
+    tool_calls_count = 0
+    from config.settings import cfg
+    fallback_model = cfg.MODEL_DEEPSEEK_REASONER
+    current_model = model
+    retry_count = 0
+    
+    # Точные фразы ошибок OpenRouter для инициации fallback
+    OPENROUTER_ERROR_PHRASES = [
+        "Insufficient credits",
+        "Rate limit reached",
+        "Provider returned an error",
+        "Request timed out",
+        "Model is overloaded",
+        "No available model provider",
+        "Unknown model",
+        "Internal Server Error",
+        "upstream request timeout",
+        "Bad Gateway"
+    ]
+
+    def is_openrouter_error(msg: str) -> bool:
+        """Проверяет, содержит ли сообщение об ошибке точные фразы OpenRouter."""
+        if not msg:
+            return False
+        return any(phrase.lower() in msg.lower() for phrase in OPENROUTER_ERROR_PHRASES)
+    
+    try:
+        available_tools = [
+            tool for tool in ORCHESTRATOR_TOOLS
+            if tool.get("function", {}).get("name") != "run_project_tests"
+        ]
+        
+        while tool_calls_count < max_tool_calls:
+            try:
+                response = await call_llm_with_tools(
+                    model=current_model,
+                    messages=messages,
+                    tools=available_tools,
+                    temperature=0,
+                    max_tokens=4000,
+                )
+            except Exception as e:
+                error_str = str(e)
+                if is_openrouter_error(error_str):
+                    logger.warning(f"[PRE-FILTER] OpenRouter provider error detected. Falling back to {fallback_model}. Error: {error_str}")
+                    print(f"\n⚠️  [PRE-FILTER] Обнаружен сбой провайдера OpenRouter. Переключение на запасную модель {fallback_model}...")
+                    current_model = fallback_model
+                    response = await call_llm_with_tools(
+                        model=current_model,
+                        messages=messages,
+                        tools=available_tools,
+                        temperature=0,
+                        max_tokens=4000,
+                    )
+                else:
+                    # Если это не ошибка OpenRouter, не переключаемся на другую модель.
+                    # Просто логируем и пробрасываем выше для общего retry или завершения.
+                    logger.error(f"[PRE-FILTER] Non-provider error in loop: {type(e).__name__}: {error_str}")
+                    raise
+            
+            content = response.get("content", "")
+            tool_calls = response.get("tool_calls", [])
+            
+            if not tool_calls:
+                if not content.strip() and retry_count == 0:
+                    logger.warning(f"[PRE-FILTER] Empty response. Retrying...")
+                    retry_count += 1
+                    continue
+                elif not content.strip() and retry_count > 0 and current_model != fallback_model:
+                    logger.warning(f"[PRE-FILTER] Empty response again. Falling back to {fallback_model}.")
+                    print(f"\n⚠️  [PRE-FILTER] Пустой ответ. Переключение на запасную модель {fallback_model}...")
+                    current_model = fallback_model
+                    retry_count = 0
+                    continue
+                elif not content.strip():
+                    # Even fallback failed
+                    return "Plan generation failed due to empty response from fallback model.", tool_calls_count, current_model
+                
+                return content, tool_calls_count, current_model
+            
+            assistant_tool_calls = []
+            tool_results = []
+            
+            for tc in tool_calls:
+                if tool_calls_count >= max_tool_calls:
+                    break
+                
+                func_name, func_args, tc_id = parse_tool_call(tc)
+                
+                try:
+                    result = tool_executor.execute(func_name, func_args)
+                    tool_calls_count += 1
+                    success = True
+                except Exception as e:
+                    logger.error(f"Tool execution error in pre-filter: {e}", exc_info=True)
+                    result = f"Tool execution failed: {str(e)}"
+                    tool_calls_count += 1
+                    success = False
+                
+                # [STREAMING] Вызов коллбэка для визуализации в реальном времени
+                if on_tool_call:
+                    try:
+                        on_tool_call(func_name, func_args, result, success)
+                    except Exception as e:
+                        logger.warning(f"Error in pre-filter streaming callback: {e}")
+                
+                assistant_tool_calls.append(tc)
+                tool_results.append({
+                    "tool_call_id": tc_id,
+                    "name": func_name,
+                    "content": result,
+                })
+            
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": assistant_tool_calls,
+            })
+            
+            for tr in tool_results:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "name": tr["name"],
+                    "content": tr["content"],
+                })
+            
+        messages.append({
+            "role": "user",
+            "content": "Please provide your final implementation plan now based on the gathered information. Enclose it within ###Plan##### markers.",
+        })
+        
+        try:
+            final_response = await call_llm(
+                model=current_model,
+                messages=messages,
+                temperature=0,
+                max_tokens=4000,
+            )
+        except Exception as e:
+            error_str = str(e)
+            if is_openrouter_error(error_str):
+                logger.warning(f"[PRE-FILTER] OpenRouter provider error on final call. Falling back to {fallback_model}. Error: {error_str}")
+                print(f"\n⚠️  [PRE-FILTER] Сбой провайдера на финальном вызове. Переключение на {fallback_model}...")
+                current_model = fallback_model
+                final_response = await call_llm(
+                    model=current_model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=4000,
+                )
+            else:
+                logger.error(f"[PRE-FILTER] Non-provider error on final call: {type(e).__name__}: {error_str}")
+                raise
+            
+        return final_response, tool_calls_count, current_model
+
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        # GRACEFUL DEGRADATION: Не выбрасываем исключение, просто логируем и продолжаем без плана
+        logger.error(f"[PRE-FILTER] Planning loop failed: {error_type}: {error_msg}. Proceeding WITHOUT PLAN.")
+        print(f"\n⚠️  [PRE-FILTER] Не удалось сформировать план (ошибка: {error_msg}). Работа продолжается в обычном режиме.")
+        return "", tool_calls_count, current_model
 
 # ============================================================================
 # DATA STRUCTURES

@@ -71,6 +71,13 @@ def _fetch_html_internal(url: str, timeout: int = 10, max_length: int = 100000) 
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
         resp = client.get(url)
         resp.raise_for_status()
+        
+        # NEW: Fix for Russian encodings (Windows-1251, etc.)
+        # httpx uses headers by default, which can be wrong for legacy sites.
+        # apparent_encoding uses charset-normalizer to detect real encoding from bytes.
+        if resp.encoding != 'utf-8':
+            resp.encoding = resp.apparent_encoding
+            
         content = resp.text
         if len(content) > max_length:
             content = content[:max_length] + "\n... (truncated due to length limit)"
