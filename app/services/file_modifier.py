@@ -1778,6 +1778,10 @@ class FileModifier:
                 # Try to find pattern in target scope
                 result = self._find_unique_anchor(lines, instruction.replace_pattern, search_start, search_end)
                 
+                # TERTIARY (fuzzy): fallback for SECONDARY only — multiline patterns not found by exact match
+                if not result['found'] and '\n' in instruction.replace_pattern:
+                    result = self._find_fuzzy_anchor(lines, instruction.replace_pattern, search_start, search_end)
+                
                 if result['found'] and result['unique']:
                     # Found and unique in target scope
                     replace_line = result['line_number']
@@ -1802,17 +1806,23 @@ class FileModifier:
                                 message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                             )
                     
+                    fuzzy_warn = ["Pattern matched via fuzzy search (ratio≥0.90)"] if result.get('fuzzy') else []
                     return ModifyResult(
                         success=True,
                         new_content=modified_content,
                         message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
-                        changes_made=[f"Replaced lines {replace_line + 1} to {match_end}"]
+                        changes_made=[f"Replaced lines {replace_line + 1} to {match_end}"],
+                        warnings=fuzzy_warn if fuzzy_warn else None
                     )
                 
                 # Fallback: if target was specified but pattern not found in scope, search by replace_pattern only
                 if (instruction.target_function or instruction.target_class or instruction.target_method):
                     # Search in full file by replace_pattern only
                     result = self._find_unique_anchor(lines, instruction.replace_pattern, 0, len(lines))
+                    
+                    # TERTIARY (fuzzy): fallback for SECONDARY only — multiline patterns not found by exact match
+                    if not result['found'] and '\n' in instruction.replace_pattern:
+                        result = self._find_fuzzy_anchor(lines, instruction.replace_pattern, 0, len(lines))
                     
                     if result['found'] and result['unique']:
                         # Found unique pattern in full file
@@ -1838,21 +1848,34 @@ class FileModifier:
                                     message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                                 )
                         
+                        fuzzy_warn = ["Pattern matched via fuzzy search (ratio≥0.90)"] if result.get('fuzzy') else []
                         return ModifyResult(
                             success=True,
                             new_content=modified_content,
                             message=f"DIFF_REPLACE: Replaced code for {instruction.language}",
                             changes_made=[f"Replaced lines {replace_line + 1} to {match_end} (outside target scope)"],
-                            warnings=["Pattern found outside target scope"]
+                            warnings=["Pattern found outside target scope"] + fuzzy_warn
                         )
                     
                     elif not result['found']:
+                        if result.get('fuzzy'):
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                message=f"DIFF_REPLACE: Replace pattern not found (fuzzy threshold 0.90 not reached)"
+                            )
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
                             message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' not found"
                         )
                     else:
+                        if result.get('fuzzy'):
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                message=f"DIFF_REPLACE: Replace pattern is ambiguous (fuzzy), found {result['count']} matches above 0.90 threshold"
+                            )
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
@@ -2123,6 +2146,60 @@ class FileModifier:
         return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
     
     
+    def _find_fuzzy_anchor(
+        self,
+        lines: List[str],
+        pattern: str,
+        start_line: int = 0,
+        end_line: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        TERTIARY search strategy: fuzzy fallback for SECONDARY (multiline patterns only).
+
+        Activated only when:
+          - pattern contains real newlines ('\n') — i.e. SECONDARY was applicable
+          - SECONDARY found nothing (count == 0)
+
+        Uses difflib.SequenceMatcher with threshold >= 0.90.
+        Returns exactly one match → valid; zero or 2+ → not found / ambiguous.
+
+        Returns same contract as _find_unique_anchor, plus key 'fuzzy': True.
+        """
+        from difflib import SequenceMatcher
+
+        # Guard: only for multiline patterns (SECONDARY domain)
+        if '\n' not in pattern:
+            return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0, 'fuzzy': True}
+
+        pattern_lines = [line.strip() for line in pattern.split('\n')]
+        if len(pattern_lines) < 2:
+            return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0, 'fuzzy': True}
+
+        if end_line is None:
+            end_line = len(lines)
+
+        pattern_joined = '\n'.join(pattern_lines)
+        window_size = len(pattern_lines)
+        candidates = []  # list of (start_idx, end_idx, ratio)
+
+        for i in range(start_line, min(end_line - window_size + 1, len(lines))):
+            window_lines = [lines[i + j].strip() for j in range(window_size)]
+            window_joined = '\n'.join(window_lines)
+            ratio = SequenceMatcher(None, pattern_joined, window_joined).ratio()
+            if ratio >= 0.90:
+                candidates.append((i, i + window_size, ratio))
+
+        if len(candidates) == 0:
+            return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0, 'fuzzy': True}
+        elif len(candidates) >= 2:
+            return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(candidates), 'fuzzy': True}
+        else:
+            # Exactly one candidate
+            start_idx, end_idx, ratio = candidates[0]
+            logger.debug(f"Fuzzy anchor match: lines {start_idx+1}-{end_idx}, ratio={ratio:.3f}")
+            return {'found': True, 'unique': True, 'line_number': start_idx, 'match_end': end_idx, 'count': 1, 'fuzzy': True}
+
+
     def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:
             """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""
             try:

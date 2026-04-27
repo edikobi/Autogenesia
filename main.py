@@ -4901,7 +4901,7 @@ async def handle_agent_mode(query: str):
                 
                 # Ask user for feedback
                 from rich.prompt import Prompt
-                console.print("\n[bold yellow]План готов. Введите '!ok' для утверждения плана и начала реализации.[/]")
+                console.print("\n[bold yellow]План готов. Введите '!ok' на английском языке для утверждения плана и начала реализации.[/]")
                 console.print("[dim]Введите '!cancel' для отмены или напишите свои правки к плану (они будут переданы планировщику для доработки).[/]")
                 
                 user_input = Prompt.ask("Ваше решение")

@@ -945,6 +945,14 @@ class MultiLanguageParser:
     
         # Special handling for method_declaration (Java and Go)
         if node.type == 'method_declaration':
+            # Go-specific: method name is field_identifier (not the last identifier which is the return type)
+            if language == 'go':
+                for child in node.children:
+                    if child.type == 'field_identifier':
+                        return source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
+                # No field_identifier found — fall through to general logic as safety fallback
+
+            # General logic for Java and other languages
             # Collect all identifier nodes (direct children only)
             identifiers = []
             for child in node.children:
