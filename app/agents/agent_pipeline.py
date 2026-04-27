@@ -4387,10 +4387,8 @@ Remember: You can override the validator if you believe the critique is incorrec
         """
         Run AI Validator to check if code addresses the request.
         
-        Supports multiple files by combining all code blocks with clear markers.
-        
-        UPDATED: Now shows VFS content for files created in previous iterations,
-        so AI Validator sees the same file state as Orchestrator.
+        Supports multiple files by reading final staged versions from VFS.
+        AI Validator sees the actual final state of the files after all modifications.
         """
         if not code_blocks:
             # Edge case: no code blocks
@@ -4402,67 +4400,69 @@ Remember: You can override the validator if you believe the critique is incorrec
                 file_path="",
             )
         
-        # === Combine all code blocks with clear file markers ===
-        combined_code_parts = []
-        for block in code_blocks:
-            combined_code_parts.append(
-                f"### FILE: {block.file_path}\n"
-                f"### MODE: {block.mode}\n"
-                f"```python\n{block.code}\n```"
+        # Mapping for markdown language blocks
+        _lang_map = {
+            '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
+            '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+            '.c': 'c', '.cpp': 'cpp', '.cs': 'c_sharp', '.sql': 'sql',
+            '.sh': 'bash', '.yml': 'yaml', '.yaml': 'yaml', '.json': 'json'
+        }
+
+        def get_lang_tag(path: str) -> str:
+            ext = os.path.splitext(path)[1].lower()
+            return _lang_map.get(ext, 'text')
+
+        # Deduplicate paths while preserving order
+        unique_paths = list(dict.fromkeys(block.file_path for block in code_blocks))
+
+        # === 1. Prepare Proposed Code (FINAL STAGED CONTENT FROM VFS) ===
+        proposed_parts = []
+        for path in unique_paths:
+            vfs_content = self.vfs.read_file(path) or "[No content in VFS]"
+            lang = get_lang_tag(path)
+            proposed_parts.append(
+                f"### FILE: {path}\n"
+                f"```{lang}\n{vfs_content}\n```"
             )
-        combined_code = "\n\n".join(combined_code_parts)
+        combined_proposed = "\n\n".join(proposed_parts)
         
-        # === Combine original/previous content for all files ===
-        # FIXED: For files created in previous iterations, show VFS content
-        # so AI Validator sees the same state as Orchestrator
+        # === 2. Prepare Original Content (DISK CONTENT) ===
         original_parts = []
-        for block in code_blocks:
-            # First, try to get original content from disk
-            original = self.vfs.read_file_original(block.file_path)
+        for path in unique_paths:
+            # Get original content from disk (before session)
+            original = self.vfs.read_file_original(path)
+            lang = get_lang_tag(path)
             
             if original:
                 # File existed on disk before this session
                 original_parts.append(
-                    f"### FILE: {block.file_path}\n"
-                    f"```python\n{original}\n```"
+                    f"### FILE: {path}\n"
+                    f"```{lang}\n{original}\n```"
                 )
             else:
-                # File didn't exist on disk — check if it exists in VFS
-                # (created in a previous iteration of this session)
-                vfs_content = self.vfs.read_file(block.file_path)
-                
-                if vfs_content and vfs_content != block.code:
-                    # File exists in VFS with different content than current block
-                    # This means it was created/modified in a previous iteration
-                    original_parts.append(
-                        f"### FILE: {block.file_path}\n"
-                        f"[CREATED IN PREVIOUS ITERATION - showing current VFS state]\n"
-                        f"```python\n{vfs_content}\n```"
-                    )
-                else:
-                    # Truly new file (no disk content, no different VFS content)
-                    original_parts.append(
-                        f"### FILE: {block.file_path}\n"
-                        f"[NEW FILE - no original content]"
-                    )
+                # Truly new file (no disk content)
+                original_parts.append(
+                    f"### FILE: {path}\n"
+                    f"[NEW FILE - no original content on disk]"
+                )
         combined_original = "\n\n".join(original_parts)
         
-        # === Build file_path as summary ===
-        if len(code_blocks) == 1:
-            file_path_str = code_blocks[0].file_path
+        # === 3. Build file_path as summary ===
+        if len(unique_paths) == 1:
+            file_path_str = unique_paths[0]
         else:
-            file_path_str = f"{len(code_blocks)} files: " + ", ".join(
-                b.file_path for b in code_blocks[:3]
+            file_path_str = f"{len(unique_paths)} files: " + ", ".join(
+                unique_paths[:3]
             )
-            if len(code_blocks) > 3:
-                file_path_str += f" ... and {len(code_blocks) - 3} more"
+            if len(unique_paths) > 3:
+                file_path_str += f" ... and {len(unique_paths) - 3} more"
         
-        # === Run validation ===
+        # === 4. Run validation ===
         result = await self.ai_validator.validate(
             user_request=user_request,
             orchestrator_instruction=instruction,
             original_content=combined_original,
-            proposed_code=combined_code,
+            proposed_code=combined_proposed,
             file_path=file_path_str,
         )
         

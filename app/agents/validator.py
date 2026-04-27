@@ -42,8 +42,8 @@ class AIValidationRequest:
     """Request for AI validation."""
     user_request: str           # Original user's request
     orchestrator_instruction: str  # Instruction given to Code Generator
-    original_content: str       # File content before changes (or empty for new file)
-    proposed_code: str          # Generated code to validate
+    original_content: str       # Full file content before changes (on disk)
+    proposed_code: str          # Full file content after changes (in VFS)
     file_path: str              # Target file path
 
 
@@ -131,7 +131,7 @@ class AIValidator:
         """Validate с механизмом 3-уровневого fallback: primary → second → deepseek-chat"""
         start_time = time.time()
         
-        # Обработка параметров (существующий код)
+        # Обработка параметров
         if request is None:
             if user_request is None or proposed_code is None:
                 raise ValueError(
@@ -143,6 +143,22 @@ class AIValidator:
                 original_content=original_content or "",
                 proposed_code=proposed_code,
                 file_path=file_path or "",
+            )
+            
+        # --- PHASE 0: No-Op check ---
+        if request.original_content == request.proposed_code:
+            # If contents are identical, no changes were effectively made
+            duration_ms = (time.time() - start_time) * 1000
+            return AIValidationResult(
+                approved=True,
+                confidence=1.0,
+                core_request="No changes needed/made",
+                verdict="The proposed file state is identical to the original content. No-op change approved.",
+                critical_issues=[],
+                model_used="internal_noop_checker",
+                tokens_used=0,
+                duration_ms=duration_ms,
+                raw_response="No changes detected between original and proposed content."
             )
         
         # Определяем модели
@@ -371,12 +387,22 @@ class AIValidator:
     
     
     def _calculate_context_size(self, request: AIValidationRequest) -> int:
-        """Calculate total context size in tokens."""
+        """
+        Calculate total context size in tokens.
+        Includes system prompt and template markers for accuracy.
+        """
+        from app.llm.prompt_templates import AI_VALIDATOR_SYSTEM_PROMPT
+        
         total = 0
+        total += self.token_counter.count(AI_VALIDATOR_SYSTEM_PROMPT)
         total += self.token_counter.count(request.user_request)
         total += self.token_counter.count(request.orchestrator_instruction)
         total += self.token_counter.count(request.original_content)
         total += self.token_counter.count(request.proposed_code)
+        
+        # Add buffer for formatting and template overhead (approx 200 tokens)
+        total += 200
+        
         return total
     
     def _parse_response(
