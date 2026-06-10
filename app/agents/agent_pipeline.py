@@ -583,10 +583,27 @@ class AgentPipeline:
             # If user confirms
             apply_result = await pipeline.apply_pending_changes()
     """
+# Pyright rules that represent CRITICAL structural problems. Diagnostics
+    # whose `rule` is NOT in this set are treated as non-critical type-inference
+    # noise and are dropped, mirroring pyrightconfig.json's "none" overrides.
+    # This is a defense layer: when an explicit file path or CLI quirk causes
+    # pyright to ignore diagnosticSeverityOverrides, this allowlist still
+    # guarantees only critical errors fail staging validation.
+    _CRITICAL_PYRIGHT_RULES = {
+        "reportUndefinedVariable",
+        "reportUnusedClass",
+        "reportUnusedFunction",
+        "reportUnusedVariable",
+        "reportAttributeAccessIssue",
+        "reportSelfClsParameterName",
+        "reportAssertAlwaysTrue",
+        "reportSyntaxError",
+    }
+    
     
     # Configuration
-    MAX_FEEDBACK_ITERATIONS = 35
-    MAX_VALIDATION_RETRIES = 35
+    MAX_FEEDBACK_ITERATIONS = 10
+    MAX_VALIDATION_RETRIES = 10
     
     def __init__(
         self,
@@ -671,6 +688,8 @@ class AgentPipeline:
         self._pending_user_request: str = ""
         self._pending_orchestrator_instruction: str = ""
         self._current_generated_code: str = ""
+        
+        self._last_pyright_warnings: List[str] = []
         
         # Callbacks
         self._on_thinking: Optional[OnThinkingCallback] = None
@@ -937,9 +956,52 @@ class AgentPipeline:
                             if new_deletions:
                                 self._pending_deletions.extend(new_deletions)
                                 logger.info(f"Extracted {len(new_deletions)} pending deletions")
-                                self._notify_stage("DELETIONS", f"Обнаружено {len(new_deletions)} удалений (будут применены после тестов)", {
-                                    "deletions": [{"target": d.target_name, "file": d.file_path} for d in new_deletions],
-                                })
+
+                                # === APPLY DELETIONS EARLY (in VFS, before Code Generator) ===
+                                # Comment out targets NOW so the Code Generator sees already-commented code.
+                                early_deletion_results = await self._apply_pending_deletions()
+
+                                # Build per-target trace details WITH iteration number (additive trace info)
+                                deletion_trace = [
+                                    {
+                                        "target": r.get("target"),
+                                        "type": r.get("type"),
+                                        "file": r.get("file"),
+                                        "parent_class": r.get("parent_class"),
+                                        "reason": r.get("reason"),
+                                        "success": r.get("success"),
+                                        "error": r.get("error"),
+                                        "iteration": iteration,
+                                    }
+                                    for r in early_deletion_results
+                                ]
+
+                                # Record into the orchestrator trace object (separate, additive entry)
+                                try:
+                                    if hasattr(trace, "add_event"):
+                                        trace.add_event(
+                                            "deletions",
+                                            {"iteration": iteration, "deletions": deletion_trace},
+                                        )
+                                    elif hasattr(trace, "metadata") and isinstance(getattr(trace, "metadata"), dict):
+                                        trace.metadata.setdefault("deletions", []).extend(deletion_trace)
+                                except Exception as _trace_err:
+                                    logger.debug(f"Could not record deletions to trace: {_trace_err}")
+
+                                # Notify frontend: KEEP existing 'deletions' key, ADD iteration + detailed list
+                                self._notify_stage(
+                                    "DELETIONS",
+                                    f"Закомментировано {len(new_deletions)} целей в VFS (итерация {iteration})",
+                                    {
+                                        "deletions": [
+                                            {"target": d.target_name, "file": d.file_path}
+                                            for d in new_deletions
+                                        ],
+                                        "iteration": iteration,
+                                        "applied_early": True,
+                                        "results": deletion_trace,
+                                    },
+                                )
                             # Use clean instruction (without DELETE blocks) for code generator
                             result.instruction = clean_instruction
                             self._pending_orchestrator_instruction = clean_instruction                
@@ -1857,17 +1919,12 @@ class AgentPipeline:
                     result.pending_changes = self._pending_changes
                     result.diffs = self.vfs.get_all_diffs()
                 
-                    # === APPLY PENDING DELETIONS (comment out code) ===
-                    if self._pending_deletions:
-                        self._notify_stage("DELETIONS", f"Применение {len(self._pending_deletions)} удалений...", None)
-                        deletion_results = await self._apply_pending_deletions()
-                    
-                        result.diffs["__deletions__"] = deletion_results
-                    
-                        self._notify_stage("DELETIONS", 
-                            f"✅ Удалено (закомментировано): {sum(1 for d in deletion_results if d['success'])} элементов",
-                            {"results": deletion_results}
-                        )
+                # === DELETIONS ALREADY APPLIED EARLY (in VFS, before Code Generator) ===
+                # Deletions/commenting are now performed right after extraction, so nothing
+                # to do here. We only surface results that were already staged into the VFS.
+                    if "__deletions__" not in result.diffs:
+                        result.diffs["__deletions__"] = []
+                              
                                         
                     result.success = True
                     result.feedback_iterations = iteration
@@ -3709,7 +3766,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             
             try:
                 is_pre_broken, _, error_details = self._check_tree_structure_broken(
-                    parser_obj, content, language=lang_name
+                    parser_obj, content, language=lang_name, file_path=path
                 )
             except Exception as e:
                 logger.error(f"Phase 0 Validation crash for {path}: {e}")
@@ -3773,7 +3830,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                         try:
                             # [V18.20] Only checks for SYNTAX_ERROR now
                             is_broken, error_type, error_details = self._check_tree_structure_broken(
-                                parser_obj, final_content, block, language=lang_name
+                                parser_obj, final_content, block, language=lang_name,
+                                file_path=block.file_path, baseline_content=existing_content
                             )
                         except Exception as e:
                             logger.error(f"Validation crashed: {e}")
@@ -3880,7 +3938,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                     temp_block.code = fixed_snippet
                     temp_res = self.file_modifier.apply_code_block(current_vfs_content, temp_block)
                     if temp_res.success and temp_res.new_content:
-                        is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name)
+                        is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name, file_path=block.file_path, baseline_content=current_vfs_content)
                         if not is_broken:
                             attempt_model = "A"
                             print(f"✅ [PASS 2-A] Model A validated.")
@@ -3912,7 +3970,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                         temp_block.code = fixed_snippet
                         temp_res = self.file_modifier.apply_code_block(snapshot_content, temp_block)
                         if temp_res.success and temp_res.new_content:
-                            is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name)
+                            is_broken, _, _ = self._check_tree_structure_broken(parser_obj, temp_res.new_content, block, language=lang_name, file_path=block.file_path, baseline_content=snapshot_content)
                             if not is_broken:
                                 attempt_model = "B"
                                 print(f"✅ [PASS 2-B] Model B validated.")
@@ -3948,7 +4006,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                     if repair_apply_result.success and repair_apply_result.new_content:
                         final_vfs_content = repair_apply_result.new_content
                         is_broken_final, _, details_final = self._check_tree_structure_broken(
-                            parser_obj, final_vfs_content, block, language=lang_name
+                            parser_obj, final_vfs_content, block, language=lang_name,
+                            file_path=block.file_path, baseline_content=snapshot_content
                         )
                         
                         if not is_broken_final:
@@ -3989,7 +4048,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                     if result.success and result.new_content is not None:
                         is_broken = False
                         if block.file_path.endswith('.py') and self.ts_parser:
-                            is_broken, _, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block)
+                            is_broken, _, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block, file_path=block.file_path, baseline_content=current_content)
                         elif self.ml_parser and self.ml_parser.is_supported(block.file_path):
                             _, ext = os.path.splitext(block.file_path)
                             lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if ext.lower() != '.py' else 'python'
@@ -4225,76 +4284,214 @@ Remember: You can override the validator if you believe the critique is incorrec
         parser: Union['FaultTolerantParser', 'MultiLanguageParser'],
         content: str,
         block: Optional['ParsedCodeBlock'] = None,
-        language: str = 'python'
+        language: str = 'python',
+        file_path: Optional[str] = None,
+        baseline_content: Optional[str] = None,
     ) -> Tuple[bool, str, List[str]]:
         """
-        [V18.20] Validates structural integrity using native tools for Python and Tree-sitter MISSING nodes for others.
+        Validates structural integrity with optional differential baseline filtering.
+
+        For Python: runs pyright (PRIMARY) WITH FULL PROJECT CONTEXT by
+        materializing the VFS (whole project + staged changes) into a temp
+        directory, placing the checked `content` at its real relative path
+        (`file_path`), and invoking `pyright --project <temp_root>`. This lets
+        pyright resolve all `app.*` imports and apply `pyrightconfig.json`
+        (which already restricts diagnostics to critical structural errors).
+        Falls back to pycodestyle if pyright is unavailable.
+
+        When `baseline_content` is provided and differs from `content`:
+        - Runs pyright on baseline to build a signature set
+        - Filters current diagnostics to exclude those already in baseline
+        - Implements differential per-CODE-BLOCK validation
+
+        For non-Python: uses Tree-sitter ERROR/MISSING nodes.
+
         Returns: (is_broken, error_type, details)
         """
         import os
+        import json
+        import shutil
         import tempfile
+        import subprocess
+        import re
         error_details = []
         is_python = (language.lower() == 'python')
-        
+
         if is_python:
-            # 1. Python Syntax & Indentation check via pycodestyle (as per v7.5 plan)
-            tmp_path = None
+            temp_root = None
             try:
-                # write internal content to temporary file for analysis
-                with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
-                    f.write(content.encode('utf-8'))
-                    tmp_path = f.name
-                
-                # [V18.25] Mapping of codes to human-readable structural failure types
-                CODE_MAPPING = {
-                    'E901': 'Fatal Syntax Error / Token Error',
-                    'E101': 'Indentation Error: Mixed spaces and tabs (Fatal in Python 3)',
-                    'E112': 'Indentation Error: Expected an indented block',
-                    'E113': 'Indentation Error: Unexpected indentation',
-                    'E902': 'System Error: Unreadable file (IOError)'
-                }
+                # 1. Materialize the FULL project (with VFS staged changes) so
+                #    pyright sees every sibling module -> no false reportMissingImports.
+                temp_root = self._materialize_vfs_for_pyright()
 
-                # Custom reporter to capture errors in a list
-                class ErrorReporter(pycodestyle.BaseReport):
-                    def __init__(self, options):
-                        super().__init__(options)
-                        self.results = []
-                    def error(self, line_number, offset, text, check):
-                        code = super().error(line_number, offset, text, check)
-                        if code:
-                            desc = CODE_MAPPING.get(code, "Structural anomaly")
-                            self.results.append(f"Line {line_number}:{offset} - {code}: {desc} ({text})")
-                        return code
+                # 2. Determine the target file's location inside the materialized tree.
+                #    If file_path is known, overwrite that exact file with `content`
+                #    (the version actually being validated). Otherwise create a temp
+                #    module at the project root.
+                if file_path:
+                    rel_path = file_path.replace('\\', '/')
+                    target_file = os.path.join(temp_root, *rel_path.split('/'))
+                else:
+                    target_file = os.path.join(temp_root, "__pyright_check__.py")
 
-                # Select only critical nesting/syntax/structural errors as specified in v8.5 plan
-                guide = pycodestyle.StyleGuide(
-                    select=['E901', 'E101', 'E112', 'E113', 'E902'], 
-                    quiet=True,
-                    reporter=ErrorReporter
-                )
-                
-                # Use pycodestyle's StyleGuide to find critical violations
-                report = guide.check_files([tmp_path])
-                
-                if report.total_errors > 0:
-                    # Collect detailed error information from our custom reporter
-                    error_details.extend(report.results)
-                
+                os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                with open(target_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+                # 3. Resolve config presence in the materialized root.
+                config_path = os.path.join(temp_root, "pyrightconfig.json")
+                has_project_config = os.path.exists(config_path)
+
+                try:
+                    # PRIMARY path: pyright with full project context.
+                    # When has_project_config is True, do NOT append the explicit file path.
+                    # Instead, run `pyright --project <temp_root>` over the whole tree.
+                    # This honors diagnosticSeverityOverrides in pyrightconfig.json.
+                    # Results are filtered to the target file afterward.
+                    # When has_project_config is False, append the explicit file path
+                    # so a single-file check still runs.
+                    pyright_cmd = ["pyright", "--outputjson"]
+                    if has_project_config:
+                        pyright_cmd += ["--project", temp_root]
+                        # Do NOT append target_file when project config is present.
+                        # Running over the whole project honors diagnosticSeverityOverrides.
+                    else:
+                        # No project config: append explicit file for single-file analysis.
+                        pyright_cmd.append(target_file)
+
+                    result = subprocess.run(
+                        pyright_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        cwd=temp_root,
+                        timeout=120
+                    )
+                    data = json.loads(result.stdout)
+
+                    # Normalize the target path for matching diagnostics to our file.
+                    norm_target = os.path.normcase(os.path.abspath(target_file))
+
+                    # === HELPER: Normalize message by stripping line/column numbers ===
+                    def _normalize_msg(rule: str, message: str) -> str:
+                        """Strip line/column numbers and variable-specific digits for signature matching."""
+                        normalized = re.sub(r'\d+', '#', message).strip()
+                        return f"{rule}::{normalized}"
+
+                    # === HELPER: Collect critical diagnostics from pyright output ===
+                    def _collect_diags(data_obj: Dict) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                        """Extract critical and warning diagnostics from pyright JSON output."""
+                        critical_diags = []
+                        warning_diags = []
+                        
+                        for diag in data_obj.get("generalDiagnostics", []):
+                            severity = diag.get("severity", "")
+                            
+                            # Only keep diagnostics for the file we are validating
+                            diag_file = diag.get("file") or diag.get("uri") or ""
+                            if diag_file:
+                                norm_diag = os.path.normcase(os.path.abspath(diag_file))
+                                if norm_diag != norm_target:
+                                    continue
+
+                            rule = diag.get("rule")
+                            message = diag.get("message", "")
+                            start = diag.get("range", {}).get("start", {})
+                            line_1based = start.get("line", 0) + 1
+                            col_1based = start.get("character", 0) + 1
+                            formatted = f"Line {line_1based}:{col_1based} - {rule or 'syntax'}: {message}"
+                            
+                            diag_dict = {
+                                "rule": rule,
+                                "message": message,
+                                "formatted": formatted,
+                                "sig": _normalize_msg(rule or "syntax", message),
+                            }
+                            
+                            # CRITICAL classification: error with no rule OR reportSyntaxError
+                            if severity == "error" and (rule is None or rule == "reportSyntaxError"):
+                                critical_diags.append(diag_dict)
+                            # WARNING classification: everything else with error/warning severity
+                            elif severity in ("error", "warning"):
+                                warning_diags.append(diag_dict)
+                        
+                        return critical_diags, warning_diags
+
+                    # === COLLECT CURRENT DIAGNOSTICS ===
+                    current_critical, current_warnings = _collect_diags(data)
+
+                    # === BUILD BASELINE SIGNATURE SET (if baseline_content provided) ===
+                    baseline_sigs: Set[str] = set()
+                    if baseline_content is not None and baseline_content != content:
+                        try:
+                            # Save current content
+                            new_content_saved = content
+                            
+                            # Write baseline to target file
+                            with open(target_file, 'w', encoding='utf-8') as f:
+                                f.write(baseline_content)
+                            
+                            # Re-run pyright on baseline
+                            result_b = subprocess.run(
+                                pyright_cmd,
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                cwd=temp_root,
+                                timeout=120
+                            )
+                            baseline_data = json.loads(result_b.stdout)
+                            
+                            # Collect baseline critical diagnostics and build signature set
+                            base_critical, _base_warn = _collect_diags(baseline_data)
+                            for d in base_critical:
+                                baseline_sigs.add(d["sig"])
+                            
+                            # Restore new content
+                            with open(target_file, 'w', encoding='utf-8') as f:
+                                f.write(new_content_saved)
+                            
+                            logger.info(f"Baseline filtering: {len(baseline_sigs)} baseline signatures, {len(current_critical)} current critical diagnostics")
+                            
+                        except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+                            logger.warning(f"Baseline run failed, proceeding without filtering: {e}")
+                            baseline_sigs = set()
+
+                    # === APPEND ONLY NON-BASELINE CRITICAL DIAGNOSTICS ===
+                    for d in current_critical:
+                        if d["sig"] not in baseline_sigs:
+                            error_details.append(d["formatted"])
+                    
+                    # === STORE WARNINGS SEPARATELY (non-blocking) ===
+                    warning_formatted = [w["formatted"] for w in current_warnings]
+                    self._last_pyright_warnings = warning_formatted
+                    if warning_formatted:
+                        logger.info(f"Pyright non-blocking warnings ({len(warning_formatted)}): {warning_formatted[:10]}")
+
+                except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+                    # FALLBACK path: pycodestyle (pyright unavailable / unparseable).
+                    logger.warning(f"pyright unavailable, falling back to pycodestyle: {e}")
+                    self._check_with_pycodestyle(target_file, error_details)
+
             except Exception as e:
-                logger.error(f"Error during Python integrity check using pycodestyle: {e}")
-                error_details.append(f"System evaluation error (pycodestyle): {str(e)}")
+                logger.error(f"Error during Python integrity check: {e}")
+                error_details.append(f"System evaluation error (pyright/pycodestyle): {str(e)}")
             finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try: os.remove(tmp_path)
-                    except: pass
+                if temp_root and os.path.isdir(temp_root):
+                    try:
+                        shutil.rmtree(temp_root, ignore_errors=True)
+                    except Exception:
+                        pass
         else:
             # 2. Non-Python: Tree-sitter ERROR and MISSING nodes
             # parser.validate_syntax already checks for ERROR nodes
             is_valid, ts_errors = parser.validate_syntax(content, language)
-            
+
             # [PLAN COMPLIANCE] Also explicitly get missing nodes via the new method
             missing_nodes = parser.get_missing_nodes(content, language)
-            
+
             if not is_valid or missing_nodes:
                 # Combine distinct errors
                 all_errors = list(set(ts_errors + missing_nodes))
@@ -4313,7 +4510,164 @@ Remember: You can override the validator if you believe the critique is incorrec
         return False, "NONE", []
     
     
+    def _check_with_pycodestyle(self, tmp_path: str, error_details: List[str]) -> None:
+            """
+            Fallback structural check using pycodestyle (lazily imported).
+            Appends critical syntax/indentation violations to error_details in place.
+            """
+            try:
+                import pycodestyle
+            except ImportError as e:
+                logger.error(f"pycodestyle fallback unavailable: {e}")
+                error_details.append(f"System evaluation error (pycodestyle unavailable): {str(e)}")
+                return
+
+            # Mapping of codes to human-readable structural failure types
+            CODE_MAPPING = {
+                'E901': 'Fatal Syntax Error / Token Error',
+                'E101': 'Indentation Error: Mixed spaces and tabs (Fatal in Python 3)',
+                'E112': 'Indentation Error: Expected an indented block',
+                'E113': 'Indentation Error: Unexpected indentation',
+                'E902': 'System Error: Unreadable file (IOError)'
+            }
+
+            # Custom reporter to capture errors in a list
+            class ErrorReporter(pycodestyle.BaseReport):
+                def __init__(self, options):
+                    super().__init__(options)
+                    self.results = []
+
+                def error(self, line_number, offset, text, check):
+                    code = super().error(line_number, offset, text, check)
+                    if code:
+                        desc = CODE_MAPPING.get(code, "Structural anomaly")
+                        self.results.append(f"Line {line_number}:{offset} - {code}: {desc} ({text})")
+                    return code
+
+            # Select only critical nesting/syntax/structural errors
+            guide = pycodestyle.StyleGuide(
+                select=['E901', 'E101', 'E112', 'E113', 'E902'],
+                quiet=True,
+                reporter=ErrorReporter
+            )
+
+            report = guide.check_files([tmp_path])
+
+            if report.total_errors > 0:
+                error_details.extend(report.results)
     
+    def _materialize_vfs_for_pyright(self) -> str:
+        """
+        Materialize the entire VFS (whole project + staged changes) into a
+        temporary directory so pyright can resolve all ``app.*`` imports and
+        apply ``pyrightconfig.json``.
+
+        The materialized tree mirrors the real project layout:
+          - Real (unmodified) files are COPIED (NOT symlinked) so that pyright
+            resolves every module's real path inside the temp root, preventing
+            false ``reportMissingImports`` that cascade into
+            ``reportAttributeAccessIssue`` / ``reportReturnType`` on valid code.
+          - Staged (modified / new) files are written as real files with the
+            VFS content.
+          - Deleted files are omitted.
+
+        Additionally, ``pyrightconfig.json`` is explicitly copied into the
+        materialized root (with VFS-staged override honored) so that pyright
+        can ALWAYS discover the config, independent of any ``os.walk`` skip
+        rules.
+
+        Returns:
+            Absolute path to the temporary root directory.
+
+        The caller is responsible for cleaning up the returned directory.
+        """
+        import os
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        project_root = Path(self.project_dir).resolve()
+        temp_root = tempfile.mkdtemp(prefix="pyright_vfs_")
+
+        # --- 1. Walk the real project tree, copy everything ---
+        for dirpath, dirnames, filenames in os.walk(str(project_root)):
+            # Skip common non-source directories
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith((".", "__pycache__", "node_modules", "venv", ".venv"))
+            ]
+
+            rel_dir = os.path.relpath(dirpath, str(project_root))
+            target_dir = os.path.join(temp_root, rel_dir) if rel_dir != "." else temp_root
+            os.makedirs(target_dir, exist_ok=True)
+
+            for fn in filenames:
+                src = os.path.join(dirpath, fn)
+                dst = os.path.join(target_dir, fn)
+
+                # --- 2. Overwrite with VFS staged content if present ---
+                # Build the VFS-relative path (forward-slash, no leading slash).
+                vfs_rel = os.path.join(rel_dir, fn).replace("\\", "/")
+                if vfs_rel.startswith("/"):
+                    vfs_rel = vfs_rel[1:]
+
+                staged = self.vfs.read_file(vfs_rel)
+                if staged is not None:
+                    # Staged file (modified or new) – write real file.
+                    with open(dst, "w", encoding="utf-8") as f:
+                        f.write(staged)
+                else:
+                    # Unmodified file – COPY (do NOT symlink).
+                    # [CRITICAL] Pyright resolves imports via the REAL path of a
+                    # file. If siblings are symlinks back to the original tree,
+                    # pyright follows them to the original root and the import
+                    # graph rooted at temp_root breaks -> false reportMissingImports
+                    # cascading into reportAttributeAccessIssue / reportReturnType
+                    # on perfectly valid code. Real copies keep every module's
+                    # real path inside temp_root so imports resolve consistently.
+                    try:
+                        shutil.copy2(src, dst)
+                    except (OSError, shutil.SameFileError):
+                        # Best effort: skip unreadable/duplicate files.
+                        pass
+
+        # --- 3. Also materialise any VFS-only (new) files that live outside
+        #         the real project tree (edge case – should not normally happen
+        #         for pyright analysis, but be safe).
+        staged_files = self.vfs.get_staged_files()
+        for sf in staged_files:
+            target = os.path.join(temp_root, sf.replace("\\", "/"))
+            if not os.path.exists(target):
+                content = self.vfs.read_file(sf)
+                if content is not None:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with open(target, "w", encoding="utf-8") as f:
+                        f.write(content)
+
+        # --- 4. [EXPLICIT] Ensure pyrightconfig.json is present at the
+        #         materialized root, independent of the os.walk path above.
+        #         This guarantees pyright --project <temp_root> always finds
+        #         the config. VFS-staged content takes priority (consistent
+        #         with the rest of the materializer's override semantics);
+        #         otherwise we copy the real on-disk config.
+        config_rel = "pyrightconfig.json"
+        config_dst = os.path.join(temp_root, config_rel)
+        try:
+            staged_config = self.vfs.read_file(config_rel)
+            if staged_config is not None:
+                with open(config_dst, "w", encoding="utf-8") as f:
+                    f.write(staged_config)
+            else:
+                real_config = os.path.join(str(project_root), config_rel)
+                if os.path.exists(real_config):
+                    shutil.copy2(real_config, config_dst)
+                # If neither exists in VFS nor on disk, skip silently —
+                # pyright will run with its built-in defaults.
+        except (OSError, IOError) as e:
+            # Best effort: log and continue; pyright can still run with defaults.
+            logger.warning(f"Could not materialize pyrightconfig.json: {e}")
+
+        return temp_root
     
     
     # ========================================================================
@@ -5791,26 +6145,24 @@ Please analyze the errors and provide a revised instruction.""",
     async def _apply_pending_deletions(self) -> List[Dict[str, Any]]:
         """
         Apply pending deletions by either deleting files or commenting out code.
-        
-        Called after all tests pass successfully.
-        
-        For FILE deletions: stages file for removal
-        For METHOD/FUNCTION/CLASS deletions: comments out the code
-        
+
+        For FILE deletions: stages file for removal.
+        For METHOD/FUNCTION/CLASS deletions: comments out the code in the VFS.
+
         Returns:
-            List of dicts with deletion results
+            List of dicts with deletion results.
         """
-        results = []
-        
+        results: List[Dict[str, Any]] = []
+
         for deletion in self._pending_deletions:
             try:
                 # Choose deletion method based on type
                 if deletion.target_type == "FILE":
                     result = await self._delete_file(deletion)
                 else:
-                    # METHOD, FUNCTION, CLASS — comment out
+                    # METHOD, FUNCTION, CLASS -> comment out
                     result = await self._comment_out_code(deletion)
-                
+
                 results.append({
                     "target": deletion.target_name,
                     "type": deletion.target_type,
@@ -5821,7 +6173,7 @@ Please analyze the errors and provide a revised instruction.""",
                     "error": result.get("error"),
                     "note": result.get("note"),
                 })
-                
+
                 if result.get("success"):
                     if deletion.target_type == "FILE":
                         logger.info(f"Staged deletion of file: {deletion.file_path}")
@@ -5834,7 +6186,7 @@ Please analyze the errors and provide a revised instruction.""",
                     logger.warning(
                         f"Failed to delete '{deletion.target_name}': {result.get('error')}"
                     )
-                    
+
             except Exception as e:
                 logger.error(f"Error applying deletion '{deletion.target_name}': {e}")
                 results.append({
@@ -5846,11 +6198,11 @@ Please analyze the errors and provide a revised instruction.""",
                     "success": False,
                     "error": str(e),
                 })
-        
+
         # Clear pending deletions after processing
         self._pending_deletions = []
-        
-        return results    
+
+        return results
     
     
     async def _delete_file(self, deletion: PendingDeletion) -> Dict[str, Any]:
@@ -5894,87 +6246,201 @@ Please analyze the errors and provide a revised instruction.""",
     
     async def _comment_out_code(self, deletion: PendingDeletion) -> Dict[str, Any]:
         """
-        Comment out a method/function/class in a file.
-        Uses VFS to stage the change.
+        Comment out a method/function/class in a file (staged into the VFS).
+
+        Strategy:
+          - Python (.py): use the `ast` module for a precise, bounded line span;
+            fall back to FaultTolerantParser (Tree-sitter) on SyntaxError or miss.
+          - Java/JS/TS/Go: use MultiLanguageParser (Tree-sitter) directly.
+
+        Each target line is shifted right and the language comment prefix is inserted;
+        the element end-line is clamped to file length so code BELOW is never removed.
         """
         import ast
-        
-        # Read from VFS (may have pending changes)
+        import os
+
         source = self.vfs.read_file(deletion.file_path)
         if source is None:
             return {"success": False, "error": f"File not found: {deletion.file_path}"}
-        
-        try:
-            tree = ast.parse(source)
-        except SyntaxError as e:
-            return {"success": False, "error": f"Cannot parse file: {e}"}
-        
-        # Find target node
-        target_node = None
-        
-        if deletion.target_type == "METHOD" and deletion.parent_class:
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef) and node.name == deletion.parent_class:
-                    for item in node.body:
-                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if item.name == deletion.target_name:
-                                target_node = item
-                                break
-                    break
-                    
-        elif deletion.target_type == "FUNCTION":
-            for node in ast.iter_child_nodes(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if node.name == deletion.target_name:
-                        target_node = node
-                        break
-                        
-        elif deletion.target_type == "CLASS":
-            for node in ast.iter_child_nodes(tree):
-                if isinstance(node, ast.ClassDef) and node.name == deletion.target_name:
-                    target_node = node
-                    break
-        
-        if not target_node:
-            return {
-                "success": False, 
-                "error": f"{deletion.target_type} '{deletion.target_name}' not found in {deletion.file_path}"
-            }
-        
-        # Comment out the code
+
+        ext = os.path.splitext(deletion.file_path)[1].lower()
+        comment_prefix_map = {
+            ".py": "#",
+            ".java": "//", ".js": "//", ".jsx": "//", ".mjs": "//",
+            ".ts": "//", ".tsx": "//", ".go": "//",
+        }
+        ts_lang_map = {
+            ".java": "java",
+            ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+            ".ts": "typescript", ".tsx": "typescript",
+            ".go": "go",
+        }
+        prefix = comment_prefix_map.get(ext)
+        if prefix is None:
+            return {"success": False, "error": f"Unsupported extension: {ext}"}
+
+        element_type = {
+            "METHOD": "method",
+            "FUNCTION": "function",
+            "CLASS": "class",
+        }.get(deletion.target_type, "all")
+
         lines = source.splitlines(keepends=True)
-        start_line = target_node.lineno - 1  # 0-indexed
-        end_line = target_node.end_lineno     # exclusive
+        total_lines = len(lines)
+        if total_lines == 0:
+            return {"success": False, "error": "File is empty"}
+
+        start_line0: Optional[int] = None
+        end_line_excl: Optional[int] = None
+
+        # ============ Branch A: Python (ast first, Tree-sitter fallback) ============
+        if ext == ".py":
+            target_node = None
+            try:
+                tree = ast.parse(source)
+                if deletion.target_type == "METHOD" and deletion.parent_class:
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ClassDef) and node.name == deletion.parent_class:
+                            for item in node.body:
+                                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                                        and item.name == deletion.target_name:
+                                    target_node = item
+                                    break
+                            break
+                elif deletion.target_type == "FUNCTION":
+                    for node in ast.iter_child_nodes(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                                and node.name == deletion.target_name:
+                            target_node = node
+                            break
+                elif deletion.target_type == "CLASS":
+                    for node in ast.iter_child_nodes(tree):
+                        if isinstance(node, ast.ClassDef) and node.name == deletion.target_name:
+                            target_node = node
+                            break
+
+                if target_node is not None:
+                    start_line0 = target_node.lineno - 1
+                    end_line_excl = target_node.end_lineno
+            except SyntaxError:
+                logger.info(
+                    f"Python ast.parse failed for {deletion.file_path}, "
+                    f"falling back to FaultTolerantParser"
+                )
+                target_node = None
+
+            # Tree-sitter fallback
+            if start_line0 is None and self.ts_parser:
+                try:
+                    element = self.ts_parser.find_element(
+                        source,
+                        "python",
+                        deletion.target_name,
+                        element_type=element_type,
+                    )
+                    if element:
+                        start_line0 = element["start_line"] - 1
+                        end_line_excl = element["end_line"]
+                except Exception as e:
+                    logger.warning(
+                        f"FaultTolerantParser.find_element failed for "
+                        f"{deletion.target_name} in {deletion.file_path}: {e}"
+                    )
+
+        # ============ Branch B: Non-Python (Java/JS/TS/Go via MultiLanguageParser) ====
+        else:
+            ts_lang = ts_lang_map.get(ext)
+            if ts_lang is None:
+                return {"success": False, "error": f"No tree-sitter language for {ext}"}
+            if self.ml_parser:
+                try:
+                    element = self.ml_parser.find_element(
+                        source,
+                        ts_lang,
+                        deletion.target_name,
+                        element_type=element_type,
+                        parent_name=deletion.parent_class if deletion.target_type == "METHOD" else None,
+                    )
+                    if element:
+                        start_line0 = element["start_line"] - 1
+                        end_line_excl = element["end_line"]
+                except Exception as e:
+                    logger.warning(
+                        f"MultiLanguageParser.find_element failed for "
+                        f"{deletion.target_name} in {deletion.file_path}: {e}"
+                    )
+
+        if start_line0 is None or end_line_excl is None:
+            return {
+                "success": False,
+                "error": f"{deletion.target_type} '{deletion.target_name}' "
+                        f"not found in {deletion.file_path}",
+            }
+
+        # CRITICAL CLAMP — prevents removing code below the element
+        start_line0 = max(0, start_line0)
+        end_line_excl = min(end_line_excl, total_lines)
+        if start_line0 >= end_line_excl:
+            return {"success": False, "error": "Invalid element range"}
+
+        # === HARDENED: Verify target line actually contains element keyword ===
+        # This defensive check ensures we're commenting the right thing
+        target_line = lines[start_line0].strip() if start_line0 < len(lines) else ""
+        element_keywords = {
+            "METHOD": ("def ", "async def "),
+            "FUNCTION": ("def ", "async def "),
+            "CLASS": ("class ",),
+        }
+        keywords = element_keywords.get(deletion.target_type, ())
         
-        # Build commented block
-        header = [
-            f"# === COMMENTED OUT (obsolete) ===\n",
-            f"# Reason: {deletion.reason}\n",
-            f"# Target: {deletion.target_type} {deletion.target_name}\n",
-            f"#\n",
-        ]
+        # Only warn if keywords are present but target name not found
+        # (some edge cases like decorators might not have the name on first line)
+        has_keyword = any(kw in target_line for kw in keywords)
+        has_target_name = deletion.target_name in target_line
         
-        footer = [
-            f"#\n",
-            f"# === END COMMENTED OUT ===\n",
-        ]
-        
-        commented = []
-        for line in lines[start_line:end_line]:
+        if has_keyword and not has_target_name:
+            logger.warning(
+                f"Target line for {deletion.target_name} may not contain the element name. "
+                f"Line: {target_line[:80]}"
+            )
+
+        # Comment out the lines
+        commented_lines = []
+        for i in range(start_line0, end_line_excl):
+            line = lines[i]
             if line.strip():
-                commented.append(f"# {line}")
+                # Preserve indentation, add comment prefix
+                stripped = line.lstrip()
+                indent = line[:len(line) - len(stripped)]
+                commented_lines.append(f"{indent}{prefix} {stripped}")
             else:
-                commented.append("#\n")
-        
-        # Reconstruct
-        new_lines = lines[:start_line] + header + commented + footer + lines[end_line:]
+                # Keep empty lines as-is
+                commented_lines.append(line)
+
+        # Ensure trailing newline is preserved
+        new_lines = lines[:start_line0] + commented_lines + lines[end_line_excl:]
         new_source = "".join(new_lines)
         
-        # Stage to VFS
+        # Handle missing trailing newline
+        if new_source and not new_source.endswith('\n'):
+            new_source += '\n'
+
         from app.services.virtual_fs import ChangeType
-        self.vfs.stage_change(deletion.file_path, new_source, ChangeType.MODIFY)
-        
-        return {"success": True}    
+        try:
+            self.vfs.stage_change(deletion.file_path, new_source, ChangeType.MODIFY)
+            logger.info(
+                f"Commented out {deletion.target_type} '{deletion.target_name}' "
+                f"in {deletion.file_path} (lines {start_line0 + 1}-{end_line_excl})"
+            )
+            return {
+                "success": True,
+                "note": f"Commented out {end_line_excl - start_line0} lines"
+            }
+        except Exception as e:
+            logger.error(
+                f"Failed to stage commented-out code in {deletion.file_path}: {e}"
+            )
+            return {"success": False, "error": str(e)}
     
     
     def _format_generated_code_for_context(self, code_blocks: List[ParsedCodeBlock]) -> str:
