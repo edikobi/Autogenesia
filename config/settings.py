@@ -41,8 +41,10 @@ class Config:
     # Claude Opus 4.5 - для сложных задач (security, concurrency, heisenbug)
     MODEL_OPUS_4_5 = "anthropic/claude-opus-4.5" 
     
-    # Claude Opus 4.6 - для сложных задач (security, concurrency, heisenbug) и теперь с большим окном
-    MODEL_OPUS_4_6 = "anthropic/claude-opus-4.6" 
+    # Claude Opus 4.7 - для сложных задач (security, concurrency, heisenbug) и теперь с большим окном
+    MODEL_OPUS_4_8 = "anthropic/claude-opus-4.8" 
+    
+    MODEL_OPUS_4_6 = MODEL_OPUS_4_8  # алиас для обратной совместимости
     
     # Claude Sonnet 4.5 - для средних задач (NEW!)
     MODEL_SONNET_4_5 = "anthropic/claude-sonnet-4.5"
@@ -58,7 +60,7 @@ class Config:
     # ID модели в RouterAI/OpenRouter для версии 3.0 Pro
     MODEL_GEMINI_3_PRO = "google/gemini-3.1-pro-preview"     
     
-    MODEL_MiniMax_M2_7 = "minimax/minimax-m2.7"
+    MODEL_MiniMax_M3 = "minimax/minimax-m3"
     
 # Gemini 2.0 Flash (для роутера и сжатия истории)
     MODEL_GEMINI_2_FLASH = "google/gemini-2.0-flash-001"
@@ -73,7 +75,7 @@ class Config:
     MODEL_Kimi_K_2_6 = "moonshotai/kimi-k2.6"
     
 # !!! НОВАЯ МОДЕЛЬ QWEN3 MAX THINKING !!!
-    MODEL_QWEN3_MAX_THINKING = "qwen/qwen3-max-thinking"    
+    MODEL_QWEN_3_7_MAX = "qwen/qwen3.7-max"    
     
     MODEL_QWEN_3_5_Plus = "qwen/qwen3.5-plus-02-15"    
     
@@ -81,9 +83,9 @@ class Config:
 
     MODEL_Xiaomi_MiMo_V2_5_PRO = "xiaomi/mimo-v2.5-pro"
 
-    MODEL_QWEN_3_6_Plus_Preview = "qwen/qwen3.6-plus"
+    MODEL_QWEN_3_7_Plus = "qwen/qwen3.7-plus"
     
-    MODEL_Nemotron_3_Plus_Super = "nvidia/nemotron-3-super-120b-a12b:free"
+    MODEL_Nemotron_3_ULTRA = "nvidia/nemotron-3-ultra-550b-a55b"
 
     # ============ НОВЫЕ МОДЕЛИ ГЕНЕРАТОРА (OpenRouter) ============
     MODEL_GLM_5_Turbo = "z-ai/glm-5-turbo"                # GLM 4.7
@@ -134,7 +136,7 @@ class Config:
             }
         },
         
-        "qwen/qwen3-max-thinking": {  # Используем ID модели
+        "qwen/qwen3.7-max": {  # Используем ID модели
             "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
             "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
             "provider_name": "OPENROUTER",    # Название провайдера для отображения
@@ -144,7 +146,7 @@ class Config:
             "reasoning": {"effort": "xhigh"}
         },
         
-        "minimax/minimax-m2.7": {  # Используем ID модели
+        "minimax/minimax-m3": {  # Используем ID модели
             "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
             "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
             "provider_name": "OPENROUTER",    # Название провайдера для отображения
@@ -187,7 +189,7 @@ class Config:
             "reasoning": {"effort": "high"}
         },
         
-        "qwen/qwen3.6-plus": {
+        "qwen/qwen3.7-plus": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
@@ -204,7 +206,7 @@ class Config:
            "reasoning": {"effort": "high"}
         },
         
-        "nvidia/nemotron-3-super-120b-a12b:free": {
+        "nvidia/nemotron-3-ultra-550b-a55b": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
@@ -218,7 +220,7 @@ class Config:
             "provider_name": "OPENROUTER"
         },
         
-        "anthropic/claude-opus-4.6": {
+        "anthropic/claude-opus-4.8": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER",
@@ -545,20 +547,20 @@ class Config:
         """
         return [
             cls.MODEL_OPUS_4_5,
-            cls.MODEL_OPUS_4_6,
+            cls.MODEL_OPUS_4_8,
             cls.MODEL_SONNET_4_5,  # NEW!
             cls.MODEL_SONNET_4_6,
             cls.MODEL_GPT_5_2_Codex,
             cls.MODEL_GEMINI_2_FLASH,
             cls.MODEL_GEMINI_3_PRO,
             cls.MODEL_DEEPSEEK_REASONER,
-            cls.MODEL_QWEN3_MAX_THINKING,
+            cls.MODEL_QWEN_3_7_MAX,
             cls.MODEL_QWEN_3_5_Plus,
-            cls.MODEL_QWEN_3_6_Plus_Preview,
+            cls.MODEL_QWEN_3_7_Plus,
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO,
             cls.MODEL_Kimi_K_2_6,
             cls.MODEL_GLM_5_1,
-            cls.MODEL_MiniMax_M2_7,
+            cls.MODEL_MiniMax_M3,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
         ]
     
@@ -588,21 +590,21 @@ class Config:
         # Словарь красивых имен
         model_names = {
             cls.MODEL_OPUS_4_5: "Claude Opus 4.5",
-            cls.MODEL_OPUS_4_6: "Claude Opus 4.6",
+            cls.MODEL_OPUS_4_8: "Claude Opus 4.8",
             cls.MODEL_SONNET_4_5: "Claude Sonnet 4.5",  # NEW!
             cls.MODEL_SONNET_4_6: "Claude Sonnet 4.6",
-            cls.MODEL_DEEPSEEK_REASONER: "DeepSeek V3.2 Reasoning",
+            cls.MODEL_DEEPSEEK_REASONER: "Deepseek V4 Pro",
             cls.MODEL_GPT_5_2_Codex: "GPT-5.2 Codex",
             cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.1 Pro (Thinking)",
-            cls.MODEL_QWEN3_MAX_THINKING: "🚀 Qwen3 Max Thinking (Deep Reasoning)",
+            cls.MODEL_QWEN_3_7_MAX: "🚀 Qwen3 Max Thinking (Deep Reasoning)",
             cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
             cls.MODEL_Kimi_K_2_6: "Kimi K2.5",
-            cls.MODEL_QWEN_3_6_Plus_Preview: "Qwen3.6 Plus Preview",
+            cls.MODEL_QWEN_3_7_Plus: "Qwen3.7 Plus",
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO: "Xiaomi: MiMo-V2-Pro",
             cls. MODEL_GLM_5_1: "GLM 5.1",
-            cls.MODEL_MiniMax_M2_7: "MiniMAX M2.7",
+            cls.MODEL_MiniMax_M3: "MiniMAX M2.7",
             # Модели генератора
             cls.MODEL_GLM_5_Turbo: "GLM 4.7 (OpenRouter)",
             cls.MODEL_HAIKU_4_5: "Claude Haiku 4.5 (OpenRouter)",
@@ -711,7 +713,7 @@ AVAILABLE_PREFILTER_MODELS = [
     ("3", Config.MODEL_SONNET_4_6, "Claude Sonnet 4.6", "Новейшая версия Sonnet. Улучшенный анализ."),
     ("4", Config.MODEL_GEMINI_3_PRO, "Gemini 3.1 Pro", "Огромное контекстное окно. Хорош для больших проектов."),
     ("5", Config.MODEL_GPT_5_2_Codex, "GPT-5.2 Codex", "Мощная модель OpenAI для анализа кода."),
-    ("6", Config.MODEL_QWEN3_MAX_THINKING, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач.")
+    ("6", Config.MODEL_QWEN_3_7_MAX, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач.")
 ]
     
 

@@ -383,8 +383,8 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "5",
-        cfg.MODEL_OPUS_4_6,
-        "Claude Opus 4.6",
+        cfg.MODEL_OPUS_4_8,
+        "Claude Opus 4.8",
         "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Контекстное окно  1 млн. токенов"
     ),
     (
@@ -396,7 +396,7 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     (
         "7",
         cfg.MODEL_DEEPSEEK_REASONER,
-        "DeepSeek V3.2 Reasoning",
+        "DeepSeek V4 PRO",
         "Неплохо думает, но маленькое контекстное окно и слегка 'туповат' для сложных задач. В новых проектах может быть хорош. ОЧЕНЬ дешёвый!"
     ),
     (
@@ -407,8 +407,8 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "9",
-        cfg.MODEL_QWEN_3_6_Plus_Preview,
-        "Qwen3.6 Plus",
+        cfg.MODEL_QWEN_3_7_Plus,
+        "Qwen3.7 Plus",
         "ИИ от китайцев, дешевый с неплохим знанием кода"
     ),
     (
@@ -427,9 +427,9 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     
     (
         "12",
-        cfg.MODEL_MiniMax_M2_7,
-        "MiniMAX M2.7",
-        "Надежд на это мало"
+        cfg.MODEL_MiniMax_M3,
+        "MiniMAX M3",
+        "Бьют рейтинги в тестах, как все китайцы"
     ),
 ]
 
@@ -441,7 +441,7 @@ AVAILABLE_GENERATOR_MODELS = [
     (
         "1",
         cfg.MODEL_NORMAL,
-        "DeepSeek Chat",
+        "DeepSeek V4 Flash",
         "Базовая модель. Быстрая, дешёвая, хорошо справляется с простыми задачами генерации(Маленькое контекстное окно, особенно исходящее)."
     ),
     (
@@ -480,18 +480,46 @@ AVAILABLE_GENERATOR_MODELS = [
 
     (
         "7",
-        cfg.MODEL_Nemotron_3_Plus_Super,
-        "Nemotron 3 Super",
-        "Халява от NVIDIA, но вроде обещают много агентов внутри одной модели"
+        cfg. MODEL_Nemotron_3_ULTRA,
+        "Nemotron 3 ULTRA",
+        "Одна из лучших открытых моделей от NVIDIA, НО ВСЕГО 262К, а выходной вообще 16к контекста"
     ),
 
     (
         "8",
-        cfg.MODEL_QWEN3_MAX_THINKING,
-        "Qwen3 Coder Next",
-        "Это открытая причинно-следственная языковая модель, оптимизированная для программистов и локальных рабочих процессов разработки"
+        cfg.MODEL_QWEN_3_7_MAX,
+        "Qwen 3.7 Max",
+        "Это флагманская модель в серии Qwen3.7 от Alibaba"
+    ),
+    
+    (
+        "9",
+        cfg.MODEL_DEEPSEEK_REASONER,
+        "Deepseek V4 Pro",
+        "Уважаемый Дипсик"
     ),
 
+    
+    (
+        "10",
+        cfg.MODEL_QWEN_3_7_Plus,
+        "Qwen3.7 Plus",
+        "Один из лучших китайских ИИ"
+    ),
+    (
+        "11",
+        cfg.MODEL_MiniMax_M3,
+        "MiniMAX M3",
+        "Огромные выходные токены (более 500к) контекста"
+    ),
+    
+    (
+        "12",
+        cfg.MODEL_GLM_5_1,
+        "GLM 5.1",
+        "Маленький контекст (200к), хз что еще сказать"
+    ),
+    
 ]
 
 
@@ -2713,7 +2741,7 @@ async def select_orchestrator_model() -> bool:
     try:
         choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
             default="r",
             show_back=True,
             show_menu=True
@@ -6886,7 +6914,7 @@ async def setup_mode_session(mode: str) -> bool:
     try:
         model_choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
             default="r"
         )
     except BackException:

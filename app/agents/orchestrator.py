@@ -240,7 +240,7 @@ async def orchestrate(
             available_tools = _get_available_tools(tool_usage)
             
             # Cache optimization for Claude models
-            is_claude_model_check = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_6]
+            is_claude_model_check = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
             if is_claude_model_check:
                  _optimize_cache_by_size(messages, limit=3)
 
@@ -276,7 +276,7 @@ async def orchestrate(
             logger.info(f"Orchestrator: executing {len(tool_calls)} tool call(s)")
             
             # Check if Claude model for caching
-            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_6]
+            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
             
             # Capture thinking content before tool calls
             # [UPDATED] Use reasoning_content if available (for DeepSeek), otherwise fallback to content
@@ -676,7 +676,7 @@ def _should_use_batch_limit(model: str) -> bool:
     LIMITED_CONTEXT_MODELS = {
         cfg.MODEL_OPUS_4_5,
         cfg.MODEL_DEEPSEEK_REASONER,
-        cfg.MODEL_QWEN3_MAX_THINKING,
+        cfg.MODEL_QWEN_3_7_MAX,
     }
     return model in LIMITED_CONTEXT_MODELS
 
@@ -1438,7 +1438,7 @@ class GeneralChatOrchestrator:
                 available_tools = self._get_general_tools(tool_usage)
                 
                 # Оптимизация кэша для Claude (если используется)
-                is_claude = self.model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_6]
+                is_claude = self.model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
                 if is_claude:
                     _optimize_cache_by_size(messages, limit=3)
                 
@@ -1743,7 +1743,7 @@ async def orchestrate_agent(
             available_tools = _get_available_tools(tool_usage)
             
             # Claude cache optimization
-            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_6]
+            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
             if is_claude_model:
                 _optimize_cache_by_size(messages, limit=3)
             

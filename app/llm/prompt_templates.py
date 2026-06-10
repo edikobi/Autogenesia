@@ -65,7 +65,7 @@ MODEL_COGNITIVE_TYPES: Dict[str, str] = {
     # Deep Thinker - склонны к глубокому анализу и абстракции
     # Нуждаются в напоминании о конкретных, выполнимых инструкциях
     Config.MODEL_OPUS_4_5: "deep_thinker",      # "anthropic/claude-opus-4.5"
-    Config.MODEL_OPUS_4_6: "deep_thinker",
+    Config.MODEL_OPUS_4_8: "deep_thinker",
     Config.MODEL_SONNET_4_5: "deep_thinker",    # "anthropic/claude-sonnet-4.5"
     Config.MODEL_SONNET_4_6: "deep_thinker",    # "anthropic/claude-sonnet-4.5"
 
@@ -1057,7 +1057,7 @@ def _get_adaptive_block_ask_agent(model_id: str) -> str:
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_6):
+    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -1098,7 +1098,7 @@ def _get_adaptive_block_new_project_agent(model_id: str) -> str:
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_6):
+    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -5629,9 +5629,11 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("**Interpreting Orchestrator Actions:**")
     parts.append("The Orchestrator uses action names like UPDATE_IMPORTS, ADD_METHOD, MODIFY_METHOD to describe the intended change. These are **not** the mode you should output; they indicate the type of change. You must map them to the appropriate diff mode for this language:")
     parts.append("")
-    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT**. Provide only the code to be inserted, and use the location markers (INSERT_AFTER or INSERT_BEFORE) from the instruction to place it correctly. Do not include surrounding code.")
+    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT_TARGET** (preferred).")
+    parts.append("  * Prefer DIFF_INSERT_TARGET with INSERT_AFTER_TARGET/INSERT_BEFORE_TARGET to place a new definition next to an existing one by name. Use DIFF_INSERT only when inserting statements inside an existing function body or when the instruction explicitly provides an insertion anchor.")
+    parts.append("  * Provide only the code to be inserted. Do not include surrounding code.")    
     parts.append("")
-    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE**. Provide only the new code that replaces the old. You MUST use REPLACE_PATTERN to identify exactly what to replace. CRITICAL: Your REPLACE_PATTERN MUST contain ALL lines you want to replace, from the first to the exact last line. Never provide an incomplete pattern.")
+    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE** or **DIFF_INSERT**. Provide only the new code that replaces the old. You MUST use REPLACE_PATTERN to identify exactly what to replace. CRITICAL: Your REPLACE_PATTERN MUST contain ALL lines you want to replace, from the first to the exact last line. Never provide an incomplete pattern.")
     parts.append("")
     parts.append("- For actions that **completely replace** an entire method, function, or class, use **DIFF_REPLACE_TARGET**. You must provide ONLY the target (e.g., TARGET_FUNCTION: name), WITHOUT any REPLACE_PATTERN. Provide the full new code of the target including its brackets.")
     parts.append("")
@@ -5696,12 +5698,14 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("• TARGET_CLASS — Name of the class or object the method belongs to (skip for top-level functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for insertion")
     parts.append("• INSERT_AFTER or INSERT_BEFORE — unique anchor line to position the insertion. **CRITICAL: You MUST provide one of these anchors.**")
+    parts.append("• If no unique anchor line (INSERT_AFTER/INSERT_BEFORE) can be found, use DIFF_INSERT_TARGET instead to position the code relative to a named entity.")    
     parts.append("")
     parts.append("**MODE 2: DIFF_REPLACE** — Surgical substitution of specific lines INSIDE an entity body, or replacing standalone global variables.")
     parts.append("Required fields:")
     parts.append("• TARGET_CLASS — Name of the class or object the method belongs to (skip for top-level functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for search (optional but recommended)")
     parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• IMPORTANT: Use DIFF_REPLACE only when REPLACE_PATTERN is unique within the target (method/function/file). If the same line(s) appear more than once, or if you cannot capture the exact boundaries, switch to DIFF_REPLACE_TARGET and replace the whole method/function/class. This avoids ambiguity and broken syntax.")    
     parts.append("")
     parts.append("**MODE 3: DIFF_REPLACE_TARGET** — Complete replacement of a full method, function, or class in its entirety.")
     parts.append("Required fields:")
@@ -5809,6 +5813,29 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
+    parts.append("")
+    parts.append("**Example – multi-line REPLACE_PATTERN (mandatory when replacing blocks):**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/module.js")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_FUNCTION: fetchData")
+    parts.append("REPLACE_PATTERN: if (cached) {")
+    parts.append("    return cache;")
+    parts.append("}")
+    parts.append("")
+    parts.append("```javascript")
+    parts.append("if (cached) {")
+    parts.append("    console.log('cache hit');")
+    parts.append("    return cache;")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("⚠️ This example is here to break the single-line habit: REPLACE_PATTERN MUST span all lines you want to remove.")
+    parts.append("")    
+    
+    
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
     parts.append("REPLACE_FILE is strictly prohibited unless the instruction explicitly asks to replace the entire file (e.g., when creating a new file or completely rewriting an existing one).")
@@ -5849,9 +5876,12 @@ def _get_go_prompt_injection() -> str:
     parts.append("**Interpreting Orchestrator Actions:**")
     parts.append("The Orchestrator uses action names like UPDATE_IMPORTS, ADD_METHOD, MODIFY_METHOD to describe the intended change. These are **not** the mode you should output; they indicate the type of change. You must map them to the appropriate diff mode for this language:")
     parts.append("")
-    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT**. Provide only the code to be inserted, and use the location markers (INSERT_AFTER or INSERT_BEFORE) from the instruction to place it correctly. Do not include surrounding code.")
+    parts.append("- For actions that **add** new code (e.g., UPDATE_IMPORTS, ADD_METHOD, ADD_FUNCTION, INSERT_IMPORT, INSERT_IN_CLASS), use **DIFF_INSERT_TARGET**.")
+    parts.append("  * Prefer DIFF_INSERT_TARGET with INSERT_AFTER_TARGET/INSERT_BEFORE_TARGET to place a new definition next to an existing one by name. Use DIFF_INSERT only when inserting statements inside an existing function body or when the instruction explicitly provides an insertion anchor.")
+    parts.append("  * Provide only the code to be inserted. Do not include surrounding code.")    
+    
     parts.append("")
-    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE**. Provide only the new code that replaces the old. You MUST use REPLACE_PATTERN to identify exactly what to replace. CRITICAL: Your REPLACE_PATTERN MUST contain ALL lines you want to replace, from the first to the exact last line. Never provide an incomplete pattern.")
+    parts.append("- For actions that **modify** existing code (e.g., MODIFY_METHOD, MODIFY_FUNCTION, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, MODIFY_ATTRIBUTE), use **DIFF_REPLACE** or **DIFF_INSERT**. Provide only the new code that replaces the old. You MUST use REPLACE_PATTERN to identify exactly what to replace. CRITICAL: Your REPLACE_PATTERN MUST contain ALL lines you want to replace, from the first to the exact last line. Never provide an incomplete pattern.")
     parts.append("")
     parts.append("- The only exception is **REPLACE_FILE**, which means replace the entire file content. Use this only when explicitly requested.")
     parts.append("")
@@ -5897,12 +5927,17 @@ def _get_go_prompt_injection() -> str:
     parts.append("• TARGET_CLASS — Name of the struct/type that acts as the method receiver (required for Go methods, skip for plain functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for insertion")
     parts.append("• INSERT_AFTER or INSERT_BEFORE — unique anchor line to position the insertion. **CRITICAL: You MUST provide one of these anchors.**")
+    parts.append("• If no unique anchor line (INSERT_AFTER/INSERT_BEFORE) can be found, use DIFF_INSERT_TARGET instead to position the code relative to a named entity.")    
     parts.append("")
     parts.append("**MODE 2: DIFF_REPLACE** — Surgical substitution of specific lines INSIDE an entity body, or replacing standalone global variables.")
     parts.append("Required fields:")
     parts.append("• TARGET_CLASS — Name of the struct/type that acts as the method receiver (required for Go methods, skip for plain functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for search (optional but recommended)")
     parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• IMPORTANT: Use DIFF_REPLACE only when REPLACE_PATTERN is unique within the target (method/function/file). If the same line(s) appear more than once, or if you cannot capture the exact boundaries, switch to DIFF_REPLACE_TARGET and replace the whole method/function/class. This avoids ambiguity and broken syntax.")    
+    parts.append("")
+    parts.append("🚫 NEVER split compound statements (if/for/switch/select, struct/slice/map literals).")
+    parts.append("If you replace any opening part, the REPLACE_PATTERN must include the ENTIRE statement down to its closing brace or terminator (default:).")    
     parts.append("")
     parts.append("**MODE 3: DIFF_REPLACE_TARGET** — Complete replacement of a full method, function, or class in its entirety.")
     parts.append("Required fields:")
@@ -5917,7 +5952,9 @@ def _get_go_prompt_injection() -> str:
     parts.append("")
     parts.append("⚠️ CRITICAL RULES FOR GO:")
     parts.append("1. REPLACE_PATTERN: MUST be the exact, complete sequence of lines to be replaced. Do NOT truncate the pattern to only the first line.")
-    parts.append("2. ADDING NEW ENTITIES: When adding a new method, function, or struct:")
+    parts.append("2. BRACES ALIGNMENT: The code you output must exactly match the braces structure of what you replace. If you remove a block that includes its surrounding braces, your REPLACE_PATTERN must include those braces. If you keep the existing outer braces, do NOT include them in the replacement code.")    
+    parts.append("3. SCOPE: Function and method definitions (func) belong at module or struct level. Never insert a func inside another function’s body. If asked to add a new function/method, position it between existing top‑level or struct methods, not inside any function body.")    
+    parts.append("4. ADDING NEW ENTITIES: When adding a new method, function, or struct:")
     parts.append("   - Use DIFF_INSERT_TARGET to position it relative to an existing entity by name.")
     parts.append("   - Example: MODE: DIFF_INSERT_TARGET, INSERT_AFTER_TARGET: GetUser")
     parts.append("   - NEVER use DIFF_INSERT inside a function body to add another method (nesting is illegal in Go).")
@@ -5968,7 +6005,26 @@ def _get_go_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
-    parts.append("**Example 4: REPLACE_FILE — Create new Go file (full content)**")
+    
+    
+    parts.append("")
+    parts.append("**Example 4: DIFF_INSERT_TARGET: new function after an existing one:**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/service.go")
+    parts.append("MODE: DIFF_INSERT_TARGET")
+    parts.append("INSERT_AFTER_TARGET: GetUser")
+    parts.append("")
+    parts.append("```go")
+    parts.append("func ListUsers(limit int) ([]User, error) {")
+    parts.append("    // implementation")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")    
+    
+    
+    parts.append("**Example 5: REPLACE_FILE — Create new Go file (full content)**")
     parts.append("```")
     parts.append("### CODE_BLOCK")
     parts.append("FILE: internal/utils/validators.go")
@@ -5989,7 +6045,7 @@ def _get_go_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
-    parts.append("**Example 5: DIFF_REPLACE_TARGET — Completely replace an entire function**")
+    parts.append("**Example 6: DIFF_REPLACE_TARGET — Completely replace an entire function**")
     parts.append("```")
     parts.append("### CODE_BLOCK")
     parts.append("FILE: internal/handlers/user.go")
@@ -6008,6 +6064,30 @@ def _get_go_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    # --- Многострочный пример DIFF_REPLACE (ломает однострочный стереотип) ---
+    parts.append("")
+    parts.append("**Example – multi-line REPLACE_PATTERN (mandatory when replacing blocks):**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/service.go")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_FUNCTION: FetchData")
+    parts.append("REPLACE_PATTERN: if cached {")
+    parts.append("    return cache")
+    parts.append("}")
+    parts.append("")
+    parts.append("```go")
+    parts.append("if cached {")
+    parts.append("    log.Println(\"cache hit\")")
+    parts.append("    return cache")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("⚠️ This example is here to break the single-line habit: REPLACE_PATTERN MUST span all lines you want to remove.")
+    parts.append("")    
+    
     
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
@@ -6276,6 +6356,17 @@ def _get_python_prompt_injection() -> str:
     parts.append("| ADD_NEW_FUNCTION | Add new global function | (none) |")
     parts.append("")
     
+    parts.append("")
+    parts.append("🗑️ DELETING CODE (commenting out)")
+    parts.append("-" * 40)
+    parts.append("To delete any code, replace it with commented‑out lines using '#' (soft delete).")
+    parts.append("Use the STANDARD replacement modes, for example:")
+    parts.append("  • Delete a METHOD → REPLACE_METHOD with commented‑out body")
+    parts.append("  • Delete code INSIDE a method → REPLACE_IN_METHOD with commented‑out lines")
+    parts.append("Apply the same pattern to functions, classes, attributes, etc.")
+    parts.append("NEVER use REPLACE_GLOBAL for deletions inside classes or functions.")
+    parts.append("")    
+    
     
     parts.append("MODE DESCRIPTIONS")
     parts.append("-" * 20)
@@ -6305,7 +6396,7 @@ def _get_python_prompt_injection() -> str:
     # Imports & Globals
     parts.append("INSERT_IMPORT: Adds a new import statement. Use for ensuring necessary dependencies are present.")
     parts.append("REPLACE_IMPORT: Replaces an existing import line. Use for updating library paths or alias changes.")
-    parts.append("REPLACE_GLOBAL: Replaces a specific global variable or constant. Use for updating top-level assignments.")
+    parts.append("REPLACE_GLOBAL: Replaces a specific global variable or constant. Use for updating top-level assignments. (NOT for methods/functions/classes)")
     
     parts.append("")    
     
