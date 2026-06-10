@@ -640,6 +640,53 @@ CHECK_SECURITY_TOOL: Dict[str, Any] = {
 }
 
 # ============================================================================
+# READ LINE CONTEXT TOOL
+# ============================================================================
+
+READ_LINE_CONTEXT_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_line_context",
+        "description": (
+            "Read context lines around a specific location in a file. "
+            "Target can be identified by line_number OR a text pattern (first match). "
+            "Supports three directions: 'before', 'after', or 'both'. "
+            "Resolves content through VFS first to see staged changes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to file relative to project root."
+                },
+                "line_number": {
+                    "type": "integer",
+                    "description": "Target line number (1-based). Takes precedence over pattern."
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Text pattern to search for. First exact match determines target line."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of context lines to show in each direction. Default: 5.",
+                    "default": 5,
+                    "minimum": 0
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["before", "after", "both"],
+                    "description": "Which context to return relative to target. Default: 'after'.",
+                    "default": "after"
+                }
+            },
+            "required": ["file_path"]
+        }
+    }
+}
+
+# ============================================================================
 # EXTRACT MEDIA TOOL
 # ============================================================================
 EXTRACT_MEDIA_TOOL: Dict[str, Any] = {
@@ -739,10 +786,11 @@ ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
     LIST_INSTALLED_PACKAGES_TOOL,
     INSTALL_DEPENDENCY_TOOL,
     SEARCH_PYPI_TOOL,
-    FETCH_WEBPAGE_TOOL,      # <-- добавить
-    ANALYZE_WEBPAGE_TOOL,    # <-- добавить
-    CHECK_SECURITY_TOOL,     # <-- добавить
-    EXTRACT_MEDIA_TOOL,      # <-- добавить
+    FETCH_WEBPAGE_TOOL,
+    ANALYZE_WEBPAGE_TOOL,
+    CHECK_SECURITY_TOOL,
+    EXTRACT_MEDIA_TOOL,
+    READ_LINE_CONTEXT_TOOL,
 ]
 
 
@@ -768,7 +816,8 @@ def get_tool_by_name(name: str) -> Dict[str, Any]:
         "fetch_webpage": FETCH_WEBPAGE_TOOL,        # <-- добавить
         "analyze_webpage": ANALYZE_WEBPAGE_TOOL,    # <-- добавить
         "check_security": CHECK_SECURITY_TOOL,      # <-- добавить
-        "extract_media": EXTRACT_MEDIA_TOOL,        # <-- добавить
+"extract_media": EXTRACT_MEDIA_TOOL,
+        "read_line_context": READ_LINE_CONTEXT_TOOL,
     }
     if name not in tools_map:
         raise ValueError(f"Unknown tool: {name}")
@@ -794,5 +843,6 @@ def get_tool_names() -> List[str]:
         "fetch_webpage",        # <-- добавить
         "analyze_webpage",       # <-- добавить
         "check_security",        # <-- добавить
-        "extract_media",         # <-- добавить
+"extract_media",
+        "read_line_context",
     ]

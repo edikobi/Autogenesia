@@ -11,6 +11,7 @@ import logging
 from typing import Dict, Any, Optional, Callable
 from pathlib import Path
 from app.advice.advice_loader import execute_get_advice
+from app.tools.read_line_context import read_line_context_tool
 
 from app.tools.read_file import read_file_tool
 from app.tools.list_files import list_files_tool
@@ -87,27 +88,21 @@ class ToolExecutor:
             if tool_name in self._custom_tools:
                 return self._custom_tools[tool_name](**arguments)
             
-            
             # Built-in tools
-            if tool_name == "read_code_chunk": # Добавили блок
+            if tool_name == "read_code_chunk":
                 return self._execute_read_code_chunk(arguments)
             elif tool_name == "list_files":
                 return self._execute_list_files(arguments)
             elif tool_name == "read_file":
                 return self._execute_read_file(arguments)
-           
             if tool_name == "read_file":
-                return self._execute_read_file(arguments)
-            
+               return self._execute_read_file(arguments) 
             elif tool_name == "search_code":
                 return self._execute_search_code(arguments)
-            
             elif tool_name == "web_search":
                 return self._execute_web_search(arguments)
-            
             elif tool_name == "get_advice":
                 return self._execute_get_advice(arguments)
-            
             elif tool_name == "list_installed_packages":
                 return self._execute_list_installed_packages(arguments)
             elif tool_name == "install_dependency":
@@ -122,10 +117,12 @@ class ToolExecutor:
                 return self._execute_check_security(arguments)
             elif tool_name == "extract_media":
                 return self._execute_extract_media(arguments)
-            elif tool_name == "grep_search": 
+            elif tool_name == "grep_search":
                 return self._execute_grep_search(arguments)
             elif tool_name == "show_file_relations":
-                 return self._execute_show_file_relations(arguments)
+                return self._execute_show_file_relations(arguments)
+            elif tool_name == "read_line_context":
+                return self._execute_read_line_context(arguments)
             else:
                 return self._format_error(f"Unknown tool: {tool_name}")
                 
@@ -410,6 +407,23 @@ class ToolExecutor:
 
     def _execute_extract_media(self, arguments: Dict[str, Any]) -> str:
         return extract_media_tool(**arguments)
+
+    def _execute_read_line_context(self, arguments: Dict[str, Any]) -> str:
+        """
+        Execute read_line_context tool.
+        
+        Provides context around a specific line or pattern, resolving through VFS first.
+        """
+        return read_line_context_tool(
+            file_path=arguments.get("file_path", ""),
+            line_number=arguments.get("line_number"),
+            pattern=arguments.get("pattern"),
+            context_lines=arguments.get("context_lines", 5),
+            direction=arguments.get("direction", "after"),
+            project_dir=self.project_dir,
+            virtual_fs=self.virtual_fs
+        )
+
 
     def register_tool(self, name: str, func: Callable) -> None:
         """
