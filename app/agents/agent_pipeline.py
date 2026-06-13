@@ -108,6 +108,9 @@ def _load_compact_index_md(project_dir: str) -> str:
     logger.warning(f"compact_index.md not found at {compact_md_path}")
     return "[Project index not available. Please run indexing first.]"
 
+class ValidationToolchainError(Exception):
+    """Raised when BOTH the primary (pyright) and fallback (ruff) Python structural validators are unavailable, crash, time out, or return unreadable output. This is a hard, user-facing failure: the validation toolchain itself is non-functional, so the pipeline cannot guarantee code integrity and must stop with a clear message instead of silently looping."""
+    pass
 
 # ============================================================================
 # ENUMS & DATA STRUCTURES
@@ -3768,10 +3771,17 @@ Remember: You can override the validator if you believe the critique is incorrec
                 is_pre_broken, _, error_details = self._check_tree_structure_broken(
                     parser_obj, content, language=lang_name, file_path=path
                 )
+            except ValidationToolchainError:
+                # Validation toolchain (pyright + ruff) is non-functional — propagate
+                # so the specific error reaches the user instead of becoming a generic
+                # "syntax error" that loops the pipeline.
+                raise
             except Exception as e:
                 logger.error(f"Phase 0 Validation crash for {path}: {e}")
                 is_pre_broken = True
                 error_details = [f"System error during integrity check: {str(e)}"]
+            
+            
             
             if is_pre_broken:
                 msg = f"Phase 0: File {path} already corrupted. Details: {error_details}"
@@ -4368,7 +4378,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                         cwd=temp_root,
                         timeout=120
                     )
-                    data = json.loads(result.stdout)
+                    data = json.loads(self._sanitize_pyright_json(result.stdout))
 
                     # Normalize the target path for matching diagnostics to our file.
                     norm_target = os.path.normcase(os.path.abspath(target_file))
@@ -4442,7 +4452,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                                 cwd=temp_root,
                                 timeout=120
                             )
-                            baseline_data = json.loads(result_b.stdout)
+                            baseline_data = json.loads(self._sanitize_pyright_json(result_b.stdout))
                             
                             # Collect baseline critical diagnostics and build signature set
                             base_critical, _base_warn = _collect_diags(baseline_data)
@@ -4470,20 +4480,68 @@ Remember: You can override the validator if you believe the critique is incorrec
                     if warning_formatted:
                         logger.info(f"Pyright non-blocking warnings ({len(warning_formatted)}): {warning_formatted[:10]}")
 
-                except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-                    # FALLBACK path: pycodestyle (pyright unavailable / unparseable).
-                    logger.warning(f"pyright unavailable, falling back to pycodestyle: {e}")
-                    self._check_with_pycodestyle(target_file, error_details)
+                except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                    # FALLBACK path: ruff (pyright unavailable).
+                    logger.warning(f"pyright unavailable, falling back to Ruff (E9): {e}")
+                    pyright_failure_reason = str(e)
+                    _details_before_ruff = len(error_details)
+                    self._check_with_ruff_fallback(target_file, error_details)
+                    # Detect whether ruff ITSELF failed: _check_with_ruff_fallback appends a
+                    # sentinel starting with "System evaluation error (ruff" only when ruff is
+                    # unavailable / timed out / crashed. Real syntax findings never start with
+                    # that prefix. If pyright failed AND ruff also failed -> hard toolchain error.
+                    _ruff_new_entries = error_details[_details_before_ruff:]
+                    _ruff_failed = any(
+                        entry.startswith("System evaluation error (ruff")
+                        for entry in _ruff_new_entries
+                    )
+                    if _ruff_failed:
+                        raise ValidationToolchainError(
+                            "Both pyright and ruff failed to produce readable output. "
+                            f"pyright error: {pyright_failure_reason}. "
+                            f"ruff error: {'; '.join(_ruff_new_entries)}. "
+                            "Validation toolchain is non-functional — cannot verify code integrity."
+                        )
 
+
+                        
+                except json.JSONDecodeError as e:
+                    # pyright output was not valid JSON (even after sanitization) - fallback to ruff
+                    logger.warning(f"pyright output was not valid JSON, falling back to Ruff (E9): {e}")
+                    pyright_failure_reason = str(e)
+                    _details_before_ruff = len(error_details)
+                    self._check_with_ruff_fallback(target_file, error_details)
+                    _ruff_new_entries = error_details[_details_before_ruff:]
+                    _ruff_failed = any(
+                        entry.startswith("System evaluation error (ruff")
+                        for entry in _ruff_new_entries
+                    )
+                    if _ruff_failed:
+                        raise ValidationToolchainError(
+                            "Both pyright and ruff failed to produce readable output. "
+                            f"pyright JSON error: {pyright_failure_reason}. "
+                            f"ruff error: {'; '.join(_ruff_new_entries)}. "
+                            "Validation toolchain is non-functional — cannot verify code integrity."
+                        )
+
+
+            except ValidationToolchainError:
+                # Hard toolchain failure (both pyright AND ruff dead): must propagate
+                # to the caller and ultimately to the user. Do NOT downgrade to a
+                # generic syntax/error string. The finally block below still cleans up.
+                raise
+            
             except Exception as e:
                 logger.error(f"Error during Python integrity check: {e}")
-                error_details.append(f"System evaluation error (pyright/pycodestyle): {str(e)}")
+                error_details.append(f"System evaluation error (pyright/ruff): {str(e)}")
             finally:
                 if temp_root and os.path.isdir(temp_root):
                     try:
                         shutil.rmtree(temp_root, ignore_errors=True)
                     except Exception:
                         pass
+        
+        
         else:
             # 2. Non-Python: Tree-sitter ERROR and MISSING nodes
             # parser.validate_syntax already checks for ERROR nodes
@@ -4509,52 +4567,75 @@ Remember: You can override the validator if you believe the critique is incorrec
 
         return False, "NONE", []
     
+    @staticmethod
+    def _sanitize_pyright_json(raw_text: str) -> str:
+        """Sanitize raw pyright (or ruff) stdout before json.loads(). Strips surrounding whitespace and a leading UTF-8 BOM, then extracts the embedded JSON object so CLI banners/warnings around it do not corrupt parsing. Returns a string intended to be fed directly to json.loads(); when no recoverable JSON object is present it returns the cleaned text as-is (or empty string), so the caller's existing json.JSONDecodeError fallback still fires."""
+        if not raw_text:
+            return ""
+        text = raw_text.strip()
+        if text.startswith('\ufeff'):
+            text = text[1:]
+            text = text.strip()
+        if not text:
+            return ""
+        if text.startswith('{') and text.endswith('}'):
+            return text
+        first = text.find('{')
+        last = text.rfind('}')
+        if first != -1 and last != -1 and last > first:
+            return text[first:last + 1]
+        return text
     
-    def _check_with_pycodestyle(self, tmp_path: str, error_details: List[str]) -> None:
-            """
-            Fallback structural check using pycodestyle (lazily imported).
-            Appends critical syntax/indentation violations to error_details in place.
-            """
-            try:
-                import pycodestyle
-            except ImportError as e:
-                logger.error(f"pycodestyle fallback unavailable: {e}")
-                error_details.append(f"System evaluation error (pycodestyle unavailable): {str(e)}")
-                return
+    
+    def _check_with_ruff_fallback(self, tmp_path: str, error_details: List[str]) -> None:
+        """
+        Fallback structural check using Ruff (E9 rules only: syntax/compilation-breaking errors — E901, E902, E999).
+        Invoked ONLY when pyright is unavailable or returns unparseable output.
+        `--select E9` enables exclusively the E9 prefix (all other rules strictly disabled);
+        `--isolated` ignores any project ruff config so the selection can't be overridden.
+        Appends critical syntax violations to error_details in place; mutates the list and returns None.
+        """
+        import subprocess
+        import json
 
-            # Mapping of codes to human-readable structural failure types
-            CODE_MAPPING = {
-                'E901': 'Fatal Syntax Error / Token Error',
-                'E101': 'Indentation Error: Mixed spaces and tabs (Fatal in Python 3)',
-                'E112': 'Indentation Error: Expected an indented block',
-                'E113': 'Indentation Error: Unexpected indentation',
-                'E902': 'System Error: Unreadable file (IOError)'
-            }
-
-            # Custom reporter to capture errors in a list
-            class ErrorReporter(pycodestyle.BaseReport):
-                def __init__(self, options):
-                    super().__init__(options)
-                    self.results = []
-
-                def error(self, line_number, offset, text, check):
-                    code = super().error(line_number, offset, text, check)
-                    if code:
-                        desc = CODE_MAPPING.get(code, "Structural anomaly")
-                        self.results.append(f"Line {line_number}:{offset} - {code}: {desc} ({text})")
-                    return code
-
-            # Select only critical nesting/syntax/structural errors
-            guide = pycodestyle.StyleGuide(
-                select=['E901', 'E101', 'E112', 'E113', 'E902'],
-                quiet=True,
-                reporter=ErrorReporter
+        try:
+            result = subprocess.run(
+                ["ruff", "check", "--select", "E9", "--output-format", "json", "--isolated", tmp_path],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=60
             )
 
-            report = guide.check_files([tmp_path])
+            if not result.stdout or not result.stdout.strip():
+                return
 
-            if report.total_errors > 0:
-                error_details.extend(report.results)
+            diagnostics = json.loads(result.stdout)
+
+            for diag in diagnostics:
+                code = diag.get("code", "E999")
+                message = diag.get("message", "Unknown error")
+                location = diag.get("location", {})
+                row = location.get("row", "?")
+                column = location.get("column", "?")
+                error_details.append(f"Line {row}:{column} - {code}: {message}")
+
+        except FileNotFoundError as e:
+            logger.error(f"ruff binary not found: {e}")
+            error_details.append(f"System evaluation error (ruff unavailable): {str(e)}")
+            return
+        except subprocess.TimeoutExpired as e:
+            logger.warning(f"ruff check timed out: {e}")
+            error_details.append("System evaluation error (ruff timeout)")
+            return
+        except json.JSONDecodeError as e:
+            logger.warning(f"ruff output was unparseable: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Error during ruff fallback check: {e}")
+            error_details.append(f"System evaluation error (ruff fallback): {str(e)}")
+
     
     def _materialize_vfs_for_pyright(self) -> str:
         """

@@ -2229,6 +2229,38 @@ class FileModifier:
             except Exception as e:
                 logger.debug(f"Error validating syntax: {e}")
                 return (True, [])
+
+    def _smart_validate_multilang(self, content: str, language: str) -> bool:
+        """
+        Fast post-validation for the smart non-Python path.
+        Detects both ERROR and MISSING tree-sitter nodes.
+        """
+        try:
+            parser = MultiLanguageParser()
+            ts_parser, _ = parser._get_parser_for_language(language)
+            tree = ts_parser.parse(content.encode('utf-8'))
+            
+            has_error = False
+            
+            def walk_tree(node) -> bool:
+                nonlocal has_error
+                if has_error:
+                    return False
+                if node.type == 'ERROR' or getattr(node, 'is_missing', False) is True:
+                    has_error = True
+                    return False
+                for child in node.children:
+                    walk_tree(child)
+                return not has_error
+                
+            walk_tree(tree.root_node)
+            return not has_error
+        except ValueError:
+            return True
+        except Exception as e:
+            logger.debug(f"Smart multilang validation failed with exception: {e}")
+            return False
+
     
     def validate_vfs_state(
         self, 
@@ -3500,6 +3532,117 @@ class FileModifier:
         except Exception as e:
             logger.debug(f"Tree-sitter statement search failed: {e}")
             return None, None, None
+
+    def _find_anchor_node_python(self, method_text: str, anchor: str) -> Optional[Dict[str, Any]]:
+        """
+        Resolve the minimal statement/block-level node matching the anchor and return
+        the line-based indentation (leading whitespace of the source line), with
+        comment/blank-line protection.
+        
+        Returns a dict with keys: node_type, start_line, end_line, indent, text.
+        Returns None if no valid statement-level candidate is found or on any error.
+        """
+        parser = _get_tree_sitter_parser()
+        if not parser:
+            return None
+        try:
+            parse_result = parser.parse(method_text)
+            if not parse_result.root_node:
+                return None
+            
+            anchor_normalized = ' '.join(anchor.split()).strip()
+            if not anchor_normalized:
+                return None
+            
+            # Statement/block-level node types that are valid candidates
+            STATEMENT_TYPES = {
+                'expression_statement', 'function_definition', 'class_definition',
+                'if_statement', 'for_statement', 'while_statement', 'with_statement',
+                'try_statement', 'return_statement', 'assignment', 'decorated_definition',
+                'block',
+            }
+            
+            def _is_statement_node(node_type: str) -> bool:
+                """Check if a node type is a statement/block-level type."""
+                if 'statement' in node_type:
+                    return True
+                if node_type in STATEMENT_TYPES:
+                    return True
+                return False
+            
+            source_lines = method_text.splitlines()
+            
+            best_node = None
+            best_span = float('inf')
+            best_is_exact = False
+            
+            def traverse(node):
+                nonlocal best_node, best_span, best_is_exact
+                
+                # Skip comment nodes
+                if node.type == 'comment':
+                    return
+                
+                # Get node text
+                node_bytes = method_text.encode('utf-8')[node.start_byte:node.end_byte]
+                node_text = node_bytes.decode('utf-8', errors='ignore')
+                
+                # Skip blank/whitespace-only nodes
+                if not node_text.strip():
+                    return
+                
+                # Only consider statement/block-level nodes as candidates
+                if _is_statement_node(node.type):
+                    node_normalized = ' '.join(node_text.split()).strip()
+                    
+                    is_exact = (node_normalized == anchor_normalized)
+                    is_containing = (anchor_normalized in node_normalized)
+                    
+                    if is_exact or is_containing:
+                        span = node.end_byte - node.start_byte
+                        if is_exact:
+                            if not best_is_exact or span < best_span:
+                                best_node = node
+                                best_span = span
+                                best_is_exact = True
+                        else:
+                            if not best_is_exact and span < best_span:
+                                best_node = node
+                                best_span = span
+                
+                # Always traverse children (even for non-statement nodes)
+                for child in node.children:
+                    traverse(child)
+            
+            traverse(parse_result.root_node)
+            
+            if best_node is not None:
+                start_line_idx = best_node.start_point[0]
+                
+                # Edge case: if start_line is out of range of split lines
+                if start_line_idx < 0 or start_line_idx >= len(source_lines):
+                    return None
+                
+                # Compute indent from the actual source line's leading whitespace
+                source_line = source_lines[start_line_idx]
+                indent = len(source_line) - len(source_line.lstrip())
+                
+                node_bytes = method_text.encode('utf-8')[best_node.start_byte:best_node.end_byte]
+                node_text = node_bytes.decode('utf-8', errors='ignore')
+                
+                return {
+                    'node_type': best_node.type,
+                    'start_line': best_node.start_point[0],
+                    'end_line': best_node.end_point[0],
+                    'indent': indent,
+                    'text': node_text
+                }
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Error in _find_anchor_node_python: {e}")
+            return None
+
     
     
     # ========================================================================
@@ -5173,3 +5316,258 @@ class FileModifier:
     
     def __repr__(self) -> str:
         return f"FileModifier(default_indent={self.default_indent})"
+
+    def _count_braces_ignoring_strings(self, text: str) -> Tuple[int, int]:
+        """
+        Count opening and closing braces in text, ignoring characters inside
+        string literals and comments.
+        """
+        open_count = 0
+        close_count = 0
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i:i+2] == '//':
+                while i < n and text[i] != '\n':
+                    i += 1
+                continue
+            if text[i:i+2] == '/*':
+                i += 2
+                while i < n and text[i:i+2] != '*/':
+                    i += 1
+                i += 2
+                continue
+            if text[i] in ('"', "'", '`'):
+                quote_char = text[i]
+                i += 1
+                while i < n and text[i] != quote_char:
+                    if text[i] == '\\':
+                        i += 2
+                    else:
+                        i += 1
+                i += 1
+                continue
+            if text[i] == '{':
+                open_count += 1
+            elif text[i] == '}':
+                close_count += 1
+            i += 1
+        return open_count, close_count
+
+    def _normalize_multilang_code(self, existing_content: str, instruction: 'MultiLangDiffInstruction', is_replace: bool) -> Optional[ModifyResult]:
+        """
+        Smart non-Python (JS/TS, Go, Java) insertion/replacement with brace-balance correction
+        and tree-sitter ERROR/MISSING post-validation.
+        """
+        try:
+            if instruction.language not in ['javascript', 'typescript', 'go', 'java']:
+                return None
+                
+            lines = existing_content.splitlines()
+            
+            anchor = None
+            if is_replace:
+                anchor = instruction.replace_pattern
+            else:
+                anchor = instruction.insert_after or instruction.insert_before
+                
+            start_line = 0
+            end_line = len(lines)
+            
+            if anchor:
+                anchor_res = self._find_unique_anchor(lines, anchor, start_line, end_line)
+                if not anchor_res['found'] or not anchor_res['unique']:
+                    return None
+                match_start = anchor_res['line_number']
+                match_end = anchor_res['match_end']
+            else:
+                from app.services.tree_sitter_parser import MultiLanguageParser
+                parser = MultiLanguageParser()
+                source_bytes = existing_content.encode('utf-8')
+                target_info = self._find_multilang_target(
+                    parser,
+                    source_bytes,
+                    instruction.language,
+                    instruction.target_class,
+                    instruction.target_method,
+                    instruction.target_function
+                )
+                if not target_info or 'error' in target_info:
+                    return None
+                match_start = target_info['start_line'] - 1
+                match_end = target_info['end_line']
+                
+            open_c, close_c = self._count_braces_ignoring_strings(instruction.code)
+            corrected_code = instruction.code
+            if open_c > close_c:
+                corrected_code = corrected_code + '\n}'
+            elif close_c > open_c:
+                last_idx = corrected_code.rfind('}')
+                if last_idx != -1:
+                    corrected_code = corrected_code[:last_idx] + corrected_code[last_idx+1:]
+                    
+            new_code_lines = corrected_code.splitlines()
+            
+            if is_replace:
+                modified_lines = lines[:match_start] + new_code_lines + lines[match_end:]
+                lines_removed = match_end - match_start
+                insert_pos = match_start
+            else:
+                if instruction.insert_after:
+                    insert_pos = match_end
+                elif instruction.insert_before:
+                    insert_pos = match_start
+                else:
+                    insert_pos = match_end
+                modified_lines = lines[:insert_pos] + new_code_lines + lines[insert_pos:]
+                lines_removed = 0
+                
+            modified_content = '\n'.join(modified_lines)
+            
+            if not self._smart_validate_multilang(modified_content, instruction.language):
+                return None
+                
+            if is_replace:
+                message = f"Smart replaced non-Python code in {instruction.file_path}"
+                changes_made = [f"Smart replaced lines {match_start + 1}-{match_end} with corrected code"]
+            else:
+                message = f"Smart inserted non-Python code in {instruction.file_path}"
+                changes_made = [f"Smart inserted corrected code at line {insert_pos + 1}"]
+                
+            return ModifyResult(
+                success=True,
+                new_content=modified_content,
+                message=message,
+                changes_made=changes_made,
+                lines_added=len(new_code_lines),
+                lines_removed=lines_removed
+            )
+        except Exception as e:
+            logger.debug(f"Smart multilang code modification failed with exception: {e}")
+            return None
+
+def _normalize_python_code(self, existing_content: str, instruction: ModifyInstruction, is_replace: bool) -> Optional[ModifyResult]:
+    """
+    Apply the smart edit using the corrected line-based indentation and guarantee
+    ast.parse() post-validation with non-destructive fallback.
+    
+    Returns ModifyResult on success, or None to signal fallback to the standard
+    pipeline with the original unmodified instruction.code.
+    """
+    try:
+        target_class = instruction.target_class
+        target_method = instruction.target_method.strip().rstrip('()') if instruction.target_method else None
+        if not target_method:
+            return None
+        
+        ts_parser = _get_tree_sitter_parser()
+        if not ts_parser:
+            return None
+        
+        parse_result = ts_parser.parse(existing_content)
+        if target_class:
+            method_info = parse_result.get_method(target_class, target_method)
+        else:
+            method_info = parse_result.get_function(target_method)
+        
+        if not method_info:
+            return None
+        
+        method_start = method_info.span.start_line - 1
+        method_end = method_info.span.end_line
+        lines = existing_content.splitlines(keepends=True)
+        method_lines = lines[method_start:method_end]
+        method_text = ''.join(method_lines)
+        
+        # Determine anchor text based on mode
+        if is_replace:
+            anchor = instruction.replace_pattern
+        else:
+            anchor = instruction.insert_before or instruction.insert_after
+        
+        if not anchor:
+            return None
+        
+        # Find the anchor node (now returns line-based indent from source line)
+        anchor_node = self._find_anchor_node_python(method_text, anchor)
+        if not anchor_node:
+            return None
+        
+        # target_indent is now the matched statement line's leading-whitespace count
+        target_indent = anchor_node['indent']
+        
+        # Code re-indentation: dedent then prepend base indent preserving relative indentation
+        dedented_code = textwrap.dedent(instruction.code)
+        dedented_code = dedented_code.rstrip('\r\n')
+        
+        indent_prefix = ' ' * target_indent
+        normalized_lines = []
+        for line in dedented_code.splitlines():
+            if line.strip():
+                # Prepend base indent, preserving the line's own relative inner indentation
+                normalized_lines.append(indent_prefix + line)
+            else:
+                # Empty lines remain empty (blank-line protection)
+                normalized_lines.append('')
+        normalized_code = '\n'.join(normalized_lines)
+        
+        # Compute absolute line positions
+        node_start_abs = method_start + anchor_node['start_line']
+        node_end_abs = method_start + anchor_node['end_line']
+        
+        if is_replace:
+            # Replace mode: replace inclusive line span node_start_abs..node_end_abs
+            new_lines = lines[:node_start_abs] + [normalized_code + '\n'] + lines[node_end_abs + 1:]
+            lines_removed = node_end_abs - node_start_abs + 1
+            start_line = node_start_abs
+            end_line = node_start_abs + len(normalized_code.splitlines())
+        else:
+            # Insert mode: anchor node is guaranteed statement-level
+            if instruction.insert_after:
+                # Insert AFTER node_end_abs
+                insert_pos = node_end_abs + 1
+            else:
+                # Insert BEFORE node_start_abs
+                insert_pos = node_start_abs
+            new_lines = lines[:insert_pos] + [normalized_code + '\n'] + lines[insert_pos:]
+            lines_removed = 0
+            start_line = insert_pos
+            end_line = insert_pos + len(normalized_code.splitlines())
+        
+        new_content = ''.join(new_lines)
+        
+        # Mandatory post-validation: ast.parse must succeed
+        # If it raises ANY exception (SyntaxError, IndentationError, etc.), return None
+        # to trigger non-destructive fallback to the standard pipeline
+        ast.parse(new_content)
+        
+        # Success path: update _last_inserted_block and return ModifyResult
+        FileModifier._last_inserted_block = {
+            "start_line": start_line,
+            "end_line": end_line,
+            "code": normalized_code,
+            "target_indent": target_indent
+        }
+        
+        target_name = f"{target_class}.{target_method}" if target_class else target_method
+        if is_replace:
+            message = f"Smart replaced code in '{target_name}'"
+            changes_made = [f"Smart replaced lines {node_start_abs + 1}-{node_end_abs + 1} in {target_name}"]
+        else:
+            action_str = "after" if instruction.insert_after else "before"
+            message = f"Smart inserted code {action_str} anchor in '{target_name}'"
+            changes_made = [f"Smart inserted code {action_str} anchor at line {start_line + 1} in {target_name}"]
+        
+        return ModifyResult(
+            success=True,
+            new_content=new_content,
+            message=message,
+            changes_made=changes_made,
+            lines_added=len(normalized_code.splitlines()),
+            lines_removed=lines_removed
+        )
+    except Exception as e:
+        logger.debug(f"Smart Python code modification failed with exception: {e}")
+        return None
+
+
