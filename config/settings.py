@@ -65,14 +65,14 @@ class Config:
 # Gemini 2.0 Flash (для роутера и сжатия истории)
     MODEL_GEMINI_2_FLASH = "google/gemini-2.0-flash-001"
     
-    # Gemini 2.5 Flash-Lite
-    MODEL_GEMINI_FLASH_LITE = "google/gemini-2.5-flash-lite-preview-09-2025"
+    # Gemini 3.1 Flash-Lite (я тут менял)
+    MODEL_GEMINI_FLASH_LITE = "google/gemini-3.1-flash-lite"
     
     MODEL_Gemma_4_31B = "google/gemma-4-31b-it"
     
     MODEL_GLM_5_1 = "z-ai/glm-5.1"
     
-    MODEL_Kimi_K_2_6 = "moonshotai/kimi-k2.6"
+    MODEL_Kimi_K_2_7_Code = "moonshotai/kimi-k2.7-code"
     
 # !!! НОВАЯ МОДЕЛЬ QWEN3 MAX THINKING !!!
     MODEL_QWEN_3_7_MAX = "qwen/qwen3.7-max"    
@@ -90,10 +90,10 @@ class Config:
     # ============ НОВЫЕ МОДЕЛИ ГЕНЕРАТОРА (OpenRouter) ============
     MODEL_GLM_5_Turbo = "z-ai/glm-5-turbo"                # GLM 4.7
     MODEL_HAIKU_4_5 = "anthropic/claude-haiku-4.5" # Claude Haiku 4.5
-    MODEL_GEMINI_3_FLASH = "google/gemini-3-flash-preview"
+    MODEL_GEMINI_3_FLASH = "google/gemini-3.5-flash"
     MODEL_GPT_5_1_Codex_MINI = "openai/gpt-5.1-codex-mini"
     MODEL_QWEN_3_5 = "qwen/qwen3.5-397b-a17b"
-    MODEL_Grok_4_20 = "x-ai/grok-4.20"
+    MODEL_Grok_4_3 = "x-ai/grok-4.3"
 
     # ============ ПЕРЕКЛЮЧАТЕЛЬ ГЕНЕРАТОРА ============
     # Чтобы сменить модель, просто раскомментируйте нужную строку ниже:
@@ -136,6 +136,18 @@ class Config:
             }
         },
         
+        
+        "google/gemini-3.5-flash": {  # Используем ID модели
+            "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
+            "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
+            "provider_name": "OPENROUTER",    # Название провайдера для отображения
+
+            # ВКЛЮЧАЕМ РЕЖИМ МЫШЛЕНИЯ!
+            # Для OpenAI-совместимых API, таких как OpenRouter, используется параметр reasoning_effort [citation:10].
+            "reasoning": {"effort": "high"}
+        },
+        
+        
         "qwen/qwen3.7-max": {  # Используем ID модели
             "api_key": OPENROUTER_API_KEY,          # Ключ от OpenRouter
             "base_url": OPENROUTER_BASE_URL,        # Базовый URL OpenRouter
@@ -168,7 +180,7 @@ class Config:
             "reasoning": {"effort": "xhigh"}
         },
         
-        "moonshotai/kimi-k2.6": {
+        "moonshotai/kimi-k2.7-code": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
@@ -210,7 +222,7 @@ class Config:
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
-            "reasoning": {"effort": "medium"}
+            "reasoning": {"effort": "high"}
         },
         
         
@@ -290,9 +302,8 @@ class Config:
         "z-ai/glm-5-turbo": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
-            "provider_name": "OpenRouter (Zhipu)",
-            "extra_params": {
-            }
+            "provider_name": "OpenRouter",
+            "reasoning": {"effort": "high"}
         },
         
         # Claude Haiku 4.5 (Thinking)
@@ -300,7 +311,7 @@ class Config:
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter (Anthropic)",
-            "extra_ищвн": {
+            "extra_params": {
                 "thinking": {
                     "type": "enabled",
                     "budget_tokens": 7500  # Сбалансированный бюджет: достаточно для анализа, не избыточно
@@ -308,12 +319,11 @@ class Config:
             }
         },
 
-        "x-ai/grok-4.20": {
+        "x-ai/grok-4.3": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
-            "extra_params": {
-            }
+            "reasoning": {"effort": "xhigh"}
         },
 
         "google/gemini-3-flash-preview": {
@@ -558,7 +568,7 @@ class Config:
             cls.MODEL_QWEN_3_5_Plus,
             cls.MODEL_QWEN_3_7_Plus,
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO,
-            cls.MODEL_Kimi_K_2_6,
+            cls.MODEL_Kimi_K_2_7_Code,
             cls.MODEL_GLM_5_1,
             cls.MODEL_MiniMax_M3,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
@@ -600,15 +610,15 @@ class Config:
             cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
-            cls.MODEL_Kimi_K_2_6: "Kimi K2.5",
+            cls.MODEL_Kimi_K_2_7_Code: "Kimi K2.7 Code",
             cls.MODEL_QWEN_3_7_Plus: "Qwen3.7 Plus",
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO: "Xiaomi: MiMo-V2-Pro",
             cls. MODEL_GLM_5_1: "GLM 5.1",
-            cls.MODEL_MiniMax_M3: "MiniMAX M2.7",
+            cls.MODEL_MiniMax_M3: "MiniMAX M2.3",
             # Модели генератора
-            cls.MODEL_GLM_5_Turbo: "GLM 4.7 (OpenRouter)",
+            cls.MODEL_GLM_5_Turbo: "GLM 5 Turbo (OpenRouter)",
             cls.MODEL_HAIKU_4_5: "Claude Haiku 4.5 (OpenRouter)",
-            cls.MODEL_GEMINI_3_FLASH : "Gemini 3.0 flash",
+            cls.MODEL_GEMINI_3_FLASH : "Gemini 3.5 flash",
             cls.MODEL_GPT_5_1_Codex_MINI : "GPT-5.1-Codex-Mini"
         }
         
