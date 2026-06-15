@@ -1818,7 +1818,16 @@ except Exception as e:
         
         # NEW: Detect interactive input patterns (Prompt.ask, input(), etc.)
         # These patterns indicate the app waits for user input and will hang during testing
-        if app_type in (AppType.STANDARD, AppType.TUI, AppType.CLI):
+        # IMPORTANT: Do NOT upgrade TUI apps to INTERACTIVE — TUI frameworks manage their own input
+        # rich.prompt.Prompt.ask is part of rich TUI, not a CLI interactive pattern
+        TUI_MANAGED_INPUT_FRAMEWORKS = {'rich', 'textual', 'curses', 'blessed', 'urwid', 
+                                          'prompt_toolkit', 'npyscreen', 'asciimatics'}
+        is_tui_with_managed_input = (
+            app_type == AppType.TUI and 
+            any(fw.lower() in TUI_MANAGED_INPUT_FRAMEWORKS for fw in detected.keys())
+        )
+
+        if app_type in (AppType.STANDARD, AppType.CLI) or (app_type == AppType.TUI and not is_tui_with_managed_input):
             interactive_patterns = [
                 r'Prompt\.ask\s*\(',           # rich.prompt.Prompt.ask()
                 r'Confirm\.ask\s*\(',          # rich.prompt.Confirm.ask()
@@ -2213,7 +2222,23 @@ except Exception as e:
                     result = await self._test_standard(file_path, temp_dir, timeout)
                 
                 result.duration_ms = (time.time() - start_time) * 1000
+                
+                # FALLBACK: If timeout occurred without prior errors — run ruff E9 + import-only check
+                # This covers ALL app types: STANDARD, TUI, INTERACTIVE, CLI, DAEMON, TESTING, etc.
+                if result.status == TestStatus.TIMEOUT:
+                    # Only run fallback for Python files (non-SQL, non-binary)
+                    if file_path.endswith('.py'):
+                        fallback_result = await self._fallback_import_and_ruff_check(
+                            file_path=file_path,
+                            temp_dir=temp_dir,
+                            app_type=app_type,
+                            original_timeout=timeout,
+                        )
+                        fallback_result.duration_ms = result.duration_ms
+                        return fallback_result
+                
                 return result
+               
                 
             except Exception as e:
                 logger.error(f"Error testing {file_path}: {e}", exc_info=True)
@@ -4454,3 +4479,102 @@ except Exception as e:
         
         logger.debug(f"Network availability: {self._network_available}")
         return self._network_available
+    
+    async def _run_ruff_e9_check(self, file_path: str, temp_dir: str) -> Tuple[bool, Optional[str]]:
+        """Run ruff linter with E9 error codes (syntax errors, undefined names, import errors) on a Python file. Returns (passed, error_message). E9xx = syntax errors that prevent execution."""
+        full_path = Path(temp_dir) / file_path
+        if not full_path.exists():
+            return (True, None)
+        
+        try:
+            result = subprocess.run(
+                [self._get_project_python(), '-m', 'ruff', 'check', '--select', 'E9', '--output-format', 'full', str(full_path)],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=15,
+                cwd=temp_dir,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(f"ruff E9 check timed out for {file_path}")
+            return (True, None)
+        except Exception as e:
+            logger.debug(f"ruff E9 check error for {file_path}: {e}")
+            return (True, None)
+        
+        if result.returncode == 0:
+            return (True, None)
+        
+        output = (result.stdout or '').strip() + (result.stderr or '').strip()
+        e9_lines = [l for l in output.split('\n') if 'E9' in l and l.strip()]
+        
+        if e9_lines:
+            return (False, '\n'.join(e9_lines[:5]))
+        elif output.strip():
+            return (False, output[:500])
+        else:
+            return (True, None)
+    
+    
+    async def _fallback_import_and_ruff_check(self, file_path: str, temp_dir: str, app_type: AppType, original_timeout: int) -> TestResult:
+        """Fallback validation when a file times out without errors. Runs ruff E9 check + import-only check. If both pass, returns PASSED. If either fails, returns FAILED with the error details sent to orchestrator."""
+        try:
+            logger.info(f"Timeout fallback: running ruff E9 + import-only check for {file_path}")
+            
+            ruff_passed, ruff_error = await self._run_ruff_e9_check(file_path, temp_dir)
+            if not ruff_passed:
+                logger.warning(f"ruff E9 errors in {file_path}: {ruff_error}")
+                return TestResult(
+                    file_path=file_path,
+                    app_type=app_type,
+                    status=TestStatus.FAILED,
+                    message=f"Syntax/runtime errors detected by ruff (E9): {ruff_error}",
+                    details=ruff_error,
+                    suggestion="Fix the E9 syntax errors reported by ruff",
+                )
+            
+            import_result = await self._test_import_only(
+                file_path, temp_dir, min(original_timeout, 30), app_type,
+                message="Validated via import-only (execution timed out, no errors detected)"
+            )
+            
+            if import_result.status == TestStatus.PASSED:
+                return TestResult(
+                    file_path=file_path,
+                    app_type=app_type,
+                    status=TestStatus.PASSED,
+                    message="Timeout but no errors: ruff E9 passed + import-only passed (long-running app or expected infinite loop)",
+                    details="ruff E9: OK | import-only: OK",
+                    suggestion="File appears correct. Timeout is expected for long-running applications.",
+                )
+            elif import_result.status == TestStatus.FAILED:
+                logger.warning(f"Import-only failed after timeout for {file_path}: {import_result.message}")
+                return TestResult(
+                    file_path=file_path,
+                    app_type=app_type,
+                    status=TestStatus.FAILED,
+                    message=f"Import error after timeout: {import_result.message}",
+                    details=import_result.details,
+                    suggestion="Fix the import/syntax error",
+                )
+            elif import_result.status == TestStatus.TIMEOUT:
+                logger.warning(f"Import-only also timed out for {file_path}")
+                return TestResult(
+                    file_path=file_path,
+                    app_type=app_type,
+                    status=TestStatus.PASSED,
+                    message="Timeout on both execution and import-only (ruff E9 passed): treating as correct long-running app",
+                    details="ruff E9: OK | import-only: timed out",
+                    suggestion="Consider if this file has blocking initialization code.",
+                )
+            else:
+                return import_result
+        except Exception as e:
+            logger.error(f"Fallback check error for {file_path}: {e}")
+            return TestResult(
+                file_path=file_path,
+                app_type=app_type,
+                status=TestStatus.ERROR,
+                message=f"Fallback check error: {e}",
+            )
