@@ -3276,10 +3276,26 @@ class FileModifier:
                         context_line_for_indent = line
                         break
         
-        # Indentation calculation removed for PATCH_METHOD as per Plan V14
-        body_indent = 0
-        
-        formatted_code = code
+        if context_line_for_indent and context_line_for_indent.strip():
+            body_indent = len(context_line_for_indent.expandtabs(4)) - len(context_line_for_indent.expandtabs(4).lstrip(' '))
+        else:
+            body_indent = 0
+        if insert_after and is_block_node:
+            body_indent += 4
+        active_anchor = insert_after if insert_after else (insert_before if insert_before else None)
+        active_mode = 'after' if insert_after else ('before' if insert_before else None)
+        if active_anchor and active_anchor.strip() and active_mode is not None:
+            resolved = self._resolve_insertion_indent_python(method_text, active_anchor, active_mode)
+            if resolved is not None:
+                body_indent = resolved
+                logger.debug(f"_patch_method: structural indent resolved={resolved} (mode={active_mode})")
+        formatted_code = self._normalize_block_for_insertion(
+            code,
+            body_indent,
+            file_path=None,
+            method_text=method_text,
+            anchor=active_anchor,
+        )
         
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
@@ -3295,20 +3311,36 @@ class FileModifier:
         insert_content = prefix + formatted_code + '\n'
         lines.insert(absolute_insert_line, insert_content)
         new_content = ''.join(lines)
-        
+
+        # Full-file validation + structural-integrity check + non-destructive fallback
+        emitted_code = formatted_code
+        _syntax_ok = self._validate_full_content(new_content, file_path=None)
+        _struct_ok = _syntax_ok and self._validate_structural_integrity(existing_content, new_content)
+        if not _syntax_ok or not _struct_ok:
+            reason = "syntax" if not _syntax_ok else "structural integrity"
+            logger.debug(
+                f"_patch_method: full-file {reason} validation failed, "
+                f"falling back to original un-normalized block"
+            )
+            insert_content = prefix + code + '\n'
+            lines = existing_content.splitlines(keepends=True)
+            lines.insert(absolute_insert_line, insert_content)
+            new_content = ''.join(lines)
+            emitted_code = code
+
+
+
         # Store inserted block info for SyntaxChecker
         FileModifier._last_inserted_block = {
             "start_line": absolute_insert_line,
-            "end_line": absolute_insert_line + len(formatted_code.splitlines()),
-            "code": formatted_code,
+            "end_line": absolute_insert_line + len(emitted_code.splitlines()),
+            "code": emitted_code,
             "target_indent": body_indent
         }
-        
-        # _validate_and_fix_syntax removed for PATCH_METHOD as per Plan V14
-        
-        added_lines = len(formatted_code.splitlines())
+
+        added_lines = len(emitted_code.splitlines())
         target_name = f"{target_class}.{target_method}" if target_class else target_method
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
@@ -3503,20 +3535,29 @@ class FileModifier:
                 if 'statement' in node.type or 'expression' in node.type:
                     node_text = method_text[node.start_byte:node.end_byte]
                     node_text_normalized = ' '.join(node_text.split()).strip()
-                    
+
                     if node_text_normalized == pattern_normalized:
+                        start_line_idx = node.start_point[0]
+                        source_lines_local = method_text.splitlines()
+                        if 0 <= start_line_idx < len(source_lines_local):
+                            src_line = source_lines_local[start_line_idx]
+                            expanded = src_line.expandtabs(4)
+                            indent = len(expanded) - len(expanded.lstrip(' '))
+                        else:
+                            # Fallback: use tree-sitter column as-is
+                            indent = node.start_point[1]
                         return {
                             'node_type': node.type,
                             'start_line': node.start_point[0],
-                            'indent': node.start_point[1],
+                            'indent': indent,
                             'text': node_text
                         }
-                
+
                 for child in node.children:
                     result = traverse_ast(child)
                     if result:
                         return result
-                
+
                 return None
             
             node_info = traverse_ast(parse_result.root_node)
@@ -3560,6 +3601,13 @@ class FileModifier:
                 'if_statement', 'for_statement', 'while_statement', 'with_statement',
                 'try_statement', 'return_statement', 'assignment', 'decorated_definition',
                 'block',
+                # Clause nodes — critical for else:/elif:/except:/finally: anchors
+                'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
+                'except_group',
+                # augmented assignment and other common statement forms
+                'augmented_assignment', 'assert_statement', 'delete_statement',
+                'raise_statement', 'pass_statement', 'break_statement', 'continue_statement',
+                'import_statement', 'import_from_statement', 'global_statement', 'nonlocal_statement',
             }
             
             def _is_statement_node(node_type: str) -> bool:
@@ -3623,9 +3671,12 @@ class FileModifier:
                 if start_line_idx < 0 or start_line_idx >= len(source_lines):
                     return None
                 
-                # Compute indent from the actual source line's leading whitespace
+                # Compute indent from the actual source line's leading whitespace.
+                # Tab-safe: expand tabs to 4 spaces, then count only leading spaces,
+                # so the emitted ' ' * indent matches Python's column interpretation.
                 source_line = source_lines[start_line_idx]
-                indent = len(source_line) - len(source_line.lstrip())
+                expanded_source_line = source_line.expandtabs(4)
+                indent = len(expanded_source_line) - len(expanded_source_line.lstrip(' '))
                 
                 node_bytes = method_text.encode('utf-8')[best_node.start_byte:best_node.end_byte]
                 node_text = node_bytes.decode('utf-8', errors='ignore')
@@ -3643,6 +3694,273 @@ class FileModifier:
             logger.debug(f"Error in _find_anchor_node_python: {e}")
             return None
 
+    def _resolve_insertion_indent_python(self, method_text: str, anchor: str, mode: str) -> Optional[int]:
+        try:
+            # Guard: clause-keyword anchors must NOT use structural resolution
+            # because tree-sitter maps them to their parent node (if/try),
+            # returning that parent's column — which is wrong for the clause itself.
+            _anchor_stripped = anchor.strip()
+            if not _anchor_stripped:
+                return None
+            _CLAUSE_KEYWORDS = ('else:', 'else :', 'finally:', 'finally :')
+            _is_clause = (
+                _anchor_stripped in _CLAUSE_KEYWORDS
+                or _anchor_stripped.startswith('elif ')
+                or _anchor_stripped.startswith('except ')
+                or _anchor_stripped.startswith('except:')
+            )
+            if _is_clause:
+                logger.debug(
+                    f"_resolve_insertion_indent_python: skipping clause anchor "
+                    f"{_anchor_stripped!r} — structural resolution not applicable"
+                )
+                return None
+
+            # Reuse _find_anchor_node_python which already implements correct
+            # statement-level node finding with partial-match support.
+            anchor_node = self._find_anchor_node_python(method_text, anchor)
+            if anchor_node is None:
+                return None
+
+            node_col = anchor_node['indent']   # leading-whitespace column (tab-safe)
+            node_type = anchor_node['node_type']
+
+            # Block-header types whose body is an indented block.
+            # Inserting AFTER such a node means inserting INSIDE its block.
+            BLOCK_HEADER_TYPES = {
+                'if_statement', 'for_statement', 'while_statement', 'with_statement',
+                'try_statement', 'match_statement', 'function_definition',
+                'class_definition', 'decorated_definition',
+                'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
+                'except_group',
+            }
+
+            if mode == 'replace' or mode == 'before':
+                # New block replaces or precedes the matched node — same indent level.
+                return node_col
+            elif mode == 'after':
+                if node_type in BLOCK_HEADER_TYPES:
+                    # Anchor is a compound header → insert INSIDE its body block.
+                    return node_col + 4
+                else:
+                    # Anchor is a simple statement → insert as sibling at same level.
+                    return node_col
+            else:
+                return node_col
+        except Exception as e:
+            logger.debug(f"_resolve_insertion_indent_python failed: {e}")
+            return None
+
+
+    def _normalize_block_for_insertion(self, code: str, target_indent: int, file_path: Optional[str] = None, method_text: Optional[str] = None, anchor: Optional[str] = None) -> str:
+        """Normalize a raw LLM code block to the correct indentation, then fast-validate it (ast.parse for Python, tree-sitter for non-Python).
+
+        Indent source (in priority order):
+        1. If `method_text` and `anchor` are provided, resolve the minimal statement-level AST node via `_find_anchor_node_python` and use that node's tab-safe line indent (full node-determination logic of the smart pipeline). 
+        2. Otherwise use the externally supplied `target_indent`.
+
+        Returns the normalized block on success, or the ORIGINAL `code` unchanged on any failure so the caller falls back to the current insertion pipeline."""
+        if code is None or not code.strip():
+            return code
+
+        # ── Strip markdown code fences (```python / ``` ) ──────────────────────
+        # LLM sometimes wraps REPLACE_IN_FUNCTION / PATCH_METHOD code in fences.
+        # Strip ONLY the outer opening and closing fence lines; leave everything
+        # else untouched so the normalization pipeline works on clean code.
+        _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
+        _raw_lines = code.splitlines()
+        _start = 0
+        _end = len(_raw_lines)
+        # Strip opening fence (first non-blank line that is a fence)
+        for _i, _ln in enumerate(_raw_lines):
+            if not _ln.strip():
+                continue
+            if _fence_re.match(_ln):
+                _start = _i + 1
+            break
+        # Strip closing fence (last non-blank line that is a fence)
+        for _i in range(len(_raw_lines) - 1, _start - 1, -1):
+            if not _raw_lines[_i].strip():
+                continue
+            if _fence_re.match(_raw_lines[_i]):
+                _end = _i
+            break
+        if _start > 0 or _end < len(_raw_lines):
+            _stripped = '\n'.join(_raw_lines[_start:_end])
+            if _stripped.strip():
+                code = _stripped
+            else:
+                # After stripping fences the block is empty — return original unchanged
+                # so the caller's fallback pipeline handles it
+                logger.debug(
+                    "_normalize_block_for_insertion: block is empty after fence stripping, "
+                    "returning original code unchanged"
+                )
+                return code
+
+        try:
+            effective_indent = target_indent
+            if method_text and anchor and anchor.strip():
+                # Clause keywords (else:, elif ...:, except ...:, finally:)
+                # are NOT standalone AST nodes in Python's tree-sitter grammar.
+                # They are sub-nodes of if_statement / try_statement whose
+                # start_point[1] is the column of the PARENT keyword (if/try),
+                # not the clause keyword itself. Attempting node-resolution for
+                # these anchors always returns a wrong (smaller) indent and
+                # corrupts the output. Skip node-resolution entirely for them.
+                _anchor_stripped = anchor.strip()
+                _CLAUSE_KEYWORDS = (
+                    'else:', 'else :', 'finally:', 'finally :',
+                )
+                _is_clause_anchor = (
+                    _anchor_stripped in _CLAUSE_KEYWORDS
+                    or _anchor_stripped.startswith('elif ')
+                    or _anchor_stripped.startswith('except ')
+                    or _anchor_stripped.startswith('except:')
+                )
+                if not _is_clause_anchor:
+                    anchor_node = self._find_anchor_node_python(method_text, anchor)
+                    if anchor_node is not None and isinstance(anchor_node.get('indent'), int):
+                        node_indent = anchor_node['indent']
+                        # Sanity check: only trust node-resolved indent when it
+                        # agrees with the text-derived target_indent within ±8.
+                        # A larger delta means the node finder matched the wrong
+                        # parent/child node; text-derived indent is more reliable.
+                        if abs(node_indent - target_indent) <= 8:
+                            effective_indent = node_indent
+                            logger.debug(
+                                f"_normalize_block_for_insertion: node-resolved indent={effective_indent} "
+                                f"(node_type={anchor_node.get('node_type')}, text_indent={target_indent})"
+                            )
+                        else:
+                            logger.debug(
+                                f"_normalize_block_for_insertion: node-resolved indent={node_indent} "
+                                f"rejected (delta={abs(node_indent - target_indent)} > 8), "
+                                f"keeping text_indent={target_indent}"
+                            )
+                else:
+                    logger.debug(
+                        f"_normalize_block_for_insertion: skipping node-resolution for "
+                        f"clause anchor {_anchor_stripped!r}, using text_indent={target_indent}"
+                    )
+
+
+            raw_code = code.expandtabs(4).rstrip('\r\n')
+            raw_lines = raw_code.splitlines()
+            non_blank = [(i, len(l) - len(l.lstrip(' '))) for i, l in enumerate(raw_lines) if l.strip()]
+            if not non_blank:
+                base_strip = 0
+            elif len(non_blank) == 1:
+                base_strip = non_blank[0][1]
+            else:
+                first_idx, first_indent = non_blank[0]
+                rest_min = min(ind for (i, ind) in non_blank[1:])
+                if abs(first_indent - rest_min) > 4:
+                    base_strip = rest_min
+                    raw_lines[first_idx] = (' ' * rest_min) + raw_lines[first_idx].lstrip(' ')
+                    logger.debug("_normalize_block_for_insertion: first-line anomaly corrected")
+                else:
+                    base_strip = min(first_indent, rest_min)
+            dedented_lines = []
+            for line in raw_lines:
+                if not line.strip():
+                    dedented_lines.append('')
+                else:
+                    strip_count = min(base_strip, len(line) - len(line.lstrip(' ')))
+                    dedented_lines.append(line[strip_count:])
+            indent_prefix = ' ' * effective_indent
+            normalized_lines = []
+            for line in dedented_lines:
+                if line:
+                    normalized_lines.append(indent_prefix + line)
+                else:
+                    normalized_lines.append('')
+            normalized_code = '\n'.join(normalized_lines)
+            # NOTE: Full-file validation is performed by the caller via
+            # _validate_full_content(new_content) after splicing, because a block
+            # that is valid in isolation can still be invalid when inserted into the
+            # real file context. Here we only return the re-indented block.
+            logger.debug(f"_normalize_block_for_insertion: normalized to indent={effective_indent}")
+            return normalized_code
+        except Exception as e:
+            logger.debug(f"_normalize_block_for_insertion fallback: {e}")
+            return code
+
+    
+    def _validate_full_content(self, content: str, file_path: Optional[str] = None) -> bool:
+        """Fast full-file validation of the COMPLETE modified file content. For Python (file_path is None or ends with .py/.pyi) uses ast.parse; for other languages uses tree-sitter error detection. Returns True if the content is syntactically valid, False otherwise. Never raises."""
+        if content is None:
+            return False
+        is_py = (file_path is None) or (isinstance(file_path, str) and (file_path.endswith('.py') or file_path.endswith('.pyi')))
+        if is_py:
+            try:
+                ast.parse(content)
+                return True
+            except Exception as e:
+                logger.debug(f"_validate_full_content: python ast.parse failed: {e}")
+                return False
+        else:
+            try:
+                ts = _get_tree_sitter_parser()
+                if ts is None:
+                    return True
+                pr = ts.parse(content)
+                return bool(getattr(pr, 'root_node', None)) and not getattr(pr, 'has_error', False)
+            except Exception as e:
+                logger.debug(f"_validate_full_content: tree-sitter failed: {e}")
+                return True
+    
+    def _validate_structural_integrity(self, original_content: str, new_content: str) -> bool:
+        """Verify that all top-level and class-level function/class names present in
+        original_content are still discoverable in new_content after a code block
+        insertion or replacement. Uses ast.parse for Python.
+        Returns True if structural integrity is preserved or if the check cannot be
+        performed. Never raises."""
+        try:
+            # Baseline: parse original
+            try:
+                orig_tree = ast.parse(original_content)
+            except Exception:
+                # Cannot establish baseline — allow the change
+                return True
+
+            # Parse new content; syntax failure = structural break
+            try:
+                new_tree = ast.parse(new_content)
+            except Exception:
+                return False
+
+            def _collect_names(tree) -> set:
+                """Collect module-level def/class names and class.method names."""
+                names = set()
+                for node in ast.iter_child_nodes(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        names.add(node.name)
+                    elif isinstance(node, ast.ClassDef):
+                        names.add(node.name)
+                        for child in ast.iter_child_nodes(node):
+                            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                names.add(f"{node.name}.{child.name}")
+                return names
+
+            orig_names = _collect_names(orig_tree)
+            new_names = _collect_names(new_tree)
+            missing = orig_names - new_names
+
+            if missing:
+                logger.debug(
+                    f"_validate_structural_integrity: missing elements after "
+                    f"modification: {missing}"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.debug(
+                f"_validate_structural_integrity: check failed ({e}), allowing change"
+            )
+            return True
     
     
     # ========================================================================
@@ -4200,16 +4518,43 @@ class FileModifier:
                 message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
             )
         
-        # Determine indent from lines[match_start]
         old_line = lines[match_start]
-        # line_indent removed for REPLACE_IN_METHOD as per Plan V14
-        line_indent = 0
-        
-        formatted_code = code
-        
+        expanded_old = old_line.expandtabs(4)
+        line_indent = len(expanded_old) - len(expanded_old.lstrip(' '))
+
+        # Attempt structural indent resolution via Tree-sitter.
+        # Use the replace_pattern as anchor with mode='replace' so the new
+        # block gets the same indentation as the node being replaced.
+        # Falls back to text-derived line_indent if resolution fails.
+        if replace_pattern and replace_pattern.strip():
+            # Extract method text for structural analysis
+            _method_lines_for_resolve = lines[method_start:method_end]
+            _method_text_for_resolve = ''.join(_method_lines_for_resolve)
+            _resolved_indent = self._resolve_insertion_indent_python(
+                _method_text_for_resolve, replace_pattern, 'replace'
+            )
+            if _resolved_indent is not None:
+                logger.debug(
+                    f"_replace_in_method: structural indent resolved="
+                    f"{_resolved_indent} (text_indent={line_indent})"
+                )
+                line_indent = _resolved_indent
+
+        _method_lines_for_norm = lines[method_start:method_end]
+        _method_text_for_norm = ''.join(_method_lines_for_norm)
+        formatted_code = self._normalize_block_for_insertion(
+            code,
+            line_indent,
+            file_path=None,
+            method_text=_method_text_for_norm,
+            anchor=replace_pattern,
+        )
+
         # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
+        
+        
         
         # Replace lines: handle splitting formatted_code if it has newlines
         if '\n' in formatted_code.rstrip('\n'):
@@ -4220,21 +4565,40 @@ class FileModifier:
             new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         
         new_content = ''.join(new_lines)
-        
+
+        # Full-file quick check (ast.parse for Python / tree-sitter otherwise)
+        # + non-destructive fallback to the ORIGINAL un-normalized code so the
+        # original CODE BLOCK proceeds through the existing staging pipeline.
+        emitted_code = formatted_code
+        _syntax_ok = self._validate_full_content(new_content, file_path=None)
+        _struct_ok = _syntax_ok and self._validate_structural_integrity(existing_content, new_content)
+        if not _syntax_ok or not _struct_ok:
+            reason = "syntax" if not _syntax_ok else "structural integrity"
+            logger.debug(
+                f"_replace_in_method: full-file {reason} validation failed, "
+                f"falling back to original un-normalized block"
+            )
+            fallback_code = code if code.endswith('\n') else code + '\n'
+            fallback_lines = lines[:match_start] + [fallback_code] + lines[match_end:]
+            new_content = ''.join(fallback_lines)
+            emitted_code = fallback_code
+
+
+
         # Store inserted block info for SyntaxChecker
         FileModifier._last_inserted_block = {
             "start_line": match_start,
-            "end_line": match_start + len(formatted_code.splitlines()),
-            "code": formatted_code,
+            "end_line": match_start + len(emitted_code.splitlines()),
+            "code": emitted_code,
             "target_indent": line_indent
         }
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
             message=f"Replaced code in {target_method}",
             changes_made=[f"Replaced lines {match_start + 1}-{match_end} in {target_method}"],
-            lines_added=len(formatted_code.splitlines()),
+            lines_added=len(emitted_code.splitlines()),
             lines_removed=match_end - match_start,
         )
     
@@ -5496,18 +5860,38 @@ def _normalize_python_code(self, existing_content: str, instruction: ModifyInstr
         # target_indent is now the matched statement line's leading-whitespace count
         target_indent = anchor_node['indent']
         
-        # Code re-indentation: dedent then prepend base indent preserving relative indentation
-        dedented_code = textwrap.dedent(instruction.code)
-        dedented_code = dedented_code.rstrip('\r\n')
+        # === Re-indentation block: tab-safe, robust common-prefix dedent ===
+        # Step 1: Tab unification of the LLM block
+        raw_code = instruction.code.expandtabs(4).rstrip('\r\n')
         
+        # Step 2: Robust common-prefix removal (replaces textwrap.dedent)
+        raw_lines = raw_code.splitlines()
+        
+        # Find first non-blank line to determine base_strip
+        base_strip = 0
+        for line in raw_lines:
+            if line.strip():
+                base_strip = len(line) - len(line.lstrip(' '))
+                break
+        
+        # Remove up to base_strip leading spaces from each non-blank line
+        dedented_lines = []
+        for line in raw_lines:
+            if not line.strip():
+                dedented_lines.append('')
+            else:
+                # Remove up to base_strip leading spaces from the START only
+                leading_spaces = len(line) - len(line.lstrip(' '))
+                strip_count = min(base_strip, leading_spaces)
+                dedented_lines.append(line[strip_count:])
+        
+        # Step 3: Re-indent to target base
         indent_prefix = ' ' * target_indent
         normalized_lines = []
-        for line in dedented_code.splitlines():
-            if line.strip():
-                # Prepend base indent, preserving the line's own relative inner indentation
+        for line in dedented_lines:
+            if line:  # non-blank
                 normalized_lines.append(indent_prefix + line)
             else:
-                # Empty lines remain empty (blank-line protection)
                 normalized_lines.append('')
         normalized_code = '\n'.join(normalized_lines)
         
@@ -5569,5 +5953,6 @@ def _normalize_python_code(self, existing_content: str, instruction: ModifyInstr
     except Exception as e:
         logger.debug(f"Smart Python code modification failed with exception: {e}")
         return None
+
 
 
