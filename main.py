@@ -401,9 +401,9 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     ),
     (
         "8",
-        cfg.MODEL_Kimi_K_2_6,
-        "Kimi K 2.6",
-        "Очень неплохой китайский ИИ"
+        cfg.MODEL_Kimi_K_2_7_Code,
+        "Kimi K 2.7 Code",
+        "Очень неплохой китайский ИИ, но Маленький контекст (200к)"
     ),
     (
         "9",
@@ -424,13 +424,26 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
         "GLM 5.1",
         "Маленький контекст, хз что еще сказать"
     ),
-    
     (
         "12",
+        cfg.MODEL_QWEN_3_7_MAX,
+        "Qwen 3.7 Max",
+        "Это флагманская модель в серии Qwen3.7 от Alibaba"
+    ),
+    
+    (
+        "13",
         cfg.MODEL_MiniMax_M3,
         "MiniMAX M3",
         "Бьют рейтинги в тестах, как все китайцы"
     ),
+    (
+        "14",
+        cfg.MODEL_Grok_4_3,
+        "Grok 4.3",
+        "Контекстное окно 1 млн., вроде особо не пиздит."
+    ),
+    
 ]
 
 # 
@@ -460,7 +473,7 @@ AVAILABLE_GENERATOR_MODELS = [
     (
         "4",
         cfg.MODEL_GEMINI_3_FLASH,
-        "Gemini 3.0 flash",
+        "Gemini 3.5 flash",
         "(крайне рекомендуется)Быстрая модель Google через OpenRouter. Хорошо подходит для генерации кода"
     ),
 
@@ -473,9 +486,9 @@ AVAILABLE_GENERATOR_MODELS = [
     
     (
         "6",
-        cfg.MODEL_Grok_4_20,
-        "Grok 4.20",
-        "Контекстное окно 2 млн., хз что еще."
+        cfg.MODEL_Grok_4_3,
+        "Grok 4.3",
+        "Контекстное окно 1 млн., вроде особо не пиздит."
     ),
 
     (
@@ -498,7 +511,6 @@ AVAILABLE_GENERATOR_MODELS = [
         "Deepseek V4 Pro",
         "Уважаемый Дипсик"
     ),
-
     
     (
         "10",
@@ -518,6 +530,13 @@ AVAILABLE_GENERATOR_MODELS = [
         cfg.MODEL_GLM_5_1,
         "GLM 5.1",
         "Маленький контекст (200к), хз что еще сказать"
+    ),
+    
+    (
+        "13",
+        cfg.MODEL_Kimi_K_2_7_Code,
+        "Kimi K 2.7 Code",
+        "Очень неплохой китайский ИИ, но маленький контекст"
     ),
     
 ]
@@ -1745,29 +1764,54 @@ def print_code_block(code: str, filepath: str = "", language: str = "python"):
 
 
 def print_diff_preview(diffs: Dict[str, str]):
-    """Отображает превью изменений (diff)"""
-    if not diffs:
+    """Отображает превью изменений (diff) с Rich панелями и статистикой"""
+    if not diffs or all(k == "__deletions__" for k in diffs.keys()):
         console.print("[dim]Нет изменений для отображения[/]")
         return
-    
+
+    processed_files = 0
+    total_added = 0
+    total_removed = 0
+
     for filepath, diff in diffs.items():
-        # Раскрашиваем diff
-        colored_lines = []
-        for line in diff.split('\n'):
-            if line.startswith('+') and not line.startswith('+++'):
-                colored_lines.append(f"[green]{line}[/]")
-            elif line.startswith('-') and not line.startswith('---'):
-                colored_lines.append(f"[red]{line}[/]")
-            elif line.startswith('@@'):
-                colored_lines.append(f"[cyan]{line}[/]")
-            else:
-                colored_lines.append(line)
-        
-        console.print(Panel(
-            '\n'.join(colored_lines),
-            title=f"📝 {filepath}",
-            border_style=COLORS['warning'],
-        ))
+        if filepath == "__deletions__":
+            continue
+
+        try:
+            lines = diff.split('\n')
+            added_count = sum(1 for line in lines if line.startswith('+') and not line.startswith('+++'))
+            removed_count = sum(1 for line in lines if line.startswith('-') and not line.startswith('---'))
+
+            colored_lines = []
+            for line in lines:
+                if line.startswith('+') and not line.startswith('+++'):
+                    colored_lines.append(f"[green]{line}[/]")
+                elif line.startswith('-') and not line.startswith('---'):
+                    colored_lines.append(f"[red]{line}[/]")
+                elif line.startswith('@@'):
+                    colored_lines.append(f"[bold cyan]{line}[/]")
+                else:
+                    colored_lines.append(f"[dim]{line}[/]")
+
+            console.print(Panel(
+                '\n'.join(colored_lines),
+                title=f"📁 {filepath}",
+                subtitle=f"[green]+{added_count} добавлено[/] | [red]-{removed_count} удалено[/]",
+                border_style="bright_blue",
+                padding=(0, 1),
+            ))
+
+            processed_files += 1
+            total_added += added_count
+            total_removed += removed_count
+
+        except Exception as e:
+            logger.warning(f"Ошибка отображения diff для {filepath}: {e}")
+            continue
+
+    if processed_files > 0:
+        console.print(f"\n[dim]📊 Итого: {processed_files} файл(ов) изменено, [green]+{total_added}[/] добавлено, [red]-{total_removed}[/] удалено[/]\n")
+
 
 
 def print_validation_result(result: Dict[str, Any], translate: bool = True):
@@ -5608,6 +5652,76 @@ async def handle_agent_mode(query: str):
             "success": True,
             "duration_ms": result.duration_ms,
         })
+
+    # === STAGED CODE BLOCK'и (уже показаны выше через VFS) ===
+        if staged_files_displayed:
+            pass  # VFS уже показал все файлы — ничего не дублируем
+        elif result.code_blocks:
+            # Fallback: VFS недоступен, показываем code_blocks из результата
+            console.print(f"\n[bold]📝 Итоговый код ({len(result.code_blocks)} блоков):[/]\n")
+            for block in result.code_blocks:
+                console.print(f"[cyan]Файл:[/] `{block.file_path}` | [cyan]Режим:[/] {block.mode}")
+                print_code_block(block.code, block.file_path)
+    staged_files_displayed = False
+    try:
+        vfs = getattr(state.pipeline, 'vfs', None)
+        if vfs is not None:
+            staged_files = vfs.get_staged_files()
+            if staged_files:
+                console.print(f"\n[bold]📦 Все staged CODE BLOCK'и ({len(staged_files)} файл(ов)):[/]\n")
+                for file_path in staged_files:
+                    try:
+                        staged_content = vfs.read_file(file_path)
+                        if staged_content is None:
+                            logger.warning(f"VFS: staged content is None for {file_path}")
+                            continue
+                        original_content = vfs.read_file_original(file_path)
+                        if original_content is None:
+                            title = f"🆕 НОВЫЙ {file_path} ({len(staged_content.splitlines())} строк)"
+                            border_color = "green"
+                        else:
+                            added = sum(1 for l in staged_content.splitlines() if l not in original_content.splitlines())
+                            removed = sum(1 for l in original_content.splitlines() if l not in staged_content.splitlines())
+                            title = f"📝 ИЗМЕНЁН {file_path} [green]+{added}[/]/[red]-{removed}[/]"
+                            border_color = "cyan"
+                        if staged_content is None:
+                            logger.warning(f"VFS: staged content is None for {file_path}")
+                            continue
+                        original_content = vfs.read_file_original(file_path)
+                        if original_content is None:
+                            status_icon = "🆕 НОВЫЙ"
+                            border_color = "green"
+                        else:
+                            status_icon = "📝 ИЗМЕНЁН"
+                            border_color = "cyan"
+                        suffix = Path(file_path).suffix.lower()
+                        if suffix == ".py":
+                            language = "python"
+                        elif suffix in (".js", ".jsx", ".mjs"):
+                            language = "javascript"
+                        elif suffix in (".ts", ".tsx"):
+                            language = "typescript"
+                        elif suffix == ".java":
+                            language = "java"
+                        elif suffix == ".go":
+                            language = "go"
+                        else:
+                            language = "text"
+                        syntax_obj = Syntax(staged_content, language, theme="monokai", line_numbers=True, word_wrap=False)
+                        console.print(Panel(syntax_obj, title=f"{status_icon} {file_path}", border_style=border_color, padding=(0, 1)))
+                    except Exception as e:
+                        logger.warning(f"Ошибка отображения staged файла {file_path}: {e}")
+                        console.print(f"[yellow]⚠️ Не удалось отобразить {file_path}[/]")
+                        continue
+                staged_files_displayed = True
+    except Exception as e:
+        logger.warning(f"Ошибка доступа к VFS: {e}")
+
+    if not staged_files_displayed and result.code_blocks:
+        console.print(f"\n[bold]📝 Итоговый код ({len(result.code_blocks)} блоков):[/]\n")
+        for block in result.code_blocks:
+            console.print(f"[cyan]Файл:[/] `{block.file_path}` | [cyan]Режим:[/] {block.mode}")
+            print_code_block(block.code, block.file_path)
         return
 
 
@@ -5737,7 +5851,7 @@ async def handle_agent_mode(query: str):
                 
                 # Показываем diffs файлов
                 if current_diffs:
-                    print_diff_preview(current_diffs)
+                    show_diff_in_pager(current_diffs)
                 
                 # Показываем информацию об удалениях
                 if deletions_info and isinstance(deletions_info, list):
@@ -7187,6 +7301,43 @@ async def main():
         await shutdown()
 
 
+def show_diff_in_pager(diffs: Dict[str, str]) -> None:
+    """Display unified diffs in a separate Rich pager window."""
+    if not diffs or all(k == "__deletions__" for k in diffs.keys()):
+        console.print("[dim]Нет изменений для отображения[/]")
+        return
+
+    pager_lines = []
+    for filepath, diff in diffs.items():
+        if filepath == "__deletions__":
+            continue
+        try:
+            lines = diff.split('\n')
+            added_count = sum(1 for line in lines if line.startswith('+') and not line.startswith('+++'))
+            removed_count = sum(1 for line in lines if line.startswith('-') and not line.startswith('---'))
+
+            pager_lines.append(f"\n[bold]📁 {filepath}[/] [green]+{added_count}[/] [red]-{removed_count}[/]\n")
+            for line in lines:
+                if line.startswith('+') and not line.startswith('+++'):
+                    pager_lines.append(f"[green]{line}[/]")
+                elif line.startswith('-') and not line.startswith('---'):
+                    pager_lines.append(f"[red]{line}[/]")
+                elif line.startswith('@@'):
+                    pager_lines.append(f"[bold cyan]{line}[/]")
+                else:
+                    pager_lines.append(f"[dim]{line}[/]")
+        except Exception as e:
+            logger.warning(f"Ошибка подготовки diff для {filepath}: {e}")
+            continue
+
+    try:
+        with console.pager():
+            console.print("\n".join(pager_lines))
+    except Exception:
+        logger.warning("Pager недоступен, fallback на print_diff_preview")
+        print_diff_preview(diffs)
+
+
 if __name__ == "__main__":
     # Обрабатываем Ctrl+C gracefully
     def signal_handler(sig, frame):
@@ -7196,3 +7347,4 @@ if __name__ == "__main__":
     
     # Запуск
     asyncio.run(main())
+
