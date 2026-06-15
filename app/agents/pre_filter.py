@@ -348,7 +348,7 @@ async def _run_advanced_prefilter(
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
-                max_tokens=4000,
+                max_tokens=8000,
             )
             
             content = response.get("content", "")
@@ -423,7 +423,7 @@ async def _run_advanced_prefilter(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=2000,
+            max_tokens=8000,
         )
         
         return final_response, tool_calls_count, model
@@ -508,7 +508,7 @@ async def run_planning_loop(
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
-                    max_tokens=4000,
+                    max_tokens=8000,
                 )
             except Exception as e:
                 error_str = str(e)
@@ -606,7 +606,7 @@ async def run_planning_loop(
                 model=current_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=4000,
+                max_tokens=8000,
             )
         except Exception as e:
             error_str = str(e)
@@ -618,7 +618,7 @@ async def run_planning_loop(
                     model=current_model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=4000,
+                    max_tokens=8000,
                 )
             else:
                 logger.error(f"[PRE-FILTER] Non-provider error on final call: {type(e).__name__}: {error_str}")
@@ -1243,7 +1243,7 @@ async def _call_prefilter_llm(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=2000,
+            max_tokens=8000,
         )
         
         if not response or not response.strip():
