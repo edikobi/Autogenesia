@@ -2430,7 +2430,7 @@ class FileModifier:
         lines.insert(insert_line, insert_content)
         new_content = ''.join(lines)
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         added_lines = len(formatted_code.splitlines())
         
@@ -2478,7 +2478,7 @@ class FileModifier:
         lines.insert(insert_line, insert_content)
         new_content = ''.join(lines)
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         return ModifyResult(
             success=True,
@@ -2510,7 +2510,7 @@ class FileModifier:
         
         new_content = existing_content + separator + code + '\n'
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         return ModifyResult(
             success=True,
@@ -2578,7 +2578,7 @@ class FileModifier:
         new_lines = lines[:method_start] + [formatted_code] + lines[method_end:]
         new_content = ''.join(new_lines)
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         new_lines_count = len(formatted_code.splitlines())
         
@@ -2645,7 +2645,7 @@ class FileModifier:
         new_lines = lines[:func_start] + [formatted_code] + lines[func_end:]
         new_content = ''.join(new_lines)
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         new_lines_count = len(formatted_code.splitlines())
         
@@ -2718,7 +2718,7 @@ class FileModifier:
         new_lines = lines[:class_start] + [formatted_code] + lines[class_end:]
         new_content = ''.join(new_lines)
         
-        new_content = self._validate_and_fix_syntax(new_content)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
         
         new_lines_count = len(formatted_code.splitlines())
         
@@ -3696,37 +3696,41 @@ class FileModifier:
 
     def _resolve_insertion_indent_python(self, method_text: str, anchor: str, mode: str) -> Optional[int]:
         try:
-            # Guard: clause-keyword anchors must NOT use structural resolution
-            # because tree-sitter maps them to their parent node (if/try),
-            # returning that parent's column — which is wrong for the clause itself.
             _anchor_stripped = anchor.strip()
             if not _anchor_stripped:
                 return None
+
+            # For multi-line anchors, use only the first non-blank line for
+            # node resolution. Multi-line patterns cause _find_anchor_node_python
+            # to match the containing compound statement (e.g. the whole function),
+            # returning its column (often 0) instead of the target statement's column.
+            _anchor_lines = _anchor_stripped.splitlines()
+            _first_anchor_line = next(
+                (ln.strip() for ln in _anchor_lines if ln.strip()), _anchor_stripped
+            )
+
             _CLAUSE_KEYWORDS = ('else:', 'else :', 'finally:', 'finally :')
             _is_clause = (
-                _anchor_stripped in _CLAUSE_KEYWORDS
-                or _anchor_stripped.startswith('elif ')
-                or _anchor_stripped.startswith('except ')
-                or _anchor_stripped.startswith('except:')
+                _first_anchor_line in _CLAUSE_KEYWORDS
+                or _first_anchor_line.startswith('elif ')
+                or _first_anchor_line.startswith('except ')
+                or _first_anchor_line.startswith('except:')
             )
             if _is_clause:
                 logger.debug(
                     f"_resolve_insertion_indent_python: skipping clause anchor "
-                    f"{_anchor_stripped!r} — structural resolution not applicable"
+                    f"{_first_anchor_line!r} — structural resolution not applicable"
                 )
                 return None
 
-            # Reuse _find_anchor_node_python which already implements correct
-            # statement-level node finding with partial-match support.
-            anchor_node = self._find_anchor_node_python(method_text, anchor)
+            # Reuse _find_anchor_node_python with the first-line anchor
+            anchor_node = self._find_anchor_node_python(method_text, _first_anchor_line)
             if anchor_node is None:
                 return None
 
-            node_col = anchor_node['indent']   # leading-whitespace column (tab-safe)
+            node_col = anchor_node['indent']
             node_type = anchor_node['node_type']
 
-            # Block-header types whose body is an indented block.
-            # Inserting AFTER such a node means inserting INSIDE its block.
             BLOCK_HEADER_TYPES = {
                 'if_statement', 'for_statement', 'while_statement', 'with_statement',
                 'try_statement', 'match_statement', 'function_definition',
@@ -3736,14 +3740,11 @@ class FileModifier:
             }
 
             if mode == 'replace' or mode == 'before':
-                # New block replaces or precedes the matched node — same indent level.
                 return node_col
             elif mode == 'after':
                 if node_type in BLOCK_HEADER_TYPES:
-                    # Anchor is a compound header → insert INSIDE its body block.
                     return node_col + 4
                 else:
-                    # Anchor is a simple statement → insert as sibling at same level.
                     return node_col
             else:
                 return node_col
@@ -3801,47 +3802,57 @@ class FileModifier:
         try:
             effective_indent = target_indent
             if method_text and anchor and anchor.strip():
-                # Clause keywords (else:, elif ...:, except ...:, finally:)
-                # are NOT standalone AST nodes in Python's tree-sitter grammar.
-                # They are sub-nodes of if_statement / try_statement whose
-                # start_point[1] is the column of the PARENT keyword (if/try),
-                # not the clause keyword itself. Attempting node-resolution for
-                # these anchors always returns a wrong (smaller) indent and
-                # corrupts the output. Skip node-resolution entirely for them.
-                _anchor_stripped = anchor.strip()
+                # For multi-line anchors (e.g. full REPLACE_IN_FUNCTION patterns),
+                # use only the FIRST non-blank line for node resolution.
+                # Using the full multi-line anchor causes _find_anchor_node_python
+                # to match the CONTAINING node (the whole function body, indent=0)
+                # instead of the specific statement, producing a wrong indent.
+                _anchor_for_node = anchor.strip()
+                _anchor_lines = _anchor_for_node.splitlines()
+                _first_anchor_line = next(
+                    (ln.strip() for ln in _anchor_lines if ln.strip()), _anchor_for_node
+                )
+                # Use first-line anchor for node resolution
+                _anchor_for_node = _first_anchor_line
+
                 _CLAUSE_KEYWORDS = (
                     'else:', 'else :', 'finally:', 'finally :',
                 )
                 _is_clause_anchor = (
-                    _anchor_stripped in _CLAUSE_KEYWORDS
-                    or _anchor_stripped.startswith('elif ')
-                    or _anchor_stripped.startswith('except ')
-                    or _anchor_stripped.startswith('except:')
+                    _anchor_for_node in _CLAUSE_KEYWORDS
+                    or _anchor_for_node.startswith('elif ')
+                    or _anchor_for_node.startswith('except ')
+                    or _anchor_for_node.startswith('except:')
                 )
                 if not _is_clause_anchor:
-                    anchor_node = self._find_anchor_node_python(method_text, anchor)
+                    anchor_node = self._find_anchor_node_python(method_text, _anchor_for_node)
                     if anchor_node is not None and isinstance(anchor_node.get('indent'), int):
                         node_indent = anchor_node['indent']
-                        # Sanity check: only trust node-resolved indent when it
-                        # agrees with the text-derived target_indent within ±8.
-                        # A larger delta means the node finder matched the wrong
-                        # parent/child node; text-derived indent is more reliable.
-                        if abs(node_indent - target_indent) <= 8:
-                            effective_indent = node_indent
+                        # NOTE: body_offset is intentionally NOT applied here.
+                        # _normalize_block_for_insertion is always called in a
+                        # "replace at anchor level" context — the replacement code
+                        # must align WITH the anchor statement, not INTO its body.
+                        # Applying body_offset here (e.g. +4 for if_statement) causes
+                        # the replacement block to be indented one level too deep,
+                        # producing `invalid syntax` for code that replaces an if/for/while block.
+                        candidate_indent = node_indent  # body_offset = 0, always
+                        if abs(candidate_indent - target_indent) <= 8:
+                            effective_indent = candidate_indent
                             logger.debug(
                                 f"_normalize_block_for_insertion: node-resolved indent={effective_indent} "
-                                f"(node_type={anchor_node.get('node_type')}, text_indent={target_indent})"
+                                f"(node_type={anchor_node.get('node_type')}, base={node_indent}, body_offset=0 [fixed], text_indent={target_indent})"
                             )
                         else:
                             logger.debug(
-                                f"_normalize_block_for_insertion: node-resolved indent={node_indent} "
-                                f"rejected (delta={abs(node_indent - target_indent)} > 8), "
+                                f"_normalize_block_for_insertion: node-resolved indent={candidate_indent} "
+                                f"rejected (delta={abs(candidate_indent - target_indent)} > 8), "
                                 f"keeping text_indent={target_indent}"
                             )
+                
                 else:
                     logger.debug(
                         f"_normalize_block_for_insertion: skipping node-resolution for "
-                        f"clause anchor {_anchor_stripped!r}, using text_indent={target_indent}"
+                        f"clause anchor {_anchor_for_node!r}, using text_indent={target_indent}"
                     )
 
 
@@ -3855,7 +3866,7 @@ class FileModifier:
             else:
                 first_idx, first_indent = non_blank[0]
                 rest_min = min(ind for (i, ind) in non_blank[1:])
-                if abs(first_indent - rest_min) > 4:
+                if abs(first_indent - rest_min) >= 4:
                     base_strip = rest_min
                     raw_lines[first_idx] = (' ' * rest_min) + raw_lines[first_idx].lstrip(' ')
                     logger.debug("_normalize_block_for_insertion: first-line anomaly corrected")
@@ -3885,6 +3896,25 @@ class FileModifier:
         except Exception as e:
             logger.debug(f"_normalize_block_for_insertion fallback: {e}")
             return code
+
+    def _python_body_offset_for_node(self, node_type: Optional[str]) -> int:
+        """Return the indentation offset (in spaces) to apply to a CODE BLOCK that is inserted INTO the body of a Python block header node.
+
+        For function/method/class and compound-statement header nodes, the body lives one indentation level (4 spaces) deeper than the header line itself. For ordinary statement nodes (assignments, expressions, returns, etc.) the offset is 0, so inserted code aligns with the anchored statement. This isolates function-scoped normalization from the main re-indentation flow and is identical for top-level functions, methods, and nested functions.
+
+        Returns 0 for None or unrecognized node types (safe default).
+        """
+        if not node_type:
+            return 0
+        BODY_HEADER_NODE_TYPES = {
+            'function_definition', 'async_function_definition', 'decorated_definition',
+            'class_definition', 'if_statement', 'for_statement', 'while_statement',
+            'with_statement', 'try_statement', 'match_statement', 'else_clause',
+            'elif_clause', 'except_clause', 'finally_clause', 'except_group'
+        }
+        if node_type in BODY_HEADER_NODE_TYPES:
+            return 4
+        return 0
 
     
     def _validate_full_content(self, content: str, file_path: Optional[str] = None) -> bool:
@@ -4927,7 +4957,7 @@ class FileModifier:
         return '\n'.join(result_lines)
     
     
-    def _normalize_and_indent_code(self, code: str, target_indent: int, aggressive_strip: bool = False) -> str:
+    def _normalize_and_indent_code(self, code: str, target_indent: int, aggressive_strip: bool = False, node_context: str = "module") -> str:
         """
         Нормализует отступы в коде.
         
@@ -4937,10 +4967,29 @@ class FileModifier:
             aggressive_strip: Если True, использует стратегию "Minimum Significant Indent".
                             Игнорирует комментарии, markdown-фенсы и пустые строки при поиске
                             базового отступа. Это предотвращает "16 пробелов" при вставке кода от LLM.
+            node_context: Контекст узла AST. Один из:
+                "module"   — вставка на уровне модуля (по умолчанию)
+                "function" — вставка внутрь тела функции
+                "method"   — вставка внутрь тела метода класса
+                Используется как защитный барьер: если target_indent
+                не соответствует минимальному уровню для контекста,
+                он автоматически поднимается до минимума.
         """
         if not code:
             return code
-            
+
+        # Context-aware scenario selection:
+        # "module"   — top-level, target_indent is already correct
+        # "function" — inside a standalone function body; target_indent must be >= default_indent
+        # "method"   — inside a class method body; target_indent must be >= 2 * default_indent
+        # If the caller computed target_indent from the 'def' line (not the body), fix it here.
+        if node_context == "function":
+            if target_indent < self.default_indent:
+                target_indent = self.default_indent
+        elif node_context == "method":
+            if target_indent < 2 * self.default_indent:
+                target_indent = 2 * self.default_indent
+
         # 1. Expand tabs for consistency
         code = code.expandtabs(4)
         
@@ -5022,6 +5071,7 @@ class FileModifier:
             # Trim surrounding newlines
             return indented_code.strip('\n')
 
+
     def _repair_first_line_indent(self, code: str) -> str:
         """
         DEPRECATED: Heuristic repair disabled.
@@ -5059,7 +5109,7 @@ class FileModifier:
         
         return dedented_code.strip()
 
-    def _normalize_code_for_insertion(self, code: str, target_indent: int) -> str:
+    def _normalize_code_for_insertion(self, code: str, target_indent: int, node_context: str = "module") -> str:
         """
         Нормализует код для вставки внутрь метода/функции.
         
@@ -5072,6 +5122,14 @@ class FileModifier:
         # 1. Basic check: if code empty, return
         # 2. Preprocessing: expand tabs
         code = code.expandtabs(4)
+
+        # Защитный барьер: target_indent должен соответствовать контексту
+        if node_context == "function":
+            if target_indent < self.default_indent:
+                target_indent = self.default_indent
+        elif node_context == "method":
+            if target_indent < 2 * self.default_indent:
+                target_indent = 2 * self.default_indent
         
         # 3. Repair: repair first line indent
         code = self._repair_first_line_indent(code)
@@ -5184,32 +5242,34 @@ class FileModifier:
 
 
     def _detect_insertion_context_indent(
-        self, 
-        lines: List[str], 
-        insert_line: int, 
+        self,
+        lines: List[str],
+        insert_line: int,
         is_inside_block: bool = False
-    ) -> int:
+    ) -> Tuple[int, str]:
         """
-        Определяет правильный отступ для вставки кода на основе контекста.
-        
-        Анализирует строки вокруг точки вставки и определяет,
-        какой отступ должен быть у вставляемого кода.
-        
+        Определяет правильный отступ и контекст для вставки кода.
+
+        Анализирует строки вокруг точки вставки и определяет:
+        - Какой отступ должен быть у вставляемого кода
+        - В каком контексте происходит вставка (module / function / method)
+
         Args:
             lines: Все строки файла
             insert_line: Номер строки, ПОСЛЕ которой будет вставка (0-indexed)
             is_inside_block: True если вставка внутрь блока (после if/for/while:)
-            
+
         Returns:
-            Отступ в пробелах для вставляемого кода
+            Tuple (indent: int, node_context: str)
+            node_context: "module" | "function" | "method"
         """
         if insert_line < 0:
-            return 0
-        
-        # Ищем ближайшую непустую строку перед точкой вставки
+            return (0, "module")
+
         context_indent = 0
         context_line = None
-        
+
+        # Ищем ближайшую непустую строку перед точкой вставки
         for i in range(min(insert_line, len(lines) - 1), -1, -1):
             line = lines[i]
             stripped = line.strip()
@@ -5217,19 +5277,27 @@ class FileModifier:
                 context_indent = len(line) - len(line.lstrip())
                 context_line = stripped
                 break
-        
-        # Если предыдущая строка заканчивается на : — это начало блока
+
+        # Если предыдущая строка заканчивается на : — вставка внутрь блока
         if context_line and context_line.endswith(':'):
-            return context_indent + self.default_indent
-        
-        # Если явно указано что вставка внутрь блока
-        if is_inside_block:
-            return context_indent + self.default_indent
-        
-        return context_indent
+            final_indent = context_indent + self.default_indent
+        elif is_inside_block:
+            final_indent = context_indent + self.default_indent
+        else:
+            final_indent = context_indent
+
+        # Определяем node_context
+        node_context = "module"
+        if context_line:
+            if context_line.startswith(('def ', 'async def ')):
+                node_context = "function"
+            elif context_line.startswith('class '):
+                node_context = "method"
+
+        return (final_indent, node_context)
 
 
-    def _validate_and_fix_syntax(self, content: str) -> str:
+    def _validate_and_fix_syntax(self, content: str, mode=None) -> str:
         """
         Проверяет синтаксис через Tree-sitter и пытается исправить.
         Передаёт информацию о вставленном блоке в SyntaxChecker.
@@ -5267,8 +5335,8 @@ class FileModifier:
         
         # [V18.6] Disable mechanical auto-fix for PATCH_METHOD and REPLACE_IN_METHOD
         # to ensure raw generator code (indents) is preserved byte-for-byte.
-        if instruction.mode in [ModifyMode.PATCH_METHOD, ModifyMode.REPLACE_IN_METHOD]:
-            logger.debug(f"Skipping mechanical auto-fix for mode {instruction.mode.name}")
+        if mode in [ModifyMode.PATCH_METHOD, ModifyMode.REPLACE_IN_METHOD]:
+            logger.debug(f"Skipping mechanical auto-fix for mode {mode.name}")
             return content
 
         # Пробуем через SyntaxChecker (если доступен)
@@ -5390,44 +5458,40 @@ class FileModifier:
         # Находим отступ тела (первая строка после объявления)
         if is_declaration:
             decl_idx = analysis['actual_declaration_idx']
-            
-            for i in range(decl_idx + 1, len(lines)):
+
+            i = decl_idx + 1
+            while i < len(lines):
                 line = lines[i]
                 stripped = line.strip()
-                
+
                 # Пропускаем пустые строки и комментарии
                 if not stripped or stripped.startswith('#'):
+                    i += 1
                     continue
-                
+
                 # Пропускаем docstring (начинается с """ или ''')
                 if stripped.startswith(('"""', "'''")):
-                    # Ищем конец docstring
-                    if stripped.count('"""') == 2 or stripped.count("'''") == 2:
-                        # Однострочный docstring
+                    # Однострочный docstring — обе кавычки на одной строке
+                    quote_char = '"""' if stripped.startswith('"""') else "'''"
+                    if stripped.count(quote_char) >= 2 and len(stripped) > 3:
+                        # однострочный: """..."""
+                        i += 1
                         continue
                     else:
-                        # Многострочный docstring — пропускаем до конца
-                        docstring_char = '"""' if '"""' in stripped else "'''"
-                        for j in range(i + 1, len(lines)):
-                            if docstring_char in lines[j]:
-                                i = j
+                        # Многострочный: ищем закрывающие кавычки
+                        i += 1
+                        while i < len(lines):
+                            if quote_char in lines[i]:
+                                i += 1  # пропускаем строку с закрывающими кавычками
                                 break
+                            i += 1
                         continue
-                
+
                 # Нашли первую значимую строку тела
                 analysis['body_indent'] = len(line) - len(line.lstrip())
                 break
-            
-            # Вычисляем фактический сдвиг тела относительно объявления
-            if analysis['body_indent'] is not None:
-                decl_line = lines[decl_idx]
-                decl_indent = len(decl_line) - len(decl_line.lstrip())
-                actual_offset = analysis['body_indent'] - decl_indent
-                
-                # Проверяем на аномалию
-                if actual_offset != self.default_indent and actual_offset > 0:
-                    analysis['has_anomaly'] = True
-                    analysis['expected_body_offset'] = actual_offset
+
+                i += 1  # never reached after break, but keeps structure clear
         
         # Проверяем на другие аномалии: строки с меньшим отступом чем базовый
         base = analysis['base_indent']
@@ -5514,28 +5578,42 @@ class FileModifier:
     def _detect_indent_from_context(self, lines: List[str], line_index: int, direction: str = "before") -> int:
         """
         Определяет отступ из контекста (соседних строк).
-        
+
         Args:
             lines: Все строки файла
             line_index: Индекс строки, около которой ищем контекст
             direction: "before" — искать выше, "after" — искать ниже
-            
+
         Returns:
-            Отступ в пробелах
+            Отступ в пробелах для вставляемого кода.
+            Если ближайшая непустая строка заканчивается на ':', возвращает
+            её отступ + default_indent (код идёт внутрь блока).
         """
         search_range = range(line_index - 1, -1, -1) if direction == "before" else range(line_index, len(lines))
-        
+
         for i in search_range:
             if 0 <= i < len(lines):
                 line = lines[i]
                 stripped = line.strip()
-                
-                # Ищем непустую строку, которая не является комментарием или docstring
-                if stripped and not stripped.startswith('#') and not stripped.startswith('"""') and not stripped.startswith("'''"):
-                    return len(line) - len(line.lstrip())
-        
-        # Fallback: используем default_indent
-        return self.default_indent    
+
+                # Пропускаем пустые строки, комментарии и docstring-строки
+                if not stripped:
+                    continue
+                if stripped.startswith('#'):
+                    continue
+                if stripped.startswith('"""') or stripped.startswith("'''"):
+                    continue
+
+                ref_indent = len(line) - len(line.lstrip())
+
+                # Ключевое исправление: если строка открывает блок — вставка идёт ВНУТРЬ
+                if stripped.endswith(':'):
+                    return ref_indent + self.default_indent
+
+                return ref_indent
+
+        # Fallback
+        return self.default_indent
     
     
     def _extract_imports(self, content: str) -> List[str]:

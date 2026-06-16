@@ -23,6 +23,7 @@ import asyncio
 import logging
 import uuid
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -704,6 +705,58 @@ class AgentPipeline:
         self._on_user_decision: Optional[Callable] = None
         
         logger.info(f"AgentPipeline initialized: project_dir={self.project_dir}, generator_model={generator_model}")
+        
+        try:
+            ruff_bg_thread = threading.Thread(
+                target=self._ensure_ruff_in_background,
+                daemon=True,
+                name="ruff-bg-install",
+            )
+            ruff_bg_thread.start()
+            logger.debug("[ruff] Background ruff availability check started")
+        except Exception as e:
+            logger.warning(f"[ruff] Could not start background ruff check thread (non-fatal): {e}")
+        
+       
+        
+    def _ensure_ruff_in_background(self) -> None:
+        """Checks ruff availability in the project venv and installs it if missing.
+        Runs in a background thread — does NOT block the pipeline.
+        Called once at AgentPipeline startup.
+        """
+        import subprocess
+        try:
+            python_exe = self.dependency_manager._python_path
+            
+            # Check if ruff is already available
+            ruff_available = False
+            try:
+                check_result = subprocess.run(
+                    [python_exe, "-m", "ruff", "--version"],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=10,
+                )
+                if check_result.returncode == 0:
+                    logger.debug("[ruff] ruff already available in project venv (background check)")
+                    ruff_available = True
+            except subprocess.TimeoutExpired:
+                logger.warning("[ruff] ruff version check timed out in background, attempting install anyway")
+            
+            if not ruff_available:
+                logger.info("[ruff] ruff not found in project venv, installing in background...")
+                install_results = self.dependency_manager.ensure_formatting_tools(["ruff"])
+                if install_results.get("ruff"):
+                    logger.info("[ruff] ruff installed successfully in background")
+                else:
+                    logger.warning("[ruff] ruff background install failed (non-fatal)")
+        
+        except Exception as e:
+            logger.warning(f"[ruff] Background ruff check/install error (non-fatal): {e}")
+        
+        
     # ========================================================================
     # MAIN ENTRY POINT
     # ========================================================================
