@@ -31,7 +31,7 @@ from app.llm.prompt_templates import (
     _build_prefilter_advice_section_new_project_agent,
 )
 
-
+import pydoc
 import re
 import os
 import sys
@@ -420,9 +420,9 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     
     (
         "11",
-        cfg.MODEL_GLM_5_1,
-        "GLM 5.1",
-        "Маленький контекст, хз что еще сказать"
+        cfg.MODEL_GLM_5_2,
+        "GLM 5.2",
+        "Говорят, что передовая модель"
     ),
     (
         "12",
@@ -527,9 +527,9 @@ AVAILABLE_GENERATOR_MODELS = [
     
     (
         "12",
-        cfg.MODEL_GLM_5_1,
-        "GLM 5.1",
-        "Маленький контекст (200к), хз что еще сказать"
+        cfg.MODEL_GLM_5_2,
+        "GLM 5.2",
+        "Говорят, что передовая модель"
     ),
     
     (
@@ -795,9 +795,23 @@ def prompt_with_navigation(
         if show_quit:
             all_choices.extend(['q', 'quit', 'exit', 'выход', 'в'])
         
-        result = Prompt.ask(prompt_text, choices=all_choices, default=default, show_choices=False)
+        try:
+            result = Prompt.ask(prompt_text, choices=all_choices, default=default, show_choices=False)
+        except KeyboardInterrupt:
+            console.print()  # Новая строка после ^C
+            raise QuitException()
+        except EOFError:
+            console.print()  # Новая строка после ^D/^Z
+            raise QuitException()
     else:
-        result = Prompt.ask(prompt_text, default=default)
+        try:
+            result = Prompt.ask(prompt_text, default=default)
+        except KeyboardInterrupt:
+            console.print()
+            raise QuitException()
+        except EOFError:
+            console.print()
+            raise QuitException()
     
     # Проверяем на навигационные команды
     check_navigation(result)
@@ -833,6 +847,9 @@ def confirm_with_navigation(prompt_text: str, default: bool = False) -> bool:
         result = Prompt.ask(f"{prompt_text} {hint}", default=default_str)
     except KeyboardInterrupt:
         console.print()  # Новая строка после ^C
+        raise QuitException()
+    except EOFError:
+        console.print()  # Новая строка после ^D/^Z
         raise QuitException()
     
     # Проверяем навигацию
@@ -2534,6 +2551,7 @@ async def _get_user_custom_critique(pipeline: 'AgentPipeline', history: List[Dic
             print_code_block(block.code, block.file_path)
         
         # Show diff
+        show_diff_in_pager(result.diffs)
         print_diff_preview(result.diffs)
         
         return "continue"
@@ -5254,7 +5272,7 @@ async def handle_agent_mode(query: str):
                             console.print(f"         [yellow]⏭ Пропущено: {runtime_skipped} файлов[/]")
                             console.print(f"         [dim](web apps, GUI без display, etc.)[/]")
                     else:
-                        console.print(f"      [dim]▶️ RUNTIME: не требовался[/]")
+                        console.print(f"      [dim]▶️ RUNTIME: не запускался (нет изменённых Python файлов)[/]")
                     
                     # === pytest тесты ===
                     console.print(f"\n      [bold]🧪 pytest тесты:[/]")
@@ -5597,7 +5615,7 @@ async def handle_agent_mode(query: str):
         })
         
         # Предлагаем пользователю продолжить или выйти
-        console.print("\n[dim]Вы можете уточнить требования или ввести новый запрос.[/]")
+        console.print("\n[dim]Вы можете попробовать снова или уточнить запрос.[/]")
         console.print("[dim]Введите /меню для возврата в главное меню.[/]")
         return
 
@@ -5885,31 +5903,39 @@ async def handle_agent_mode(query: str):
             
             # === ПОДТВЕРЖДЕНИЕ ===
             console.print()
-            console.print("[bold green]✅ Все проверки пройдены! Код готов к применению.[/]")
-            console.print("Для принятия изменений введите Y или нажмите Enter, для отказа n")
+            console.print("[bold]Выберите действие:[/]")
+            console.print("[bold green][1][/] ✅ Применить изменения")
+            console.print("[bold yellow][2][/] ✏️  Отправить на доработку с комментарием")
+            console.print("[bold red][3][/] ❌ Выйти в главное меню (без применения)")
             console.print()
             
-            try:
-                confirm = confirm_with_navigation(
-                    "Применить изменения в реальные файлы?",
-                    default=True
-                )
-            except (BackException, BackToMenuException, QuitException) as nav_exc:
-                await state.pipeline.discard_pending_changes()
-                
-                # Сохраняем историю при выходе
-                exit_response = "## ⚠️ Сессия прервана\n\n"
-                if result.analysis:
-                    exit_response += f"**Анализ:**\n{result.analysis}\n\n"
-                exit_response += "\n*Пользователь вышел до подтверждения. Изменения не применены.*"
-                
-                await save_message("assistant", exit_response)
-                print_info("Изменения отменены, история сохранена")
-                raise nav_exc
+            choice = None
+            while choice is None:
+                try:
+                    choice = prompt_with_navigation(
+                        "Ваш выбор (1/2/3)",
+                        choices=["1", "2", "3"],
+                        default=None
+                    )
+                except (BackException, BackToMenuException, QuitException) as nav_exc:
+                    await state.pipeline.discard_pending_changes()
+                    exit_response = "## ⚠️ Сессия прервана\n\n*Пользователь вышел до подтверждения.*"
+                    await save_message("assistant", exit_response)
+                    print_info("Изменения отменены, история сохранена")
+                    raise nav_exc
+                except Exception:
+                    # Empty Enter or any other unexpected error — re-prompt
+                    console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Отмена[/]")
+                    choice = None
+                else:
+                    # Validate that choice is one of the expected values
+                    if choice not in ("1", "2", "3"):
+                        console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Отмена[/]")
+                        choice = None
             
-            logger.info(f"User confirmation: {confirm}")
+            logger.info(f"User confirmation choice: {choice}")
             
-            if confirm:
+            if choice == "1":
                 # === ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ===
                 console.print("\n[dim]⏳ Применение изменений...[/]")
                 
@@ -5963,58 +5989,43 @@ async def handle_agent_mode(query: str):
                 # Выход из цикла после применения
                 break
             
-            else:
-                # === ПОЛЬЗОВАТЕЛЬ ОТКАЗАЛСЯ ===
-                logger.info("User declined changes")
-                console.print("\n[bold]Вы отказались от изменений.[/]")
-                console.print("[1] ✏️  Написать критику и доработать код")
-                console.print("[2] ❌ Отменить изменения и выйти")
-                console.print()
+            elif choice == "2":
+                # === КРИТИКА И ДОРАБОТКА ===
+                console.print("\n[bold]Введите ваши замечания:[/]")
+                console.print("[dim]Что нужно исправить?[/]\n")
                 
-                choice = prompt_with_navigation("Выбор", choices=["1", "2"], default="1")
+                try:
+                    user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
+                except KeyboardInterrupt:
+                    choice = "3"
+                    user_feedback = ""
                 
-                if choice == "1":
-                    # === КРИТИКА И ДОРАБОТКА ===
-                    console.print("\n[bold]Введите ваши замечания:[/]")
-                    console.print("[dim]Что нужно исправить?[/]\n")
+                if user_feedback.strip():
+                    console.print("\n[dim]⏳ Запускаем цикл доработки...[/]")
                     
-                    try:
-                        user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
-                    except KeyboardInterrupt:
-                        choice = "2" # Fallback to cancel
+                    new_result = await state.pipeline.run_feedback_cycle(
+                        user_feedback=user_feedback,
+                        history=history
+                    )
                     
-                    if choice == "1" and user_feedback.strip():
-                        console.print("\n[dim]⏳ Запускаем цикл доработки...[/]")
-                        
-                        # Запускаем цикл обратной связи
-                        new_result = await state.pipeline.run_feedback_cycle(
-                            user_feedback=user_feedback,
-                            history=history
-                        )
-                        
-                        if new_result and new_result.success:
-                            # Обновляем результат и идем на новую итерацию цикла
-                            result = new_result
-                            console.print("\n[bold green]✅ Код исправлен! Проверьте новые изменения.[/]")
-                            continue
-                        else:
-                            print_error("Не удалось исправить код по вашей критике")
-                            # Можно спросить еще раз или выйти, здесь остаемся в меню
-                            continue
-                    else:
-                        if choice == "1": print_warning("Пустая критика")
-                        # Возвращаемся к началу цикла подтверждения (показать старые изменения)
+                    if new_result and new_result.success:
+                        result = new_result
+                        console.print("\n[bold green]✅ Код исправлен! Проверьте новые изменения.[/]")
                         continue
-                
-                # Отмена (choice == "2")
+                    else:
+                        print_warning("Не удалось исправить код по вашей критике")
+                        continue
+                else:
+                    print_warning("Замечание не может быть пустым")
+                    continue
+            
+            elif choice == "3":
+                # === ВЫХОД В ГЛАВНОЕ МЕНЮ ===
                 await state.pipeline.discard_pending_changes()
-                
-                # Сохраняем историю
-                decline_response = "## 🚫 Отклонено пользователем\n\n*Пользователь отклонил предложенные изменения.*"
-                await save_message("assistant", decline_response)
-                
-                print_info("Изменения отменены")
-                break
+                exit_response = "## 🚫 Запрос отменён\n\n*Пользователь вышел в главное меню.*"
+                await save_message("assistant", exit_response)
+                print_info("Изменения отменены, история сохранена")
+                raise BackToMenuException()
     
     elif result.success:
         # Успех, но нет изменений файлов (например, только анализ)
@@ -6070,6 +6081,7 @@ async def handle_agent_mode(query: str):
         "iterations": result.feedback_iterations,
         "is_direct_answer": is_direct_answer_final,
     })
+
 
 
 
@@ -6268,6 +6280,8 @@ async def chat_loop() -> str:
             return "quit"
         except KeyboardInterrupt:
             console.print("\n[dim]Используйте /меню или 'q' для выхода[/]")
+        except EOFError:
+            console.print("\n[dim]Используйте /меню или 'q' для выхода[/]")        
         except Exception as e:
             logger.error(f"Ошибка в цикле чата: {e}", exc_info=True)
             print_error(str(e))
@@ -7126,6 +7140,9 @@ async def main_menu_loop():
         except KeyboardInterrupt:
             console.print("\n[dim]Используйте '0' для выхода[/]")
             continue
+        except EOFError:
+            console.print("\n[dim]Используйте '0' для выхода[/]")
+            continue
         
         # Выход
         if choice == "0":
@@ -7302,40 +7319,116 @@ async def main():
 
 
 def show_diff_in_pager(diffs: Dict[str, str]) -> None:
-    """Display unified diffs in a separate Rich pager window."""
+    """Size-aware per-file Rich diff display with staged code blocks."""
     if not diffs or all(k == "__deletions__" for k in diffs.keys()):
         console.print("[dim]Нет изменений для отображения[/]")
         return
 
-    pager_lines = []
-    for filepath, diff in diffs.items():
-        if filepath == "__deletions__":
-            continue
+    total_lines = 0
+    for fp, txt in diffs.items():
+        if fp != "__deletions__":
+            total_lines += len(txt.splitlines())
+    DIFF_INLINE_THRESHOLD = 80
+    inline_mode = total_lines <= DIFF_INLINE_THRESHOLD
+
+    processed = 0
+    total_added = 0
+    total_removed = 0
+
+    if inline_mode:
+        for filepath, diff_text in diffs.items():
+            if filepath == "__deletions__":
+                continue
+            try:
+                lines = diff_text.split("\n")
+                added_count = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
+                removed_count = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
+                colored = []
+                for line in lines:
+                    if line.startswith("+") and not line.startswith("+++"):
+                        colored.append(f"[green]{line}[/]")
+                    elif line.startswith("-") and not line.startswith("---"):
+                        colored.append(f"[red]{line}[/]")
+                    elif line.startswith("@@"):
+                        colored.append(f"[bold cyan]{line}[/]")
+                    else:
+                        colored.append(f"[dim]{line}[/]")
+                console.print(Panel(
+                    "\n".join(colored),
+                    title=f"📁 {filepath}",
+                    subtitle=f"[green]+{added_count} добавлено[/] | [red]-{removed_count} удалено[/]",
+                    border_style="bright_blue",
+                    padding=(0, 1),
+                ))
+                processed += 1
+                total_added += added_count
+                total_removed += removed_count
+            except Exception as e:
+                logger.warning(f"Ошибка отображения diff для {filepath}: {e}")
+                continue
+        if processed > 0:
+            console.print(f"[dim]📊 Итого: {processed} файл(ов), +{total_added} добавлено, -{total_removed} удалено[/]")
+    else:
+        table = Table(title="📊 Сводка изменений", border_style="yellow", show_lines=True)
+        table.add_column("Файл")
+        table.add_column("Добавлено")
+        table.add_column("Удалено")
+        file_data = []
+        for filepath, diff_text in diffs.items():
+            if filepath == "__deletions__":
+                continue
+            try:
+                lines = diff_text.split("\n")
+                added_count = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
+                removed_count = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
+                table.add_row(filepath, f"[green]+{added_count}[/]", f"[red]-{removed_count}[/]")
+                file_data.append((filepath, added_count, removed_count, diff_text))
+            except Exception as e:
+                logger.warning(f"Ошибка подготовки diff для {filepath}: {e}")
+                continue
+        console.print(table)
+        if not file_data:
+            print_diff_preview(diffs)
+            return
+        console.print("[dim]Просмотр изменений (Пробел — следующая страница, Q — выход)...[/]")
+        # Build plain-text content for pydoc.pager (supports Space for page scroll)
+        pager_lines = []
+        for filepath, added_count, removed_count, diff_text in file_data:
+            pager_lines.append(f"\n{'='*60}")
+            pager_lines.append(f"  {filepath}   +{added_count} -{removed_count}")
+            pager_lines.append(f"{'='*60}\n")
+            for line in diff_text.split("\n"):
+                pager_lines.append(line)
+            pager_lines.append("\n" + "-"*60 + "\n")
+        pager_content = "\n".join(pager_lines)
         try:
-            lines = diff.split('\n')
-            added_count = sum(1 for line in lines if line.startswith('+') and not line.startswith('+++'))
-            removed_count = sum(1 for line in lines if line.startswith('-') and not line.startswith('---'))
-
-            pager_lines.append(f"\n[bold]📁 {filepath}[/] [green]+{added_count}[/] [red]-{removed_count}[/]\n")
-            for line in lines:
-                if line.startswith('+') and not line.startswith('+++'):
-                    pager_lines.append(f"[green]{line}[/]")
-                elif line.startswith('-') and not line.startswith('---'):
-                    pager_lines.append(f"[red]{line}[/]")
-                elif line.startswith('@@'):
-                    pager_lines.append(f"[bold cyan]{line}[/]")
-                else:
-                    pager_lines.append(f"[dim]{line}[/]")
+            pydoc.pager(pager_content)
         except Exception as e:
-            logger.warning(f"Ошибка подготовки diff для {filepath}: {e}")
-            continue
+            logger.warning(f"Ошибка pager для дифов: {e}")
+            # Fallback: print each file as Rich Panel
+            for filepath, added_count, removed_count, diff_text in file_data:
+                try:
+                    lines = diff_text.split("\n")
+                    colored = []
+                    for line in lines:
+                        if line.startswith("+") and not line.startswith("+++"):
+                            colored.append(f"[green]{line}[/]")
+                        elif line.startswith("-") and not line.startswith("---"):
+                            colored.append(f"[red]{line}[/]")
+                        elif line.startswith("@@"):
+                            colored.append(f"[bold cyan]{line}[/]")
+                        else:
+                            colored.append(f"[dim]{line}[/]")
+                    console.print(Panel(
+                        "\n".join(colored),
+                        title=f"📁 {filepath}",
+                        subtitle=f"[green]+{added_count} добавлено[/] | [red]-{removed_count} удалено[/]",
+                        border_style="bright_blue",
+                        padding=(0, 1),
+                    ))
+                except Exception:
+                    pass
 
-    try:
-        with console.pager():
-            console.print("\n".join(pager_lines))
-    except Exception:
-        logger.warning("Pager недоступен, fallback на print_diff_preview")
-        print_diff_preview(diffs)
 
 
 if __name__ == "__main__":
