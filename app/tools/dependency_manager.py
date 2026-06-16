@@ -698,18 +698,29 @@ class DependencyManager:
             if result.returncode == 0:
                 logger.info(f"Successfully created venv at {venv_path}")
                 self._venv_path = venv_path
-                # Обновляем пути чтобы _force_upgrade_pip использовал
-                # python из новой venv, а не sys.executable
+                # Update paths so _force_upgrade_pip uses python from the new venv
                 self._update_paths()
-                # Для нового venv ВСЕГДА обновляем pip до последней версии,
-                # не только до минимума. Bundled pip может быть >= MIN_PIP_VERSION
-                # но всё равно устаревшим (например 23.x вместо 25.x).
-                # Ошибка апгрейда не критична: venv создан, пайплайн продолжается.
+                # For a new venv, always upgrade pip to latest version unconditionally.
+                # Bundled pip may be >= MIN_PIP_VERSION but still outdated (e.g. 23.x vs 25.x).
+                # Upgrade failure is non-fatal: venv is still usable.
                 if not self._force_upgrade_pip():
                     logger.warning(
                         "[DEPS] pip upgrade after venv creation failed — "
                         "installation of some packages may fail"
                     )
+                # Install ruff (and other formatting tools) into the new venv immediately.
+                # This mirrors the pattern from __init__ (ensure_formatting_tools) but runs
+                # synchronously here because venv creation is itself synchronous.
+                try:
+                    ruff_results = self.ensure_formatting_tools(["black", "autopep8", "isort", "yapf", "ruff"])
+                    installed_tools = [t for t, ok in ruff_results.items() if ok]
+                    if installed_tools:
+                        logger.info(f"[DEPS] Formatting tools installed in new venv: {installed_tools}")
+                    failed_tools = [t for t, ok in ruff_results.items() if not ok]
+                    if failed_tools:
+                        logger.warning(f"[DEPS] Could not install some formatting tools in new venv: {failed_tools}")
+                except Exception as e:
+                    logger.warning(f"[DEPS] Could not install formatting tools in new venv (non-fatal): {e}")
                 return True
             else:
                 logger.error(f"Failed to create venv: {result.stderr}")

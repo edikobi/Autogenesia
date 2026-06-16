@@ -4480,6 +4480,8 @@ except Exception as e:
         logger.debug(f"Network availability: {self._network_available}")
         return self._network_available
     
+    
+    
     async def _run_ruff_e9_check(self, file_path: str, temp_dir: str) -> Tuple[bool, Optional[str]]:
         """Run ruff linter with E9 error codes (syntax errors, undefined names, import errors) on a Python file. Returns (passed, error_message). E9xx = syntax errors that prevent execution."""
         full_path = Path(temp_dir) / file_path

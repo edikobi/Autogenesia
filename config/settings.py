@@ -15,7 +15,8 @@ class Config:
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     MODEL_NORMAL = os.getenv("MODEL_NORMAL", "deepseek-chat")
-    MODEL_DEEPSEEK_REASONER = "deepseek-v4-pro"
+    MODEL_DEEPSEEK_REASONER = os.getenv("MODEL_DEEPSEEK_REASONER", "deepseek-v4-pro")
+    
 
     # OpenRouter
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -70,7 +71,7 @@ class Config:
     
     MODEL_Gemma_4_31B = "google/gemma-4-31b-it"
     
-    MODEL_GLM_5_1 = "z-ai/glm-5.1"
+    MODEL_GLM_5_2 = "z-ai/glm-5.2"
     
     MODEL_Kimi_K_2_7_Code = "moonshotai/kimi-k2.7-code"
     
@@ -194,7 +195,7 @@ class Config:
             "reasoning": {"effort": "xhigh"}
         },
         
-        "z-ai/glm-5.1": {
+        "z-ai/glm-5.2": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OpenRouter",
@@ -569,7 +570,7 @@ class Config:
             cls.MODEL_QWEN_3_7_Plus,
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO,
             cls.MODEL_Kimi_K_2_7_Code,
-            cls.MODEL_GLM_5_1,
+            cls.MODEL_GLM_5_2,
             cls.MODEL_MiniMax_M3,
             cls.MODEL_QWEN if cls.MODEL_QWEN else None,
         ]
@@ -613,7 +614,7 @@ class Config:
             cls.MODEL_Kimi_K_2_7_Code: "Kimi K2.7 Code",
             cls.MODEL_QWEN_3_7_Plus: "Qwen3.7 Plus",
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO: "Xiaomi: MiMo-V2-Pro",
-            cls. MODEL_GLM_5_1: "GLM 5.1",
+            cls. MODEL_GLM_5_2: "GLM 5.1",
             cls.MODEL_MiniMax_M3: "MiniMAX M2.3",
             # Модели генератора
             cls.MODEL_GLM_5_Turbo: "GLM 5 Turbo (OpenRouter)",
