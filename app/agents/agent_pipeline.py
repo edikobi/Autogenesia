@@ -4588,10 +4588,10 @@ Remember: You can override the validator if you believe the critique is incorrec
                 logger.error(f"Error during Python integrity check: {e}")
                 error_details.append(f"System evaluation error (pyright/ruff): {str(e)}")
             finally:
-                if temp_root and os.path.isdir(temp_root):
-                    try:
-                        shutil.rmtree(temp_root, ignore_errors=True)
-                    except Exception:
+    # [PERSISTENT CACHE] Do NOT delete temp_root — it is the stable
+    # .pyright_vfs_cache directory that pyright uses for caching.
+    # Deleting it after every run would destroy the cache and negate
+    # the incremental materialization speedup.
                         pass
         
         
@@ -4693,42 +4693,57 @@ Remember: You can override the validator if you believe the critique is incorrec
     def _materialize_vfs_for_pyright(self) -> str:
         """
         Materialize the entire VFS (whole project + staged changes) into a
-        temporary directory so pyright can resolve all ``app.*`` imports and
-        apply ``pyrightconfig.json``.
+        STABLE PERSISTENT directory so pyright can resolve all ``app.*``
+        imports, apply ``pyrightconfig.json``, and REUSE its internal cache
+        across calls (pyright caches by project root path).
 
         The materialized tree mirrors the real project layout:
-          - Real (unmodified) files are COPIED (NOT symlinked) so that pyright
-            resolves every module's real path inside the temp root, preventing
-            false ``reportMissingImports`` that cascade into
-            ``reportAttributeAccessIssue`` / ``reportReturnType`` on valid code.
-          - Staged (modified / new) files are written as real files with the
-            VFS content.
-          - Deleted files are omitted.
+        - Real (unmodified) files are COPIED INCREMENTALLY: only when the
+            destination is missing or the source has a different size or newer
+            mtime. This avoids redundant I/O on large projects.
+        - Staged (modified / new) files are ALWAYS written with VFS content
+            so pyright always sees the latest staged version.
+        - Deleted files are omitted.
+        - Stale files in the cache dir that no longer exist in the real tree
+            and are not staged are REMOVED to prevent ghost module resolution.
 
-        Additionally, ``pyrightconfig.json`` is explicitly copied into the
-        materialized root (with VFS-staged override honored) so that pyright
-        can ALWAYS discover the config, independent of any ``os.walk`` skip
-        rules.
+        The persistent directory is ``<project_root>/.pyright_vfs_cache``.
+        It is excluded in ``pyrightconfig.json`` (``exclude`` + ``ignore``)
+        so pyright itself never analyses it as a source tree.
+
+        [CRITICAL] Real COPIES (not symlinks) are used because pyright resolves
+        imports via the REAL path of a file. Symlinks back to the original tree
+        break the import graph rooted at temp_root → false reportMissingImports
+        cascading into reportAttributeAccessIssue / reportReturnType on valid code.
+
+        Additionally, ``pyrightconfig.json`` is explicitly written into the
+        materialized root (VFS-staged override honored) so pyright --project
+        always finds the config.
 
         Returns:
-            Absolute path to the temporary root directory.
+            Absolute path to the persistent cache directory.
 
-        The caller is responsible for cleaning up the returned directory.
+        The caller must NOT delete this directory — it is intentionally persistent.
         """
         import os
         import shutil
-        import tempfile
         from pathlib import Path
 
         project_root = Path(self.project_dir).resolve()
-        temp_root = tempfile.mkdtemp(prefix="pyright_vfs_")
+        temp_root = os.path.join(str(project_root), ".pyright_vfs_cache")
+        os.makedirs(temp_root, exist_ok=True)
 
-        # --- 1. Walk the real project tree, copy everything ---
+        # Track which relative paths are expected (real + staged) so we can
+        # remove stale entries that no longer exist.
+        expected_relpaths: set = set()
+
+        # --- 1. Walk the real project tree, copy incrementally ---
         for dirpath, dirnames, filenames in os.walk(str(project_root)):
-            # Skip common non-source directories
+            # Skip common non-source directories AND our own cache dir
             dirnames[:] = [
                 d for d in dirnames
-                if not d.startswith((".", "__pycache__", "node_modules", "venv", ".venv"))
+                if d != ".pyright_vfs_cache"
+                and not d.startswith((".", "__pycache__", "node_modules", "venv", ".venv"))
             ]
 
             rel_dir = os.path.relpath(dirpath, str(project_root))
@@ -4739,28 +4754,34 @@ Remember: You can override the validator if you believe the critique is incorrec
                 src = os.path.join(dirpath, fn)
                 dst = os.path.join(target_dir, fn)
 
-                # --- 2. Overwrite with VFS staged content if present ---
                 # Build the VFS-relative path (forward-slash, no leading slash).
                 vfs_rel = os.path.join(rel_dir, fn).replace("\\", "/")
                 if vfs_rel.startswith("/"):
                     vfs_rel = vfs_rel[1:]
+                if rel_dir == ".":
+                    vfs_rel = fn
 
+                expected_relpaths.add(vfs_rel)
+
+                # --- 2. Overwrite with VFS staged content if present ---
                 staged = self.vfs.read_file(vfs_rel)
                 if staged is not None:
-                    # Staged file (modified or new) – write real file.
-                    with open(dst, "w", encoding="utf-8") as f:
-                        f.write(staged)
-                else:
-                    # Unmodified file – COPY (do NOT symlink).
-                    # [CRITICAL] Pyright resolves imports via the REAL path of a
-                    # file. If siblings are symlinks back to the original tree,
-                    # pyright follows them to the original root and the import
-                    # graph rooted at temp_root breaks -> false reportMissingImports
-                    # cascading into reportAttributeAccessIssue / reportReturnType
-                    # on perfectly valid code. Real copies keep every module's
-                    # real path inside temp_root so imports resolve consistently.
+                    # Staged file (modified or new) – always write to reflect latest changes.
                     try:
-                        shutil.copy2(src, dst)
+                        with open(dst, "w", encoding="utf-8") as f:
+                            f.write(staged)
+                    except (OSError, IOError):
+                        pass
+                else:
+                    # Unmodified file – COPY INCREMENTALLY.
+                    # Only copy if destination is missing or source is newer/different size.
+                    # [CRITICAL] Use real copies, not symlinks — see docstring.
+                    try:
+                        src_stat = os.stat(src)
+                        if (not os.path.exists(dst)
+                                or os.path.getsize(dst) != src_stat.st_size
+                                or os.path.getmtime(src) > os.path.getmtime(dst)):
+                            shutil.copy2(src, dst)
                     except (OSError, shutil.SameFileError):
                         # Best effort: skip unreadable/duplicate files.
                         pass
@@ -4770,15 +4791,42 @@ Remember: You can override the validator if you believe the critique is incorrec
         #         for pyright analysis, but be safe).
         staged_files = self.vfs.get_staged_files()
         for sf in staged_files:
-            target = os.path.join(temp_root, sf.replace("\\", "/"))
+            sf_norm = sf.replace("\\", "/")
+            expected_relpaths.add(sf_norm)
+            target = os.path.join(temp_root, sf_norm)
             if not os.path.exists(target):
                 content = self.vfs.read_file(sf)
                 if content is not None:
                     os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with open(target, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    try:
+                        with open(target, "w", encoding="utf-8") as f:
+                            f.write(content)
+                    except (OSError, IOError):
+                        pass
 
-        # --- 4. [EXPLICIT] Ensure pyrightconfig.json is present at the
+        # --- 4. Remove stale files from the cache that no longer exist in the
+        #         real tree and are not staged, to prevent ghost module resolution.
+        expected_relpaths.add("pyrightconfig.json")
+        try:
+            for walk_dir, walk_subdirs, walk_files in os.walk(temp_root, topdown=True):
+                # Never recurse into or clean subdirs that are OS/tool metadata
+                walk_subdirs[:] = [
+                    d for d in walk_subdirs
+                    if not d.startswith((".", "__pycache__"))
+                ]
+                for wf in walk_files:
+                    full = os.path.join(walk_dir, wf)
+                    rel = os.path.relpath(full, temp_root).replace("\\", "/")
+                    if rel not in expected_relpaths:
+                        try:
+                            os.remove(full)
+                        except OSError:
+                            pass
+        except Exception:
+            # Stale-file cleanup is best-effort; never abort materialization.
+            pass
+
+        # --- 5. [EXPLICIT] Ensure pyrightconfig.json is present at the
         #         materialized root, independent of the os.walk path above.
         #         This guarantees pyright --project <temp_root> always finds
         #         the config. VFS-staged content takes priority (consistent

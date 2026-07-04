@@ -338,7 +338,9 @@ class ChangeValidator:
         
         self._pip_packages_cache: Optional[Set[str]] = None
         self._project_modules_cache: Optional[Set[str]] = None
+        self._requirements_cache: Optional[Set[str]] = None
         self._syntax_checker = None
+        
         
         if ChangeValidator._STDLIB_MODULES is None:
             ChangeValidator._STDLIB_MODULES = self._get_stdlib_modules()
@@ -1236,6 +1238,21 @@ class ChangeValidator:
                     logger.debug(f"Import '{module}' resolved via sys.path addition '{added_path}'")
                     return True, None
         
+        # 5. Check requirements.txt of the TARGET PROJECT for declared dependencies.
+        #    This prevents false "Module not found" errors when:
+        #    - The project has its own venv that wasn't found by get_project_python()
+        #      (e.g., venv is named differently from standard names), OR
+        #    - The package was just added to requirements.txt as a staged change
+        #      but not yet installed.
+        #    Logic: if the top-level import name OR any common alias matches a
+        #    package declared in requirements.txt (or staged requirements.txt),
+        #    treat the import as valid.
+        if self._is_declared_in_requirements(top_level):
+            logger.debug(
+                f"Import '{module}' found in project requirements.txt — treating as valid"
+            )
+            return True, None
+        
         return False, f"Module '{module}' not found"
     
     
@@ -1574,6 +1591,79 @@ class ChangeValidator:
         packages.update(packages_to_add)
         
         return packages
+    
+    def _is_declared_in_requirements(self, import_name: str) -> bool:
+        """
+        Check whether import_name is declared in the target project's
+        requirements.txt (or staged version). Uses a simple heuristic:
+        normalises the requirement line and checks if the import name is a
+        substring. Handles common cases: fpdf2→fpdf, python-docx→docx,
+        Pillow→PIL, etc.
+        """
+        import os
+        from typing import Set, Optional
+
+        if self._requirements_cache is not None:
+            # already populated
+            pass
+        else:
+            self._requirements_cache: Optional[Set[str]] = set()
+
+            try:
+                # 1. Try VFS (staged) first
+                content = self.vfs.read_file("requirements.txt")
+                if content is None:
+                    # 2. Fall back to disk
+                    req_path = os.path.join(self.vfs.project_root, "requirements.txt")
+                    if os.path.exists(req_path):
+                        with open(req_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                    else:
+                        self._requirements_cache = set()
+                        return False
+
+                # Parse requirements
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("-"):
+                        continue
+                    # Extract package name before any version specifier
+                    pkg = line.split(";", 1)[0].split("[", 1)[0]
+                    for sep in (">=", "<=", "==", "!=", "~=", ">", "<"):
+                        if sep in pkg:
+                            pkg = pkg.split(sep, 1)[0]
+                            break
+                    pkg = pkg.strip().lower().replace("-", "_")
+                    if pkg:
+                        self._requirements_cache.add(pkg)
+
+            except (OSError, IOError, Exception):
+                self._requirements_cache = set()
+                return False
+
+        # Normalise import name
+        norm_import = import_name.lower().replace("-", "_")
+
+        if norm_import in self._requirements_cache:
+            return True
+
+        # Common alias mapping (pip name → import name)
+        KNOWN_ALIASES = {
+            "fpdf": "fpdf2",
+            "fpdf2": "fpdf2",
+            "docx": "python_docx",
+            "pil": "pillow",
+            "cv2": "opencv_python",
+            "sklearn": "scikit_learn",
+            "bs4": "beautifulsoup4",
+            "yaml": "pyyaml",
+            "usb": "pyusb",
+            "gi": "pygobject",
+        }
+        if norm_import in KNOWN_ALIASES and KNOWN_ALIASES[norm_import] in self._requirements_cache:
+            return True
+
+        return False
     
     
     def _scan_project_modules(self) -> Set[str]:

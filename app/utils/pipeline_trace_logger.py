@@ -268,40 +268,30 @@ class PipelineTraceLogger:
     
     
     def dump_staging_error_report(self, error_data: Dict[str, Any]) -> None:
-        """Saves a detailed staging error report (with full code) to a separate JSON file."""
-        if not self._file_path:
-            return
-        
+        """Dump a staging error report to a JSON file (unconditionally)."""
         try:
-            import json
-            from datetime import datetime
-            from pathlib import Path
-            
-            # Generate timestamp
+            if self._file_path:
+                error_dir = Path(self._file_path).parent
+            else:
+                error_dir = Path("logs/staging_errors")
+            error_dir.mkdir(parents=True, exist_ok=True)
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            
-            # Generate filename
             filename = f"staging_error_{timestamp}.json"
-            
-            # Construct path
-            TRACE_LOG_DIR = Path(self._file_path).parent
-            file_path = TRACE_LOG_DIR / filename
-            
-            # Create report dict
+            file_path = error_dir / filename
+
             report = {
                 "timestamp": datetime.now().isoformat(),
-                "request_id": self.trace.request_id,
-                "project_dir": self.trace.project_dir,
+                "request_id": getattr(self.trace, "request_id", ""),
+                "project_dir": getattr(self.trace, "project_dir", ""),
+                "error_type": error_data.get("error_type"),
                 "error_data": error_data,
             }
-            
-            # Write to file
-            with open(file_path, 'w', encoding='utf-8') as f:
+
+            with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
-            
-            # Log info
+
             logger.info(f"Staging error report dumped: {file_path}")
-            
         except Exception as e:
             logger.error(f"Failed to dump staging error report: {e}")
     

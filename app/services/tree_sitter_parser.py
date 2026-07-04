@@ -481,6 +481,80 @@ class FaultTolerantParser:
                 return True
         
         return False
+
+    def parse_block_fragment(self, code: str) -> Optional[dict]:
+        """Parses an arbitrary Python code fragment and returns a structural map for indentation computation."""
+        try:
+            self._ensure_parser()
+            if not self._parser:
+                return None
+
+            source_bytes = code.encode('utf-8')
+            tree = self._parser.parse(source_bytes)
+            if not tree or not tree.root_node:
+                return None
+
+            root_node_type = "module"
+            for child in tree.root_node.children:
+                child_text = source_bytes[child.start_byte:child.end_byte].decode('utf-8', errors='ignore')
+                if child.type != "comment" and child_text.strip() != "":
+                    root_node_type = child.type
+                    break
+
+            compound_types = {
+                "for_statement", "while_statement", "if_statement", "try_statement",
+                "with_statement", "match_statement", "function_definition",
+                "async_function_definition", "class_definition", "decorated_definition",
+                "else_clause", "elif_clause", "except_clause", "finally_clause",
+                "except_group"
+            }
+            is_compound = any(child.type in compound_types for child in tree.root_node.children)
+
+            has_errors = self._has_errors_inside(tree.root_node)
+
+            lines = code.splitlines()
+            N = len(lines)
+            line_depths = {}
+
+            def walk(node, current_block_depth):
+                if node.type == "ERROR":
+                    return
+                node_text = source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
+                is_meaningful = (node.type != "comment") and (node_text.strip() != "")
+                if is_meaningful:
+                    line = node.start_point[0]
+                    line_depths.setdefault(line, []).append(current_block_depth)
+
+                for child in node.children:
+                    next_depth = current_block_depth + 1 if node.type == "block" else current_block_depth
+                    walk(child, next_depth)
+
+            walk(tree.root_node, 0)
+
+            line_indent_map = {}
+            for L in range(N):
+                if L in line_depths and line_depths[L]:
+                    line_indent_map[L] = min(line_depths[L]) * 4
+
+            for L in range(N):
+                if L not in line_indent_map:
+                    next_val = 0
+                    for next_L in range(L + 1, N):
+                        if next_L in line_indent_map:
+                            next_val = line_indent_map[next_L]
+                            break
+                    line_indent_map[L] = next_val
+
+            return {
+                "root_node_type": root_node_type,
+                "is_compound": is_compound,
+                "has_errors": has_errors,
+                "line_indent_map": line_indent_map
+            }
+        except Exception as e:
+            logger.debug(f"parse_block_fragment failed: {e}", exc_info=True)
+            return None
+
     
     # ========================================================================
     # CONVENIENCE METHODS
