@@ -1057,8 +1057,8 @@ def _build_adaptive_block_glm_5_2_agent() -> str:
     prompt_parts.append("       * `**Marker:**` (unique string to locate the spot)")
     prompt_parts.append("       * and the technical specification logic.")
     prompt_parts.append("")
-    prompt_parts.append("4. **Do not** change the wording, case, or punctuation of these markers.")
-    prompt_parts.append("   The parser relies on these exact strings to locate your instruction.")
+    prompt_parts.append("4. **STRICT SYNTACTIC CONTRACT:** Treat this format as a rigid syntax, not a stylistic guideline. The parser relies on exact string matching. Any deviation, missing marker, or altered casing will cause a fatal parsing error. Do not improvise, simplify, or 'clean up' the structure.")    
+    
     prompt_parts.append("")
     prompt_parts.append("5. **Keep the instruction self‑contained.** The Code Generator receives")
     prompt_parts.append("   **only** this section – it cannot see your Analysis or tool results.")
@@ -1088,6 +1088,12 @@ def _build_adaptive_block_glm_5_2_agent() -> str:
     prompt_parts.append("If you follow this format, the parser will successfully extract")
     prompt_parts.append("your instruction and the pipeline will execute it correctly.")
     prompt_parts.append("")
+    # >>> ВСТАВИТЬ В САМЫЙ КОНЕЦ ФУНКЦИИ, ПЕРЕД return <<<
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("🔒 FORMAT LOCK — MANDATORY OUTPUT ANCHOR")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("Your response MUST strictly begin with `## Instruction for Code Generator` and follow the exact marker hierarchy defined above. Do not wrap the output in markdown code blocks, do not add introductory text before the header, and do not alter marker casing or punctuation. The downstream parser performs literal string matching — any deviation breaks the execution pipeline. Output only the structured instruction.")
+    prompt_parts.append("")    
     
     return "\n".join(prompt_parts)
 

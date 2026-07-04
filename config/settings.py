@@ -607,20 +607,20 @@ class Config:
             cls.MODEL_DEEPSEEK_REASONER: "Deepseek V4 Pro",
             cls.MODEL_GPT_5_2_Codex: "GPT-5.2 Codex",
             cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.1 Pro (Thinking)",
-            cls.MODEL_QWEN_3_7_MAX: "🚀 Qwen3 Max Thinking (Deep Reasoning)",
+            cls.MODEL_QWEN_3_7_MAX: "🚀 Qwen 3.7 MAX",
             cls.MODEL_QWEN_3_5_Plus: "🌟 Qwen3.5 Plus",
             cls.MODEL_GEMINI_2_FLASH: "Gemini 2.0 Flash",
             cls.MODEL_NORMAL: "DeepSeek Chat (прямой API)",
             cls.MODEL_Kimi_K_2_7_Code: "Kimi K2.7 Code",
             cls.MODEL_QWEN_3_7_Plus: "Qwen3.7 Plus",
             cls.MODEL_Xiaomi_MiMo_V2_5_PRO: "Xiaomi: MiMo-V2-Pro",
-            cls. MODEL_GLM_5_2: "GLM 5.1",
+            cls. MODEL_GLM_5_2: "GLM 5.2",
             cls.MODEL_MiniMax_M3: "MiniMAX M2.3",
             # Модели генератора
             cls.MODEL_GLM_5_Turbo: "GLM 5 Turbo (OpenRouter)",
             cls.MODEL_HAIKU_4_5: "Claude Haiku 4.5 (OpenRouter)",
-            cls.MODEL_GEMINI_3_FLASH : "Gemini 3.5 flash",
-            cls.MODEL_GPT_5_1_Codex_MINI : "GPT-5.1-Codex-Mini"
+            cls.MODEL_GEMINI_3_FLASH: "Gemini 3.5 flash",
+            cls.MODEL_GPT_5_1_Codex_MINI: "GPT-5.1-Codex-Mini"
         }
         
         # Если модель есть в словаре - возвращаем красивое имя
