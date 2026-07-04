@@ -4102,7 +4102,8 @@ class FileModifier:
         CONTRACT:
         - После вызова первая непустая строка ВСЕГДА имеет 0 ведущих пробелов.
         - Относительные отступы между строками сохраняются.
-        - base_strip = ВСЕГДА first_indent первой непустой не-комментарной строки.
+        - При аномалии (first_indent > rest_min): первая строка нормализуется
+          к rest_min перед strip, чтобы тело не получило отрицательных отступов.
         """
         try:
             lines = code.expandtabs(4).splitlines()
@@ -4115,17 +4116,11 @@ class FileModifier:
 
             if not non_blank_non_comment:
                 # Все строки — комментарии или пустые.
-                # КОНТРАКТ: base_strip = отступ первой непустой строки.
-                # Это гарантирует: первая строка → 0 (контракт соблюдён).
                 non_blank = []
                 for i, line in enumerate(lines):
                     if line.strip():
                         non_blank.append((i, len(line) - len(line.lstrip(' '))))
-                # base_strip = отступ ПЕРВОЙ непустой строки (не min!),
-                # чтобы контракт "первая строка на 0" выполнялся даже
-                # когда первая строка — комментарий с бо́льшим отступом чем min.
                 base_strip = non_blank[0][1] if non_blank else 0
-
 
             elif len(non_blank_non_comment) == 1:
                 base_strip = non_blank_non_comment[0][1]
@@ -4133,17 +4128,22 @@ class FileModifier:
             else:
                 first_idx, first_indent = non_blank_non_comment[0]
                 rest_min = min(indent for (_, indent) in non_blank_non_comment[1:])
-                if first_indent < rest_min:
-                    # Первая строка — compound-заголовок (if/def/try/for), тело глубже.
-                    # base_strip = first_indent: заголовок → 0, тело сохраняет rel-отступ.
-                    base_strip = first_indent
+
+                if first_indent > rest_min:
+                    # Аномалия LLM: первая строка глубже тела.
+                    # Нормализуем первую строку к rest_min перед strip,
+                    # чтобы после strip первая строка = 0 и тело сохраняет
+                    # корректные относительные отступы.
+                    # Без этого: base_strip = first_indent → over-stripping тела
+                    # → строки с actual_indent < first_indent уходят в 0
+                    # → теряется структура → SyntaxError: invalid syntax.
+                    lines[first_idx] = (
+                        ' ' * rest_min + lines[first_idx].lstrip(' ')
+                    )
+                    base_strip = rest_min
                 else:
-                    # КОНТРАКТ: первая строка CODE BLOCK всегда на 0 после strip.
-                    # base_strip = first_indent гарантирует это:
-                    # - first_indent == rest_min: плоский блок → все на 0 после strip → OK
-                    # - first_indent > rest_min: аномалия LLM (первая строка глубже остальных) →
-                    #   strip_count = min(base_strip, actual) не даёт отрицательных отступов,
-                    #   строки с меньшим actual_indent просто обнуляются (safe)
+                    # Нормальный случай: first_indent <= rest_min.
+                    # base_strip = first_indent гарантирует контракт "первая строка → 0".
                     base_strip = first_indent
 
             result_lines = []
@@ -4265,15 +4265,16 @@ class FileModifier:
         target_class: Optional[str] = None,
         target_method: Optional[str] = None,
     ) -> str:
-        """Normalize a raw LLM code block to the correct indentation using a deterministic pipeline.
+        """Normalize a raw LLM code block to the correct indentation.
 
-        Этап 0 (новый): Если первая непустая строка CODE BLOCK имеет 0 отступов,
-                         а тело (остальные строки) имеет отступы > 4 —
-                         сдвинуть тело влево до уровня +4, сохраняя внутренние
-                         относительные отступы. Это решает "ошибку первой линии" от LLM,
-                         когда LLM пишет первую строку без отступа, а остальные
-                         с абсолютными отступами места вставки (8+ пробелов).
         Этап 1: Снять fence-маркеры (```python ... ```).
+        Этап 0: Предварительная нормализация "ошибки первой линии" —
+                ВСЕГДА проверяем, что вторая непустая строка CODE BLOCK
+                имеет отступ = first_indent + 4. Если нет — сдвигаем
+                ВСЁ тело (все строки кроме первой) на нужный delta,
+                сохраняя внутренние относительные отступы тела.
+                Это решает случай когда LLM пишет первую строку с 0
+                отступов, а тело с абсолютными отступами места вставки.
         Этап 2: _strip_code_block_to_zero_base — первая строка → 0,
                 относительные отступы сохранить.
         Этап 3: Добавить target_indent к каждой строке.
@@ -4318,30 +4319,86 @@ class FileModifier:
                 return code
 
         try:
-            # ── Этап 0: Предварительная нормализация "ошибки первой линии" ───
-            # Применяется когда LLM пишет первую строку с 0 отступов (ошибка),
-            # а остальные строки — с абсолютными отступами места вставки (> 4).
-            # Задача: сдвинуть ВСЕ строки КРОМЕ ПЕРВОЙ влево так, чтобы
-            # минимальный отступ тела стал ровно 4 (один уровень PEP8).
-            # Внутренние относительные отступы внутри тела сохраняются.
+            # ── Этап 0: Нормализация "ошибки первой линии" ───────────────────
+            # Два типа аномалий LLM:
+            #
+            # ТИП А (тело занижено): first_indent нормальный, но тело
+            #   сдвинуто влево — second_indent < first_indent + 4.
+            #   Решение: поднять тело вправо на delta = (first_indent+4) - second_indent.
+            #
+            # ТИП Б (первая строка занижена): LLM написал первую строку
+            #   с отступом 0, а тело — с абсолютными отступами места вставки.
+            #   Т.е. second_indent > first_indent + 4.
+            #   Решение: поднять первую строку до second_indent - 4,
+            #   чтобы сохранить корректную относительную структуру.
+            #   После этого _strip_code_block_to_zero_base корректно
+            #   сведёт всё к нулю.
+            #
+            # Без исправления: _strip_code_block_to_zero_base использует
+            # first_indent как base_strip. Если first_indent=0 и тело имеет
+            # абсолютные отступы 12+, strip ничего не снимает, а reindent
+            # добавляет target_indent поверх абсолютных отступов → SyntaxError.
             _pre_lines = code.expandtabs(4).splitlines()
-            # Собрать отступы всех непустых не-комментарных строк с их индексами.
-            _nonempty_nc = []  # (line_idx, indent)
+
+            # Найти первую и вторую непустые не-комментарные строки.
+            _nonempty_nc = []
             for _pi, _pl in enumerate(_pre_lines):
                 _ps = _pl.strip()
                 if _ps and not _ps.startswith('#'):
                     _nonempty_nc.append((_pi, len(_pl) - len(_pl.lstrip(' '))))
+                if len(_nonempty_nc) >= 2:
+                    break  # достаточно двух строк для проверки
 
             if len(_nonempty_nc) >= 2:
                 _first_pi, _first_indent = _nonempty_nc[0]
-                _rest_min = min(ind for (_, ind) in _nonempty_nc[1:])
+                _second_pi, _second_indent = _nonempty_nc[1]
 
-                # Условие срабатывания Этапа 0:
-                # - первая непустая строка имеет 0 отступов (ошибка LLM)
-                # - минимальный отступ остальных строк > 4 (избыточный отступ)
-                if _first_indent == 0 and _rest_min > 4:
-                    # excess: насколько нужно сдвинуть тело влево
-                    _excess = _rest_min - 4
+            if len(_nonempty_nc) >= 2:
+                _first_pi, _first_indent = _nonempty_nc[0]
+                _second_pi, _second_indent = _nonempty_nc[1]
+                
+                # ── Фаза 0: PEP8-aware вычисление ожидаемого отступа ──────────
+                _first_line_text = _pre_lines[_first_pi].strip()
+                
+                # 1. Удаляем комментарии для чистоты синтаксического анализа
+                _code_part = _first_line_text.split('#')[0].rstrip()
+                
+                # 2. Жесткие критерии Sibling (ожидаемый отступ = first_indent + 0)
+                _is_sibling = True
+                
+                # Если строка - декоратор, следующая (def/class) должна быть на 0
+                if _code_part.startswith('@'):
+                    _is_sibling = True
+                # Если строка заканчивается двоеточием (if, for, def и т.д.)
+                elif _code_part.endswith(':'):
+                    _is_sibling = False
+                # Если строка заканчивается обратным слешем (продолжение строки)
+                elif _code_part.endswith('\\'):
+                    _is_sibling = False
+                # Если строка заканчивается оператором (незавершенное выражение)
+                elif _code_part.endswith(('+', '-', '*', '/', '=', ',', '(', '[', '{', 'and', 'or', '&', '|', '%')):
+                    _is_sibling = False
+                # Если строка - чистый строковый литерал (неявная конкатенация)
+                elif _code_part.startswith(('"""', "'''", '"', "'")):
+                    _is_sibling = False
+                else:
+                    # 3. Проверка баланса скобок (игнорируя строки внутри них)
+                    # Регулярка убирает строковые литералы, чтобы скобки в них не считались
+                    _clean_for_brackets = re.sub(r'(\"\"\".*?\"\"\"|\'\'\'.*?\'\'\'|\".*?\"|\'.*?\')', '', _code_part)
+                    _open_b = sum(_clean_for_brackets.count(c) for c in '([{')
+                    _close_b = sum(_clean_for_brackets.count(c) for c in ')]}')
+                    if _open_b > _close_b:
+                        _is_sibling = False
+                
+                # 4. Вычисление ожидаемого абсолютного отступа второй строки
+                if _is_sibling:
+                    _expected_second = _first_indent
+                else:
+                    _expected_second = _first_indent + 4
+
+                # 5. Rigid-body сдвиг тела (если реальный отступ не совпадает с ожидаемым)
+                if _second_indent != _expected_second:
+                    _delta = _expected_second - _second_indent
                     _result_pre = []
                     for _pi, _pl in enumerate(_pre_lines):
                         if _pi == _first_pi:
@@ -4351,19 +4408,17 @@ class FileModifier:
                             # Пустые строки → пустыми
                             _result_pre.append('')
                         else:
-                            # Остальные строки: сдвинуть влево на _excess,
-                            # но не ниже 0 (защита от отрицательных отступов).
+                            # Все остальные строки: сдвигаем на _delta
                             _cur_ind = len(_pl) - len(_pl.lstrip(' '))
-                            _new_ind = max(0, _cur_ind - _excess)
+                            _new_ind = max(0, _cur_ind + _delta)
                             _result_pre.append(' ' * _new_ind + _pl.lstrip(' '))
                     code = '\n'.join(_result_pre)
                     print(
                         f"\033[36m[NORMALIZE Этап0 {mode}]\033[0m "
-                        f"Ошибка первой линии исправлена: "
-                        f"first_indent=0, rest_min={_rest_min} → тело сдвинуто "
-                        f"влево на {_excess} (rest_min теперь 4)"
+                        f"Тело сдвинуто на delta={_delta:+d}: second_indent={_second_indent} → {_expected_second} "
+                        f"(first_indent={_first_indent}, sibling={_is_sibling})"
                     )
-
+                    
             # ── Этап 2: strip к нулевой базе ─────────────────────────────────
             stripped_code = self._strip_code_block_to_zero_base(code)
             # Гарантируем отсутствие выживших табов после strip.
