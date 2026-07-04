@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import List, Dict, Any, Optional, Callable
 from enum import Enum
 from app.tools.tool_definitions import ORCHESTRATOR_TOOLS
 from app.tools.tool_executor import ToolExecutor, parse_tool_call
+from app.tools.dependency_manager import list_installed_packages_tool
 from app.llm.api_client import call_llm_with_tools, call_llm, get_model_for_role
 from app.llm.prompt_templates import (
     _build_prefilter_analysis_system_prompt_normal,
@@ -37,6 +39,120 @@ from app.services.project_map_builder import get_project_map_for_prompt
 from app.utils.token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
+
+
+def _find_prefilter_project_python(project_dir: str) -> Optional[str]:
+    """Return Python from a venv inside project_dir only."""
+    project_path = Path(project_dir).resolve()
+    venv_names = ("venv", ".venv", "env", ".env")
+    
+    for name in venv_names:
+        venv_dir = project_path / name
+        if not (venv_dir.is_dir() and (venv_dir / "pyvenv.cfg").exists()):
+            continue
+        
+        python_path = (
+            venv_dir / "Scripts" / "python.exe"
+            if sys.platform == "win32"
+            else venv_dir / "bin" / "python"
+        )
+        if python_path.exists():
+            return str(python_path)
+    
+    return None
+
+
+def _prefilter_missing_project_python_xml(project_dir: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<installed_packages>
+  <language name="python">
+    <!-- Local Python environment not found inside project directory. -->
+    <environment_found>false</environment_found>
+    <project_dir>{project_dir}</project_dir>
+    <message>Pre-filter intentionally does not inspect global Python packages.</message>
+  </language>
+</installed_packages>"""
+
+
+def _extract_language_block(xml: str, language: str) -> str:
+    pattern = rf'\s*<language name="{re.escape(language)}">[\s\S]*?</language>'
+    match = re.search(pattern, xml)
+    return match.group(0).strip() if match else f'<language name="{language}"></language>'
+
+
+def _execute_prefilter_list_installed_packages(
+    project_dir: str,
+    arguments: Dict[str, Any],
+) -> str:
+    """
+    Private pre-filter-only package listing.
+    
+    Python packages are listed only from a venv physically inside project_dir.
+    No VIRTUAL_ENV or sys.executable fallback is used here, so pre-filter cannot
+    mistake the agent/global environment for the target project environment.
+    """
+    language = arguments.get("language")
+    lang_lower = language.lower() if isinstance(language, str) else None
+    if lang_lower == "typescript":
+        lang_lower = "javascript"
+    
+    project_python = _find_prefilter_project_python(project_dir)
+    
+    if lang_lower == "python":
+        if project_python is None:
+            return _prefilter_missing_project_python_xml(project_dir)
+        return list_installed_packages_tool(
+            project_dir=project_dir,
+            language="python",
+            python_path=project_python,
+        )
+    
+    if lang_lower:
+        return list_installed_packages_tool(
+            project_dir=project_dir,
+            language=lang_lower,
+            python_path=project_python,
+        )
+    
+    if project_python is not None:
+        return list_installed_packages_tool(
+            project_dir=project_dir,
+            language=None,
+            python_path=project_python,
+        )
+    
+    xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<installed_packages>']
+    xml_lines.append('  <language name="python">')
+    xml_lines.append('    <!-- Local Python environment not found inside project directory. -->')
+    xml_lines.append('    <environment_found>false</environment_found>')
+    xml_lines.append(f'    <project_dir>{project_dir}</project_dir>')
+    xml_lines.append('    <message>Pre-filter intentionally does not inspect global Python packages.</message>')
+    xml_lines.append('  </language>')
+    
+    for extra_lang in ("javascript", "go", "java"):
+        extra_xml = list_installed_packages_tool(
+            project_dir=project_dir,
+            language=extra_lang,
+            python_path=None,
+        )
+        xml_lines.append("  " + _extract_language_block(extra_xml, extra_lang).replace("\n", "\n  "))
+    
+    xml_lines.append('</installed_packages>')
+    return "\n".join(xml_lines)
+
+
+def _execute_prefilter_tool(
+    tool_executor: ToolExecutor,
+    func_name: str,
+    func_args: Dict[str, Any],
+) -> str:
+    if func_name == "list_installed_packages":
+        return _execute_prefilter_list_installed_packages(
+            project_dir=tool_executor.project_dir,
+            arguments=func_args,
+        )
+    
+    return tool_executor.execute(func_name, func_args)
 
 
 class PreFilterMode(Enum):
@@ -348,7 +464,7 @@ async def _run_advanced_prefilter(
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
-                max_tokens=8000,
+                max_tokens=10000,
             )
             
             content = response.get("content", "")
@@ -371,7 +487,7 @@ async def _run_advanced_prefilter(
                 
                 try:
                     # ToolExecutor.execute() — СИНХРОННЫЙ метод
-                    result = tool_executor.execute(func_name, func_args)
+                    result = _execute_prefilter_tool(tool_executor, func_name, func_args)
                     tool_calls_count += 1
                     success = True
                 except Exception as e:
@@ -423,7 +539,7 @@ async def _run_advanced_prefilter(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=8000,
+            max_tokens=10000,
         )
         
         return final_response, tool_calls_count, model
@@ -508,7 +624,7 @@ async def run_planning_loop(
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
-                    max_tokens=8000,
+                    max_tokens=10000,
                 )
             except Exception as e:
                 error_str = str(e)
@@ -559,7 +675,7 @@ async def run_planning_loop(
                 func_name, func_args, tc_id = parse_tool_call(tc)
                 
                 try:
-                    result = tool_executor.execute(func_name, func_args)
+                    result = _execute_prefilter_tool(tool_executor, func_name, func_args)
                     tool_calls_count += 1
                     success = True
                 except Exception as e:
@@ -606,7 +722,7 @@ async def run_planning_loop(
                 model=current_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=8000,
+                max_tokens=10000,
             )
         except Exception as e:
             error_str = str(e)
@@ -618,7 +734,7 @@ async def run_planning_loop(
                     model=current_model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=8000,
+                    max_tokens=10000,
                 )
             else:
                 logger.error(f"[PRE-FILTER] Non-provider error on final call: {type(e).__name__}: {error_str}")
