@@ -366,13 +366,13 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     (
         "2",
         cfg.MODEL_SONNET_4_5,
-        "Claude Sonnet 4.5",
+        "Claude Sonnet 4.6",
         "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует."
     ),
     (
         "3",
         cfg.MODEL_SONNET_4_6,
-        "Claude Sonnet 4.6",
+        "Claude Sonnet 5",
         "Новая рабочая лошадка, говорят, лучше прошлой."
     ),
     (

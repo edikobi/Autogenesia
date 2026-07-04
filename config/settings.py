@@ -48,10 +48,10 @@ class Config:
     MODEL_OPUS_4_6 = MODEL_OPUS_4_8  # алиас для обратной совместимости
     
     # Claude Sonnet 4.5 - для средних задач (NEW!)
-    MODEL_SONNET_4_5 = "anthropic/claude-sonnet-4.5"
+    MODEL_SONNET_4_5 = "anthropic/claude-sonnet-4.6"
     
     # Claude Sonnet 4.6 - для средних задач (новая модель)
-    MODEL_SONNET_4_6 = "anthropic/claude-sonnet-4.6"
+    MODEL_SONNET_4_6 = "anthropic/claude-sonnet-5"
     
     # GPT-5.1 Codex Max - для простых задач
     # (переменная называется MODEL_GPT_5_2_Codex по историческим причинам)
@@ -248,7 +248,7 @@ class Config:
         },
 
         # Claude Sonnet 4.5 - для средних задач (multi-component, business logic)
-        "anthropic/claude-sonnet-4.5": {
+        "anthropic/claude-sonnet-4.6": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER",
@@ -263,7 +263,7 @@ class Config:
         },
         
         # Claude Sonnet 4.6 - для средних задач (multi-component, business logic)
-        "anthropic/claude-sonnet-4.6": {
+        "anthropic/claude-sonnet-5": {
             "api_key": OPENROUTER_API_KEY,
             "base_url": OPENROUTER_BASE_URL,
             "provider_name": "OPENROUTER",
@@ -602,8 +602,8 @@ class Config:
         model_names = {
             cls.MODEL_OPUS_4_5: "Claude Opus 4.5",
             cls.MODEL_OPUS_4_8: "Claude Opus 4.8",
-            cls.MODEL_SONNET_4_5: "Claude Sonnet 4.5",  # NEW!
-            cls.MODEL_SONNET_4_6: "Claude Sonnet 4.6",
+            cls.MODEL_SONNET_4_5: "Claude Sonnet 4.6",  # NEW!
+            cls.MODEL_SONNET_4_6: "Claude Sonnet 5",
             cls.MODEL_DEEPSEEK_REASONER: "Deepseek V4 Pro",
             cls.MODEL_GPT_5_2_Codex: "GPT-5.2 Codex",
             cls.MODEL_GEMINI_3_PRO: "✨ Gemini 3.1 Pro (Thinking)",
@@ -720,8 +720,8 @@ AVAILABLE_GENERATOR_MODELS = [
 
 AVAILABLE_PREFILTER_MODELS = [
     ("1", Config.MODEL_DEEPSEEK_REASONER, "DeepSeek V 3.2", "Дешёвая модель. Хороший выбор для базового анализа."),
-    ("2", Config.MODEL_SONNET_4_5, "Claude Sonnet 4.5", "Глубокий анализ кода. Отличное понимание архитектуры."),
-    ("3", Config.MODEL_SONNET_4_6, "Claude Sonnet 4.6", "Новейшая версия Sonnet. Улучшенный анализ."),
+    ("2", Config.MODEL_SONNET_4_5, "Claude Sonnet 4.6", "Глубокий анализ кода. Отличное понимание архитектуры."),
+    ("3", Config.MODEL_SONNET_4_6, "Claude Sonnet 5", "Новейшая версия Sonnet. Улучшенный анализ."),
     ("4", Config.MODEL_GEMINI_3_PRO, "Gemini 3.1 Pro", "Огромное контекстное окно. Хорош для больших проектов."),
     ("5", Config.MODEL_GPT_5_2_Codex, "GPT-5.2 Codex", "Мощная модель OpenAI для анализа кода."),
     ("6", Config.MODEL_QWEN_3_7_MAX, "Qwen3 Max Thinking", "Глубокое рассуждение. Хорош для сложных задач.")

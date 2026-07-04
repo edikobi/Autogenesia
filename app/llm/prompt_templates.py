@@ -1022,6 +1022,77 @@ def _get_adaptive_block_new_project(model_id: str) -> str:
     # executor and general - no modifications
     return ""
 
+def _build_adaptive_block_glm_5_2_agent() -> str:
+    """
+    Adaptive block for GLM 5.2 in AGENT MODE.
+    Ensures strict adherence to the parser-required output format specific to Agent Mode.
+    """
+    prompt_parts: List[str] = []
+    
+    prompt_parts.append("")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("⚠️ GLM 5.2 – AGENT MODE OUTPUT FORMAT REMINDER")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("")
+    prompt_parts.append("Your response in Agent Mode is parsed by an automated pipeline that")
+    prompt_parts.append("expects a very specific structure. To ensure your instruction is")
+    prompt_parts.append("correctly extracted and executed:")
+    prompt_parts.append("")
+    prompt_parts.append("1. **Always** include the exact header: `## Instruction for Code Generator`")
+    prompt_parts.append("   (with two hashes, exactly as shown).")
+    prompt_parts.append("")
+    prompt_parts.append("2. Immediately after that, provide:")
+    prompt_parts.append("   - `**SCOPE:** [A|B|C|D]`")
+    prompt_parts.append("   - `**Task:** one‑sentence summary`")
+    prompt_parts.append("")
+    prompt_parts.append("3. For each file, use this EXACT structure:")
+    prompt_parts.append("   - `### FILE: \`path/to/file.ext\``")
+    prompt_parts.append("   - `**Operation:** [MODIFY | CREATE]`")
+    prompt_parts.append("   - `**Language:** [Python | JavaScript | ...]`")
+    prompt_parts.append("   - If CREATE: `**Create folders:** \`path/to/\`` (if needed)")
+    prompt_parts.append("   - `**File-level imports to ADD:**` (or `None`)")
+    prompt_parts.append("   - Then one or more `#### ACTION:` blocks with:")
+    prompt_parts.append("       * `**Target:** <ClassName.method_name>`")
+    prompt_parts.append("       * `**Location:**` (lines or insertion point)")
+    prompt_parts.append("       * `**Marker:**` (unique string to locate the spot)")
+    prompt_parts.append("       * and the technical specification logic.")
+    prompt_parts.append("")
+    prompt_parts.append("4. **Do not** change the wording, case, or punctuation of these markers.")
+    prompt_parts.append("   The parser relies on these exact strings to locate your instruction.")
+    prompt_parts.append("")
+    prompt_parts.append("5. **Keep the instruction self‑contained.** The Code Generator receives")
+    prompt_parts.append("   **only** this section – it cannot see your Analysis or tool results.")
+    prompt_parts.append("")
+    prompt_parts.append("📌 **Correct example for Agent Mode (simplified):**")
+    prompt_parts.append("```")
+    prompt_parts.append("## Instruction for Code Generator")
+    prompt_parts.append("")
+    prompt_parts.append("**SCOPE:** A")
+    prompt_parts.append("**Task:** Add validation to UserService.login method")
+    prompt_parts.append("")
+    prompt_parts.append("### FILE: `app/services/user.py`")
+    prompt_parts.append("**Operation:** MODIFY")
+    prompt_parts.append("**Language:** Python")
+    prompt_parts.append("**File-level imports to ADD:** None")
+    prompt_parts.append("")
+    prompt_parts.append("#### ACTION: MODIFY_METHOD")
+    prompt_parts.append("**Target:** `UserService.login`")
+    prompt_parts.append("**Location:** lines 45-67")
+    prompt_parts.append("**Marker:** `def login(`")
+    prompt_parts.append("**Technical Specification:**")
+    prompt_parts.append("  - Check if user exists in database")
+    prompt_parts.append("  - Verify password against stored hash")
+    prompt_parts.append("  - Return user object on success, None on failure")
+    prompt_parts.append("```")
+    prompt_parts.append("")
+    prompt_parts.append("If you follow this format, the parser will successfully extract")
+    prompt_parts.append("your instruction and the pipeline will execute it correctly.")
+    prompt_parts.append("")
+    
+    return "\n".join(prompt_parts)
+
+# Pre‑build the GLM 5.2 Agent block
+_ADAPTIVE_BLOCK_GLM_5_2_AGENT = _build_adaptive_block_glm_5_2_agent()
 
 def _get_adaptive_block_ask_agent(model_id: str) -> str:
     """
@@ -1050,6 +1121,8 @@ def _get_adaptive_block_ask_agent(model_id: str) -> str:
         base_block = _ADAPTIVE_BLOCK_EXECUTOR
     else:
         base_block = ""
+    if model_id == Config.MODEL_GLM_5_2:
+        return _ADAPTIVE_BLOCK_GLM_5_2_AGENT
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
@@ -1091,6 +1164,10 @@ def _get_adaptive_block_new_project_agent(model_id: str) -> str:
         base_block = _ADAPTIVE_BLOCK_NEW_PROJECT_REASONER
     else:
         base_block = ""
+    
+    if model_id == Config.MODEL_GLM_5_2:
+        return _ADAPTIVE_BLOCK_GLM_5_2_AGENT
+    
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
@@ -1439,6 +1516,9 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("STRICT RULES:")
     prompt_parts.append("1. LANGUAGE: Respond in the same language as the user's query.")
     prompt_parts.append("2. NO FULL CODE: DO NOT write full code implementations. Focus exclusively on the architectural plan. Use snippets only. Code generation is the Orchestrator's task.")
+    # Это новое
+    prompt_parts.append("3. COMPLETION & OUTPUT: You must not get stuck in tool-calling loops. Once you have gathered sufficient context, you MUST stop calling tools and generate your final text response. NEVER end your turn without outputting the formatted plan.")    
+    
     prompt_parts.append("")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("AVAILABLE TOOLS")
@@ -1452,7 +1532,7 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("• list_files(directory) — Discover project layout and file hierarchy.")
     prompt_parts.append("• read_file(file_path) — Full context for deep logic review.")
     prompt_parts.append("")
-    prompt_parts.append("Use tools strategically to gather necessary context. You have NO strict limit on tool calls, but prioritize efficiency.")
+    prompt_parts.append("Use tools strategically to gather necessary context. You are free to make as many tool calls as needed to fully understand the task—there is no arbitrary limit. However, you MUST stop calling tools and generate your final text response as soon as you have sufficient context.")    
     prompt_parts.append("")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("INVESTIGATION & CONTRACT ANALYSIS")

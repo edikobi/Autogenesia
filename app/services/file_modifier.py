@@ -2415,7 +2415,11 @@ class FileModifier:
         if insert_line is None:
             insert_line = class_info.span.end_line
         
-        # Use code exactly as provided
+        # Нормализуем отступы метода по PEP8 (сигнатура=4, тело=8+)
+        # Только для Python файлов. Обязательно для INSERT_INTO_CLASS.
+        _filepath = getattr(instruction, 'filepath', '') or ''
+        if _filepath.endswith('.py') or not _filepath:
+            code = self._normalize_method_indent_for_class(code)
         formatted_code = code
         
         # Добавляем пустую строку перед методом
@@ -2567,7 +2571,11 @@ class FileModifier:
         # Determine indent
         method_indent = method_info.indent
         
-        # Use code exactly as provided
+        # Нормализуем отступы метода по PEP8 (сигнатура=4, тело=8+)
+        # Только для Python файлов. Обязательно для REPLACE_METHOD.
+        _filepath = getattr(instruction, 'filepath', '') or ''
+        if _filepath.endswith('.py') or not _filepath:
+            code = self._normalize_method_indent_for_class(code)
         formatted_code = code.rstrip()
         
         old_lines_count = method_end - method_start
@@ -3151,22 +3159,78 @@ class FileModifier:
                         break
             
             if match_start_offset is not None:
-                matched_line = method_lines[match_start_offset]
-                body_indent = len(matched_line) - len(matched_line.lstrip())
-                formatted_code = code
-                
                 replace_start = method_start + match_start_offset
                 replace_end = replace_start + len(code_lines)
-                
+
+                # Expand compound block if the matched block is a compound statement
+                replace_start, replace_end = self._expand_compound_block_python(
+                    lines, replace_start, replace_end, method_end
+                )
+
+                matched_line = lines[replace_start]
+                _matched_expanded = matched_line.expandtabs(4)
+                body_indent = len(_matched_expanded) - len(_matched_expanded.lstrip(' '))
+
+                # Проверяем: является ли matched_line block-header (if/for/while/def/...).
+                # Если да И code НЕ начинается с block-header (LLM прислал только тело),
+                # нужно добавить +4 — тело блока должно быть глубже заголовка.
+                # Это та же логика, что _code_omits_header в _replace_in_method.
+                _BLOCK_HEADER_PREFIXES_IDEM = (
+                    'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
+                    'async def ', 'async for ', 'async with ', 'match ',
+                )
+                _matched_stripped = matched_line.strip()
+                _matched_is_block_header = (
+                    _matched_stripped.endswith(':') and
+                    any(
+                        _matched_stripped == kw or _matched_stripped.startswith(kw)
+                        for kw in _BLOCK_HEADER_PREFIXES_IDEM
+                    )
+                )
+                _idem_code_first_stripped = next(
+                    (ln.strip() for ln in code.splitlines() if ln.strip()), ''
+                )
+                _idem_code_first_is_block_header = (
+                    _idem_code_first_stripped.endswith(':') and
+                    any(
+                        _idem_code_first_stripped == kw or _idem_code_first_stripped.startswith(kw)
+                        for kw in _BLOCK_HEADER_PREFIXES_IDEM
+                    )
+                )
+                # Idempotency match охватывает ровно len(code_lines) строк до expand.
+                # После _expand_compound_block_python match мог расшириться.
+                # Применяем +4 только если matched одну строку (только header).
+                _idem_match_is_single_line = (replace_end - replace_start) <= 1
+                if (
+                    _matched_is_block_header and
+                    _idem_match_is_single_line and
+                    not _idem_code_first_is_block_header
+                ):
+                    body_indent += 4
+                    logger.debug(
+                        f"_patch_method idempotency: matched_line is block-header, "
+                        f"code omits header → body_indent+4={body_indent}"
+                    )
+
+                _method_text_for_idem = ''.join(lines[method_start:method_end])
+                formatted_code = self._normalize_block_for_insertion(
+                    code, body_indent, mode='replace', method_text=_method_text_for_idem
+                )
+                _idem_syntax_ok = self._validate_full_content(
+                    ''.join(lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:])
+                )
+                if not _idem_syntax_ok:
+                    formatted_code = code
+
                 new_lines = lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:]
                 new_content = ''.join(new_lines)
-                
+
                 target_name = f"{target_class}.{target_method}" if target_class else target_method
-                
+
                 return ModifyResult(
                     success=True,
                     new_content=new_content,
-                    message=f"Replaced {len(code_lines)} lines in method '{target_name}'",
+                    message=f"Replaced {replace_end - replace_start} lines in method '{target_name}'",
                     changes_made=[f"Replaced lines {replace_start + 1}-{replace_end} in {target_name}"],
                 )
         # === END IDEMPOTENCY CHECK ===
@@ -3276,25 +3340,94 @@ class FileModifier:
                         context_line_for_indent = line
                         break
         
-        if context_line_for_indent and context_line_for_indent.strip():
-            body_indent = len(context_line_for_indent.expandtabs(4)) - len(context_line_for_indent.expandtabs(4).lstrip(' '))
-        else:
-            body_indent = 0
-        if insert_after and is_block_node:
-            body_indent += 4
+        # --- Вычисление body_indent через контейнер-блок (новая логика) ---
+        # _resolve_insertion_indent_python НЕ вызывается (помечен deprecated).
         active_anchor = insert_after if insert_after else (insert_before if insert_before else None)
-        active_mode = 'after' if insert_after else ('before' if insert_before else None)
-        if active_anchor and active_anchor.strip() and active_mode is not None:
-            resolved = self._resolve_insertion_indent_python(method_text, active_anchor, active_mode)
-            if resolved is not None:
-                body_indent = resolved
-                logger.debug(f"_patch_method: structural indent resolved={resolved} (mode={active_mode})")
+        active_mode = 'after' if insert_after else ('before' if insert_before else 'replace')
+
+        body_indent = 0  # fallback
+
+        if active_anchor and active_anchor.strip():
+            # Основной путь: Tree-sitter ищет контейнер в точке вставки
+            _container_indent = self._find_container_indent_at_insertion(
+                method_text=method_text,
+                anchor_line=active_anchor,
+                insert_after=bool(insert_after),
+                global_offset=method_start,
+            )
+            if _container_indent is not None:
+                body_indent = _container_indent
+                logger.debug(
+                    f"_patch_method: container-derived body_indent={body_indent} "
+                    f"(anchor={active_anchor!r}, mode={active_mode})"
+                )
+            else:
+                # Текстовый fallback: отступ из context_line_for_indent
+                if context_line_for_indent and context_line_for_indent.strip():
+                    _ctx_exp = context_line_for_indent.expandtabs(4)
+                    body_indent = len(_ctx_exp) - len(_ctx_exp.lstrip(' '))
+                    # Для insert_after: если context_line — clause/block-header, добавить +4
+                    if insert_after:
+                        _ctx_stripped = context_line_for_indent.strip()
+                        _CLAUSE_BLOCK_HDRS = (
+                            'else:', 'finally:', 'elif ', 'except:', 'except ',
+                            'if ', 'for ', 'while ', 'with ', 'try:', 'def ',
+                            'class ', 'async def ', 'async for ', 'async with ',
+                        )
+                        if (_ctx_stripped.endswith(':') and
+                                any(_ctx_stripped == kw or _ctx_stripped.startswith(kw)
+                                    for kw in _CLAUSE_BLOCK_HDRS)):
+                            body_indent += 4
+                            logger.debug(
+                                f"_patch_method: text-fallback +4 for block-header "
+                                f"context_line={context_line_for_indent.rstrip()!r}"
+                            )
+                    logger.debug(
+                        f"_patch_method: text-fallback body_indent={body_indent} "
+                        f"(context_line={context_line_for_indent.rstrip()!r})"
+                    )
+       
+        else:
+            # Default (нет anchor): отступ из context_line_for_indent.
+            # Если context_line_for_indent is None — ищем первую непустую строку тела метода.
+            if context_line_for_indent and context_line_for_indent.strip():
+                body_indent = (
+                    len(context_line_for_indent.expandtabs(4))
+                    - len(context_line_for_indent.expandtabs(4).lstrip(' '))
+                )
+            else:
+                # Fallback: сканируем строки метода, пропускаем def-строку и пустые,
+                # берём отступ первой строки тела метода.
+                _found_body_indent = None
+                _skip_def = True
+                for _ml in method_lines:
+                    _ml_stripped = _ml.strip()
+                    if not _ml_stripped:
+                        continue
+                    if _skip_def and (_ml_stripped.startswith('def ') or _ml_stripped.startswith('async def ')):
+                        _skip_def = False
+                        continue
+                    _skip_def = False
+                    _ml_exp = _ml.expandtabs(4)
+                    _found_body_indent = len(_ml_exp) - len(_ml_exp.lstrip(' '))
+                    break
+                if _found_body_indent is not None:
+                    body_indent = _found_body_indent
+                # Если тело метода пустое — body_indent остаётся 0 (pass-метод), это корректно.
+            logger.debug(
+                f"_patch_method: no-anchor body_indent={body_indent} "
+                f"context_line={repr(context_line_for_indent) if context_line_for_indent else 'None'}"
+            )
+
         formatted_code = self._normalize_block_for_insertion(
             code,
             body_indent,
             file_path=None,
             method_text=method_text,
             anchor=active_anchor,
+            mode=active_mode,
+            target_class=target_class,
+            target_method=target_method,
         )
         
         # 4. Calculate absolute position
@@ -3318,6 +3451,22 @@ class FileModifier:
         _struct_ok = _syntax_ok and self._validate_structural_integrity(existing_content, new_content)
         if not _syntax_ok or not _struct_ok:
             reason = "syntax" if not _syntax_ok else "structural integrity"
+            # Получить конкретное сообщение ошибки ast.parse для терминала
+            _ast_error_msg = ''
+            if not _syntax_ok:
+                try:
+                    ast.parse(new_content)
+                except SyntaxError as _se:
+                    _ast_error_msg = f"SyntaxError: {_se.msg} (line {_se.lineno})"
+                except Exception as _e:
+                    _ast_error_msg = f"{type(_e).__name__}: {_e}"
+            print(
+                f"\033[33m[NORMALIZE PATCH_METHOD]\033[0m "
+                f"ast.parse нашёл ошибку после нормализации — "
+                f"возвращён оригинальный код LLM. "
+                f"Причина: {reason}. "
+                + (f"Ошибка: {_ast_error_msg}" if _ast_error_msg else "")
+            )
             logger.debug(
                 f"_patch_method: full-file {reason} validation failed, "
                 f"falling back to original un-normalized block"
@@ -3327,8 +3476,6 @@ class FileModifier:
             lines.insert(absolute_insert_line, insert_content)
             new_content = ''.join(lines)
             emitted_code = code
-
-
 
         # Store inserted block info for SyntaxChecker
         FileModifier._last_inserted_block = {
@@ -3579,7 +3726,7 @@ class FileModifier:
         Resolve the minimal statement/block-level node matching the anchor and return
         the line-based indentation (leading whitespace of the source line), with
         comment/blank-line protection.
-        
+
         Returns a dict with keys: node_type, start_line, end_line, indent, text.
         Returns None if no valid statement-level candidate is found or on any error.
         """
@@ -3590,17 +3737,16 @@ class FileModifier:
             parse_result = parser.parse(method_text)
             if not parse_result.root_node:
                 return None
-            
+
             anchor_normalized = ' '.join(anchor.split()).strip()
             if not anchor_normalized:
                 return None
-            
+
             # Statement/block-level node types that are valid candidates
             STATEMENT_TYPES = {
                 'expression_statement', 'function_definition', 'class_definition',
                 'if_statement', 'for_statement', 'while_statement', 'with_statement',
                 'try_statement', 'return_statement', 'assignment', 'decorated_definition',
-                'block',
                 # Clause nodes — critical for else:/elif:/except:/finally: anchors
                 'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
                 'except_group',
@@ -3609,7 +3755,7 @@ class FileModifier:
                 'raise_statement', 'pass_statement', 'break_statement', 'continue_statement',
                 'import_statement', 'import_from_statement', 'global_statement', 'nonlocal_statement',
             }
-            
+
             def _is_statement_node(node_type: str) -> bool:
                 """Check if a node type is a statement/block-level type."""
                 if 'statement' in node_type:
@@ -3617,70 +3763,84 @@ class FileModifier:
                 if node_type in STATEMENT_TYPES:
                     return True
                 return False
-            
+
             source_lines = method_text.splitlines()
-            
+
             best_node = None
             best_span = float('inf')
             best_is_exact = False
-            
+            best_is_first_line = False
+
             def traverse(node):
-                nonlocal best_node, best_span, best_is_exact
-                
+                nonlocal best_node, best_span, best_is_exact, best_is_first_line
+
                 # Skip comment nodes
                 if node.type == 'comment':
                     return
-                
+
                 # Get node text
                 node_bytes = method_text.encode('utf-8')[node.start_byte:node.end_byte]
                 node_text = node_bytes.decode('utf-8', errors='ignore')
-                
+
                 # Skip blank/whitespace-only nodes
                 if not node_text.strip():
                     return
-                
+
                 # Only consider statement/block-level nodes as candidates
                 if _is_statement_node(node.type):
                     node_normalized = ' '.join(node_text.split()).strip()
-                    
+
                     is_exact = (node_normalized == anchor_normalized)
+
+                    is_first_line_exact = False
+                    node_lines = node_text.splitlines()
+                    if node_lines:
+                        first_line_norm = ' '.join(node_lines[0].split()).strip()
+                        is_first_line_exact = (first_line_norm == anchor_normalized)
+
                     is_containing = (anchor_normalized in node_normalized)
-                    
-                    if is_exact or is_containing:
-                        span = node.end_byte - node.start_byte
-                        if is_exact:
-                            if not best_is_exact or span < best_span:
-                                best_node = node
-                                best_span = span
-                                best_is_exact = True
-                        else:
-                            if not best_is_exact and span < best_span:
-                                best_node = node
-                                best_span = span
-                
+
+                    span = node.end_byte - node.start_byte
+
+                    if is_exact:
+                        if (not best_is_exact) or (span < best_span):
+                            best_node = node
+                            best_span = span
+                            best_is_exact = True
+                            best_is_first_line = False
+                    elif is_first_line_exact:
+                        if (not best_is_exact) and ((not best_is_first_line) or (span < best_span)):
+                            best_node = node
+                            best_span = span
+                            best_is_first_line = True
+                    elif is_containing:
+                        if (not best_is_exact) and (not best_is_first_line) and (span < best_span):
+                            best_node = node
+                            best_span = span
+
                 # Always traverse children (even for non-statement nodes)
                 for child in node.children:
                     traverse(child)
-            
+
             traverse(parse_result.root_node)
-            
+
             if best_node is not None:
                 start_line_idx = best_node.start_point[0]
-                
+
                 # Edge case: if start_line is out of range of split lines
                 if start_line_idx < 0 or start_line_idx >= len(source_lines):
                     return None
-                
+
                 # Compute indent from the actual source line's leading whitespace.
                 # Tab-safe: expand tabs to 4 spaces, then count only leading spaces,
                 # so the emitted ' ' * indent matches Python's column interpretation.
                 source_line = source_lines[start_line_idx]
                 expanded_source_line = source_line.expandtabs(4)
                 indent = len(expanded_source_line) - len(expanded_source_line.lstrip(' '))
-                
+
                 node_bytes = method_text.encode('utf-8')[best_node.start_byte:best_node.end_byte]
                 node_text = node_bytes.decode('utf-8', errors='ignore')
-                
+
                 return {
                     'node_type': best_node.type,
                     'start_line': best_node.start_point[0],
@@ -3688,13 +3848,37 @@ class FileModifier:
                     'indent': indent,
                     'text': node_text
                 }
-            
+
+            # Text-based fallback
+            if best_node is None:
+                source_lines = method_text.splitlines()
+                for line_idx, line in enumerate(source_lines):
+                    line_norm = ' '.join(line.split()).strip()
+                    if anchor_normalized == line_norm or (anchor_normalized and anchor_normalized in line_norm):
+                        expanded = line.expandtabs(4)
+                        indent = len(expanded) - len(expanded.lstrip(' '))
+                        return {
+                            'node_type': 'text_fallback',
+                            'start_line': line_idx,
+                            'end_line': line_idx,
+                            'indent': indent,
+                            'text': line.strip()
+                        }
+
             return None
         except Exception as e:
             logger.debug(f"Error in _find_anchor_node_python: {e}")
             return None
 
     def _resolve_insertion_indent_python(self, method_text: str, anchor: str, mode: str) -> Optional[int]:
+        """
+        DEPRECATED: НЕ вызывать из _replace_in_method или _patch_method.
+        Метод использует _find_anchor_node_python (Tree-sitter AST-поиск),
+        который ненадёжен для определения отступа вставки.
+        Оставлен для совместимости. Может быть удалён в будущем.
+        Используется только в _expand_compound_block_python для end_line (не для отступа).
+        НЕ ВЫЗЫВАТЬ из _replace_in_method, _patch_method, _normalize_block_for_insertion.
+        """
         try:
             _anchor_stripped = anchor.strip()
             if not _anchor_stripped:
@@ -3752,47 +3936,381 @@ class FileModifier:
             logger.debug(f"_resolve_insertion_indent_python failed: {e}")
             return None
 
+    def _find_container_indent_at_insertion(
+        self,
+        method_text: str,
+        anchor_line: str,
+        insert_after: bool,
+        global_offset: int = 0,
+    ) -> Optional[int]:
+        """
+        Определяет правильный отступ для вставляемого блока кода,
+        анализируя anchor в method_text через текстовый поиск + AST-уточнение.
 
-    def _normalize_block_for_insertion(self, code: str, target_indent: int, file_path: Optional[str] = None, method_text: Optional[str] = None, anchor: Optional[str] = None) -> str:
-        """Normalize a raw LLM code block to the correct indentation, then fast-validate it (ast.parse for Python, tree-sitter for non-Python).
+        Алгоритм:
+        1. Нормализовать anchor_line (первая непустая stripped строка).
+        2. Пропустить clause-ключевые слова (else:/except: и т.д.).
+        3. Найти anchor в method_text (текстовый поиск, точный → подстрока).
+        4. Вычислить anchor_indent из реальной строки (expandtabs → lstrip).
+        5. Определить is_block_header: сначала текстово (надёжно), затем уточнить через
+           Tree-sitter AST — обходить от узла вверх, пока узел начинается на anchor_line_idx.
+        6. Вернуть: insert_after + is_block_header → anchor_indent + 4, иначе → anchor_indent.
 
-        Indent source (in priority order):
-        1. If `method_text` and `anchor` are provided, resolve the minimal statement-level AST node via `_find_anchor_node_python` and use that node's tab-safe line indent (full node-determination logic of the smart pipeline). 
-        2. Otherwise use the externally supplied `target_indent`.
+        Используется ТОЛЬКО в _patch_method (режим PATCH_METHOD).
+        Для REPLACE_IN_METHOD НЕ вызывается — там indent берётся напрямую из lines[match_start].
+        """
+        try:
+            # Шаг 1: нормализация anchor
+            anchor_stripped = next(
+                (ln.strip() for ln in anchor_line.splitlines() if ln.strip()),
+                anchor_line.strip()
+            )
+            if not anchor_stripped:
+                return None
 
-        Returns the normalized block on success, or the ORIGINAL `code` unchanged on any failure so the caller falls back to the current insertion pipeline."""
+            # Шаг 2: пропускаем clause-ключевые слова — они ненадёжны как anchor,
+            # потому что могут вести к неверному контейнеру (else: → тело if-блока,
+            # а не следующий оператор после него).
+            _CLAUSE_PREFIXES = ('else:', 'finally:', 'elif ', 'except ', 'except:')
+            if any(
+                anchor_stripped == kw or anchor_stripped.startswith(kw)
+                for kw in _CLAUSE_PREFIXES
+            ):
+                return None
+
+            source_lines = method_text.splitlines()
+
+            # Шаг 3: найти номер строки anchor в method_text
+            anchor_line_idx = None
+            for idx, src_line in enumerate(source_lines):
+                if src_line.strip() == anchor_stripped:
+                    anchor_line_idx = idx
+                    break
+            if anchor_line_idx is None:
+                # Мягкий поиск: подстрока
+                for idx, src_line in enumerate(source_lines):
+                    if anchor_stripped in src_line:
+                        anchor_line_idx = idx
+                        break
+            if anchor_line_idx is None:
+                return None
+
+            # Шаг 4: вычислить indent самой anchor-строки из реальной строки файла.
+            # ВАЖНО: expandtabs(4) обязателен — табы дают неправильный len().
+            src_line = source_lines[anchor_line_idx]
+            expanded = src_line.expandtabs(4)
+            anchor_indent = len(expanded) - len(expanded.lstrip(' '))
+
+            # Шаг 5a: текстовое определение is_block_header (надёжный baseline).
+            # Этот результат используется если AST-уточнение недоступно или упало.
+            BLOCK_HEADER_PREFIXES = (
+                'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
+                'async def ', 'async for ', 'async with ', 'match ',
+            )
+            is_block_header = (
+                anchor_stripped.endswith(':') and
+                any(
+                    anchor_stripped == kw or anchor_stripped.startswith(kw)
+                    for kw in BLOCK_HEADER_PREFIXES
+                )
+            )
+
+            # Шаг 5b: AST-уточнение через Tree-sitter.
+            # Дедентируем method_text перед парсингом для канонического дерева.
+            # anchor_indent уже вычислен из реальной строки — он глобальный.
+            # После дедентации пересчитываем anchor_col для Tree-sitter.
+            try:
+                parser = _get_tree_sitter_parser()
+                if parser is not None:
+                    BLOCK_HEADER_TYPES = frozenset({
+                        'if_statement', 'for_statement', 'while_statement', 'with_statement',
+                        'try_statement', 'match_statement', 'function_definition',
+                        'class_definition', 'decorated_definition', 'async_statement',
+                        'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
+                        'except_group',
+                    })
+                    # Дедентируем method_text чтобы Tree-sitter получил канонический Python.
+                    # textwrap.dedent убирает общий ведущий пробел всех строк.
+                    import textwrap as _textwrap
+                    dedented_text = _textwrap.dedent(method_text)
+                    # Вычислить смещение дедентации (сколько пробелов убрано).
+                    _first_src = next(
+                        (ln for ln in method_text.splitlines() if ln.strip()), ''
+                    )
+                    _first_ded = next(
+                        (ln for ln in dedented_text.splitlines() if ln.strip()), ''
+                    )
+                    _dedent_offset = (
+                        len(_first_src) - len(_first_src.lstrip(' '))
+                        - (len(_first_ded) - len(_first_ded.lstrip(' ')))
+                    )
+                    # anchor_col в дедентированном тексте:
+                    anchor_col_ded = max(0, anchor_indent - _dedent_offset)
+
+                    parse_result = parser.parse(dedented_text)
+                    if parse_result and parse_result.root_node:
+                        node = parse_result.root_node.descendant_for_point_range(
+                            (anchor_line_idx, anchor_col_ded),
+                            (anchor_line_idx, anchor_col_ded + max(1, len(anchor_stripped)))
+                        )
+                        # Подниматься вверх по дереву, проверяя BLOCK_HEADER_TYPES.
+                        # ВАЖНО: перед break по start_point — проверяем parent.type,
+                        # чтобы не пропустить BLOCK_HEADER-узел, чьё тело (block)
+                        # начинается на другой строке, но сам заголовок — на anchor_line_idx.
+                        while node is not None:
+                            if node.type in BLOCK_HEADER_TYPES:
+                                is_block_header = True
+                                break
+                            if node.parent is None:
+                                break
+                            # Подниматься, пока ТЕКУЩИЙ узел начинается на anchor_line_idx.
+                            # Проверяем start_point текущего узла — это позволяет достичь
+                            # BLOCK_HEADER_TYPES-узла (if_statement, for_statement и т.д.)
+                            # даже когда его тело (block) начинается на другой строке:
+                            # сам заголовок (if_statement) начинается на anchor_line_idx,
+                            # и мы до него доберёмся пока current.start_point == anchor_line_idx.
+                            if node.start_point[0] != anchor_line_idx:
+                                break
+                            node = node.parent
+            
+            except Exception:
+                pass  # Оставляем текстовый результат из шага 5a
+
+            # Шаг 6: вычислить итоговый body_indent
+            if insert_after and is_block_header:
+                body_indent = anchor_indent + 4
+            else:
+                body_indent = anchor_indent
+
+            logger.debug(
+                f"_find_container_indent_at_insertion: anchor={anchor_stripped!r}, "
+                f"anchor_indent={anchor_indent}, is_block_header={is_block_header}, "
+                f"insert_after={insert_after}, body_indent={body_indent}, "
+                f"global_offset={global_offset}"
+            )
+            return body_indent
+
+        except Exception as e:
+            logger.debug(f"_find_container_indent_at_insertion failed: {e}")
+            return None
+
+    def _strip_code_block_to_zero_base(self, code: str) -> str:
+        """Deterministic removal of LLM indents to zero base (base_indent=0).
+        Comments (#...) are ignored when computing base_strip.
+        Preserves relative indent structure.
+
+        CONTRACT:
+        - После вызова первая непустая строка ВСЕГДА имеет 0 ведущих пробелов.
+        - Относительные отступы между строками сохраняются.
+        - base_strip = ВСЕГДА first_indent первой непустой не-комментарной строки.
+        """
+        try:
+            lines = code.expandtabs(4).splitlines()
+            non_blank_non_comment = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    leading = len(line) - len(line.lstrip(' '))
+                    non_blank_non_comment.append((i, leading))
+
+            if not non_blank_non_comment:
+                # Все строки — комментарии или пустые.
+                # КОНТРАКТ: base_strip = отступ первой непустой строки.
+                # Это гарантирует: первая строка → 0 (контракт соблюдён).
+                non_blank = []
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        non_blank.append((i, len(line) - len(line.lstrip(' '))))
+                # base_strip = отступ ПЕРВОЙ непустой строки (не min!),
+                # чтобы контракт "первая строка на 0" выполнялся даже
+                # когда первая строка — комментарий с бо́льшим отступом чем min.
+                base_strip = non_blank[0][1] if non_blank else 0
+
+
+            elif len(non_blank_non_comment) == 1:
+                base_strip = non_blank_non_comment[0][1]
+
+            else:
+                first_idx, first_indent = non_blank_non_comment[0]
+                rest_min = min(indent for (_, indent) in non_blank_non_comment[1:])
+                if first_indent < rest_min:
+                    # Первая строка — compound-заголовок (if/def/try/for), тело глубже.
+                    # base_strip = first_indent: заголовок → 0, тело сохраняет rel-отступ.
+                    base_strip = first_indent
+                else:
+                    # КОНТРАКТ: первая строка CODE BLOCK всегда на 0 после strip.
+                    # base_strip = first_indent гарантирует это:
+                    # - first_indent == rest_min: плоский блок → все на 0 после strip → OK
+                    # - first_indent > rest_min: аномалия LLM (первая строка глубже остальных) →
+                    #   strip_count = min(base_strip, actual) не даёт отрицательных отступов,
+                    #   строки с меньшим actual_indent просто обнуляются (safe)
+                    base_strip = first_indent
+
+            result_lines = []
+            for line in lines:
+                if not line.strip():
+                    result_lines.append('')
+                else:
+                    strip_count = min(base_strip, len(line) - len(line.lstrip(' ')))
+                    result_lines.append(line[strip_count:])
+            return '\n'.join(result_lines)
+        except Exception:
+            return code
+
+    def _check_anchor_inside_nested_function(self, method_text: str, anchor_node: Dict[str, Any]) -> bool:
+        """Uses TS AST of method_text to determine if anchor_node lies inside a nested function_definition (not the top-level def)."""
+        try:
+            parser = _get_tree_sitter_parser()
+            if parser is None:
+                return False
+            parse_result = parser.parse(method_text)
+            if not parse_result or not parse_result.root_node:
+                return False
+            anchor_start_line = anchor_node.get('start_line', -1)
+            func_nodes = []
+
+            def collect_funcs(node, depth=0):
+                if node.type == 'function_definition':
+                    func_nodes.append((node, depth))
+                for child in node.children:
+                    collect_funcs(child, depth + 1)
+
+            collect_funcs(parse_result.root_node)
+            if not func_nodes:
+                return False
+            top_level_start = min(n.start_point[0] for n, _ in func_nodes)
+            for func_node, depth in func_nodes:
+                if func_node.start_point[0] == top_level_start:
+                    continue
+                if func_node.start_point[0] < anchor_start_line <= func_node.end_point[0]:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _first_non_comment_line_is_compound(self, stripped_code: str) -> bool:
+        """Returns True if the first non-comment line of already zero-based stripped_code is a Python compound statement header."""
+        COMPOUND_HEADERS = frozenset({
+            'if ', 'elif ', 'else:', 'for ', 'while ', 'with ', 'try:',
+            'except', 'finally:', 'def ', 'class ', 'async def ',
+            'async for ', 'async with ', 'match ',
+        })
+        for line in stripped_code.splitlines():
+            s = line.strip()
+            if s and not s.startswith('#'):
+                if any(s.startswith(kw) for kw in COMPOUND_HEADERS) or s in ('else:', 'try:', 'finally:'):
+                    return True
+                return False
+        return False
+
+    def _compute_effective_indent_for_scenario(
+        self,
+        scenario: str,
+        anchor_node: Optional[Dict[str, Any]],
+        target_indent: int,
+        mode: str,
+        stripped_code: str,
+    ) -> int:
+        """Computes PEP8-compliant effective indent for the 4 scenarios."""
+        BLOCK_HEADER_TYPES = frozenset({
+            'if_statement', 'for_statement', 'while_statement', 'with_statement',
+            'try_statement', 'match_statement', 'function_definition',
+            'class_definition', 'decorated_definition',
+            'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
+        })
+        if anchor_node is None:
+            return target_indent
+        node_indent = anchor_node['indent']
+        node_type = anchor_node['node_type']
+        if node_type == 'text_fallback':
+            result = node_indent
+            logger.debug(f"_compute_effective_indent: scenario={scenario}, node_type={node_type}, indent={node_indent}, mode={mode} → effective={result}")
+            return result
+        is_block_header = self._first_non_comment_line_is_compound(stripped_code)
+        if is_block_header:
+            return node_indent
+        if mode == 'after' and node_type in BLOCK_HEADER_TYPES:
+            return node_indent + 4
+        result = node_indent
+        logger.debug(f"_compute_effective_indent: scenario={scenario}, node_type={node_type}, indent={node_indent}, mode={mode} → effective={result}")
+        return result
+
+    def _classify_insertion_scenario(
+        self,
+        anchor_node: Optional[Dict[str, Any]],
+        target_class: Optional[str],
+        method_text: str,
+    ) -> str:
+        """Returns one of 'method_simple' | 'function_simple' | 'nested_in_method' | 'nested_in_function'."""
+        is_in_class = bool(target_class and target_class.strip())
+        is_inside_nested = False
+        if anchor_node is not None and method_text:
+            is_inside_nested = self._check_anchor_inside_nested_function(method_text, anchor_node)
+        if is_in_class and is_inside_nested:
+            return 'nested_in_method'
+        if is_in_class and not is_inside_nested:
+            return 'method_simple'
+        if not is_in_class and is_inside_nested:
+            return 'nested_in_function'
+        return 'function_simple'
+
+
+
+    def _normalize_block_for_insertion(
+        self, code: str, target_indent: int,
+        file_path: Optional[str] = None,
+        method_text: Optional[str] = None,
+        anchor: Optional[str] = None,
+        mode: str = 'replace',
+        target_class: Optional[str] = None,
+        target_method: Optional[str] = None,
+    ) -> str:
+        """Normalize a raw LLM code block to the correct indentation using a deterministic pipeline.
+
+        Этап 0 (новый): Если первая непустая строка CODE BLOCK имеет 0 отступов,
+                         а тело (остальные строки) имеет отступы > 4 —
+                         сдвинуть тело влево до уровня +4, сохраняя внутренние
+                         относительные отступы. Это решает "ошибку первой линии" от LLM,
+                         когда LLM пишет первую строку без отступа, а остальные
+                         с абсолютными отступами места вставки (8+ пробелов).
+        Этап 1: Снять fence-маркеры (```python ... ```).
+        Этап 2: _strip_code_block_to_zero_base — первая строка → 0,
+                относительные отступы сохранить.
+        Этап 3: Добавить target_indent к каждой строке.
+
+        ВАЖНО: effective_indent = target_indent.
+        +4 для block-headers вычисляется в _find_container_indent_at_insertion
+        и передаётся сюда уже в target_indent. Двойного +4 нет.
+        Параметры mode, anchor, method_text, target_class, target_method сохранены
+        для обратной совместимости вызывающего кода.
+        """
         if code is None or not code.strip():
             return code
 
-        # ── Strip markdown code fences (```python / ``` ) ──────────────────────
-        # LLM sometimes wraps REPLACE_IN_FUNCTION / PATCH_METHOD code in fences.
-        # Strip ONLY the outer opening and closing fence lines; leave everything
-        # else untouched so the normalization pipeline works on clean code.
+        _original_code = code  # сохранить для сравнения
+
+        # ── Этап 1: Снять fence-маркеры ──────────────────────────────────────
         _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
         _raw_lines = code.splitlines()
         _start = 0
         _end = len(_raw_lines)
-        # Strip opening fence (first non-blank line that is a fence)
         for _i, _ln in enumerate(_raw_lines):
             if not _ln.strip():
                 continue
             if _fence_re.match(_ln):
                 _start = _i + 1
-            break
-        # Strip closing fence (last non-blank line that is a fence)
+                break
         for _i in range(len(_raw_lines) - 1, _start - 1, -1):
             if not _raw_lines[_i].strip():
                 continue
             if _fence_re.match(_raw_lines[_i]):
                 _end = _i
-            break
+                break
         if _start > 0 or _end < len(_raw_lines):
             _stripped = '\n'.join(_raw_lines[_start:_end])
             if _stripped.strip():
                 code = _stripped
             else:
-                # After stripping fences the block is empty — return original unchanged
-                # so the caller's fallback pipeline handles it
                 logger.debug(
                     "_normalize_block_for_insertion: block is empty after fence stripping, "
                     "returning original code unchanged"
@@ -3800,102 +4318,221 @@ class FileModifier:
                 return code
 
         try:
-            effective_indent = target_indent
-            if method_text and anchor and anchor.strip():
-                # For multi-line anchors (e.g. full REPLACE_IN_FUNCTION patterns),
-                # use only the FIRST non-blank line for node resolution.
-                # Using the full multi-line anchor causes _find_anchor_node_python
-                # to match the CONTAINING node (the whole function body, indent=0)
-                # instead of the specific statement, producing a wrong indent.
-                _anchor_for_node = anchor.strip()
-                _anchor_lines = _anchor_for_node.splitlines()
-                _first_anchor_line = next(
-                    (ln.strip() for ln in _anchor_lines if ln.strip()), _anchor_for_node
-                )
-                # Use first-line anchor for node resolution
-                _anchor_for_node = _first_anchor_line
+            # ── Этап 0: Предварительная нормализация "ошибки первой линии" ───
+            # Применяется когда LLM пишет первую строку с 0 отступов (ошибка),
+            # а остальные строки — с абсолютными отступами места вставки (> 4).
+            # Задача: сдвинуть ВСЕ строки КРОМЕ ПЕРВОЙ влево так, чтобы
+            # минимальный отступ тела стал ровно 4 (один уровень PEP8).
+            # Внутренние относительные отступы внутри тела сохраняются.
+            _pre_lines = code.expandtabs(4).splitlines()
+            # Собрать отступы всех непустых не-комментарных строк с их индексами.
+            _nonempty_nc = []  # (line_idx, indent)
+            for _pi, _pl in enumerate(_pre_lines):
+                _ps = _pl.strip()
+                if _ps and not _ps.startswith('#'):
+                    _nonempty_nc.append((_pi, len(_pl) - len(_pl.lstrip(' '))))
 
-                _CLAUSE_KEYWORDS = (
-                    'else:', 'else :', 'finally:', 'finally :',
-                )
-                _is_clause_anchor = (
-                    _anchor_for_node in _CLAUSE_KEYWORDS
-                    or _anchor_for_node.startswith('elif ')
-                    or _anchor_for_node.startswith('except ')
-                    or _anchor_for_node.startswith('except:')
-                )
-                if not _is_clause_anchor:
-                    anchor_node = self._find_anchor_node_python(method_text, _anchor_for_node)
-                    if anchor_node is not None and isinstance(anchor_node.get('indent'), int):
-                        node_indent = anchor_node['indent']
-                        # NOTE: body_offset is intentionally NOT applied here.
-                        # _normalize_block_for_insertion is always called in a
-                        # "replace at anchor level" context — the replacement code
-                        # must align WITH the anchor statement, not INTO its body.
-                        # Applying body_offset here (e.g. +4 for if_statement) causes
-                        # the replacement block to be indented one level too deep,
-                        # producing `invalid syntax` for code that replaces an if/for/while block.
-                        candidate_indent = node_indent  # body_offset = 0, always
-                        if abs(candidate_indent - target_indent) <= 8:
-                            effective_indent = candidate_indent
-                            logger.debug(
-                                f"_normalize_block_for_insertion: node-resolved indent={effective_indent} "
-                                f"(node_type={anchor_node.get('node_type')}, base={node_indent}, body_offset=0 [fixed], text_indent={target_indent})"
-                            )
+            if len(_nonempty_nc) >= 2:
+                _first_pi, _first_indent = _nonempty_nc[0]
+                _rest_min = min(ind for (_, ind) in _nonempty_nc[1:])
+
+                # Условие срабатывания Этапа 0:
+                # - первая непустая строка имеет 0 отступов (ошибка LLM)
+                # - минимальный отступ остальных строк > 4 (избыточный отступ)
+                if _first_indent == 0 and _rest_min > 4:
+                    # excess: насколько нужно сдвинуть тело влево
+                    _excess = _rest_min - 4
+                    _result_pre = []
+                    for _pi, _pl in enumerate(_pre_lines):
+                        if _pi == _first_pi:
+                            # Первую строку не трогаем
+                            _result_pre.append(_pl)
+                        elif not _pl.strip():
+                            # Пустые строки → пустыми
+                            _result_pre.append('')
                         else:
-                            logger.debug(
-                                f"_normalize_block_for_insertion: node-resolved indent={candidate_indent} "
-                                f"rejected (delta={abs(candidate_indent - target_indent)} > 8), "
-                                f"keeping text_indent={target_indent}"
-                            )
-                
-                else:
-                    logger.debug(
-                        f"_normalize_block_for_insertion: skipping node-resolution for "
-                        f"clause anchor {_anchor_for_node!r}, using text_indent={target_indent}"
+                            # Остальные строки: сдвинуть влево на _excess,
+                            # но не ниже 0 (защита от отрицательных отступов).
+                            _cur_ind = len(_pl) - len(_pl.lstrip(' '))
+                            _new_ind = max(0, _cur_ind - _excess)
+                            _result_pre.append(' ' * _new_ind + _pl.lstrip(' '))
+                    code = '\n'.join(_result_pre)
+                    print(
+                        f"\033[36m[NORMALIZE Этап0 {mode}]\033[0m "
+                        f"Ошибка первой линии исправлена: "
+                        f"first_indent=0, rest_min={_rest_min} → тело сдвинуто "
+                        f"влево на {_excess} (rest_min теперь 4)"
                     )
 
+            # ── Этап 2: strip к нулевой базе ─────────────────────────────────
+            stripped_code = self._strip_code_block_to_zero_base(code)
+            # Гарантируем отсутствие выживших табов после strip.
+            stripped_code = stripped_code.expandtabs(4)
 
-            raw_code = code.expandtabs(4).rstrip('\r\n')
-            raw_lines = raw_code.splitlines()
-            non_blank = [(i, len(l) - len(l.lstrip(' '))) for i, l in enumerate(raw_lines) if l.strip()]
-            if not non_blank:
-                base_strip = 0
-            elif len(non_blank) == 1:
-                base_strip = non_blank[0][1]
+            # ── Этап 3: добавить target_indent ───────────────────────────────
+            effective_indent = target_indent
+            logger.debug(
+                f"_normalize_block_for_insertion: effective_indent={effective_indent}, "
+                f"target_indent={target_indent}"
+            )
+
+            stripped_lines = stripped_code.splitlines()
+            result_lines = []
+            for line in stripped_lines:
+                if line.strip():
+                    rel_indent = len(line) - len(line.lstrip(' '))
+                    result_lines.append(
+                        ' ' * (effective_indent + rel_indent) + line.lstrip(' ')
+                    )
+                else:
+                    result_lines.append('')
+            result = '\n'.join(result_lines)
+
+            # ── Терминальный вывод ────────────────────────────────────────────
+            _orig_stripped = _original_code.strip()
+            _result_stripped = result.strip()
+            if _orig_stripped != _result_stripped:
+                _mode_label = f"mode={mode}"
+                _indent_label = f"target_indent={target_indent}"
+                _anchor_label = f", anchor={anchor!r}" if anchor else ""
+                print(
+                    f"\033[32m[NORMALIZE {_mode_label}]\033[0m "
+                    f"Нормализация применена ({_indent_label}{_anchor_label})"
+                )
             else:
-                first_idx, first_indent = non_blank[0]
-                rest_min = min(ind for (i, ind) in non_blank[1:])
-                if abs(first_indent - rest_min) >= 4:
-                    base_strip = rest_min
-                    raw_lines[first_idx] = (' ' * rest_min) + raw_lines[first_idx].lstrip(' ')
-                    logger.debug("_normalize_block_for_insertion: first-line anomaly corrected")
-                else:
-                    base_strip = min(first_indent, rest_min)
-            dedented_lines = []
-            for line in raw_lines:
-                if not line.strip():
-                    dedented_lines.append('')
-                else:
-                    strip_count = min(base_strip, len(line) - len(line.lstrip(' ')))
-                    dedented_lines.append(line[strip_count:])
-            indent_prefix = ' ' * effective_indent
-            normalized_lines = []
-            for line in dedented_lines:
-                if line:
-                    normalized_lines.append(indent_prefix + line)
-                else:
-                    normalized_lines.append('')
-            normalized_code = '\n'.join(normalized_lines)
-            # NOTE: Full-file validation is performed by the caller via
-            # _validate_full_content(new_content) after splicing, because a block
-            # that is valid in isolation can still be invalid when inserted into the
-            # real file context. Here we only return the re-indented block.
-            logger.debug(f"_normalize_block_for_insertion: normalized to indent={effective_indent}")
-            return normalized_code
+                logger.debug(
+                    f"_normalize_block_for_insertion: код не изменился "
+                    f"(target_indent={target_indent}, mode={mode})"
+                )
+
+            return result
         except Exception as e:
             logger.debug(f"_normalize_block_for_insertion fallback: {e}")
             return code
+
+    def _normalize_compound_block(self, code: str, effective_indent: int) -> str:
+        """Dedicated normalization for code blocks that BEGIN with a compound-statement header (try:/for:/if:/while:/with:/def:/class:/elif:/else:/except:/finally:). Unlike the flat-statement path, the dedent base is taken from the HEADER line's own indentation so the relative internal indentation of the suite body is preserved. Returns the re-indented block, or the original `code` on any failure."""
+        if not code or not code.strip():
+            return code
+        lines = code.expandtabs(4).splitlines()
+        non_blank = [(i, len(l) - len(l.lstrip(' '))) for i, l in enumerate(lines) if l.strip()]
+        if not non_blank:
+            return code
+        base_strip = non_blank[0][1]
+        dedented_lines = []
+        for line in lines:
+            if not line.strip():
+                dedented_lines.append('')
+            else:
+                strip_count = min(base_strip, len(line) - len(line.lstrip(' ')))
+                dedented_lines.append(line[strip_count:])
+        indent_prefix = ' ' * effective_indent
+        normalized_lines = []
+        for line in dedented_lines:
+            if line:
+                normalized_lines.append(indent_prefix + line)
+            else:
+                normalized_lines.append('')
+        return '\n'.join(normalized_lines)
+
+    def _apply_simple_reindent(self, code: str, target_indent: int) -> str:
+        """A deterministic, heuristic-free dedent + reindent method. No tree-sitter, no first-line anomaly detection. Used as fallback level 2 in _replace_in_method/_patch_method and as last-resort inside _normalize_block_for_insertion when Exception occurs."""
+        try:
+            lines = code.expandtabs(4).splitlines()
+            non_blank = [l for l in lines if l.strip()]
+            if not non_blank:
+                return code
+            base_strip = min(len(l) - len(l.lstrip(' ')) for l in non_blank)
+            result = []
+            for line in lines:
+                if not line.strip():
+                    result.append('')
+                else:
+                    actual = len(line) - len(line.lstrip(' '))
+                    result.append(' ' * target_indent + line[min(base_strip, actual):])
+            return '\n'.join(result)
+        except Exception:
+            return code
+
+
+    def _normalize_block_via_treesitter(self, code: str, target_indent: int) -> Optional[str]:
+        """Tree-sitter structural normalization engine implementing Strip-then-Parse strategy."""
+        try:
+            expanded = code.expandtabs(4)
+            raw_lines = expanded.splitlines()
+            non_blank = [(i, len(l) - len(l.lstrip(' '))) for i, l in enumerate(raw_lines) if l.strip()]
+            
+            if len(non_blank) < 2:
+                base = non_blank[0][1] if non_blank else 0
+            else:
+                first_idx, first_indent = non_blank[0]
+                rest_min = min(indent for _, indent in non_blank[1:])
+                if first_indent < rest_min:
+                    raw_lines[first_idx] = (' ' * rest_min) + raw_lines[first_idx].lstrip(' ')
+                    base = rest_min
+                else:
+                    base = min(first_indent, rest_min)
+            
+            stripped_lines = []
+            for line in raw_lines:
+                if not line.strip():
+                    stripped_lines.append('')
+                else:
+                    actual = len(line) - len(line.lstrip(' '))
+                    stripped_lines.append(line[min(base, actual):])
+            
+            stripped_code = '\n'.join(stripped_lines)
+            
+            parser_instance = _get_tree_sitter_parser()
+            if parser_instance is None:
+                return None
+            
+            fragment_info = parser_instance.parse_block_fragment(stripped_code)
+            if fragment_info is None:
+                return None
+            if fragment_info.get("has_errors"):
+                return None
+            
+            line_indent_map = fragment_info.get("line_indent_map")
+            if not line_indent_map:
+                return None
+            
+            result = []
+            for i, line in enumerate(stripped_lines):
+                if not line.strip():
+                    result.append('')
+                else:
+                    absolute = target_indent + line_indent_map.get(i, 0)
+                    result.append(' ' * absolute + line.strip())
+            
+            return '\n'.join(result)
+        except Exception as e:
+            logger.debug(f"_normalize_block_via_treesitter failed: {e}", exc_info=True)
+            return None
+
+    def _try_treesitter_compound_normalization(self, code: str, target_indent: int) -> Optional[str]:
+        """Dispatcher gate for tree-sitter compound normalization with corrected activation conditions."""
+        try:
+            parser_instance = _get_tree_sitter_parser()
+            if parser_instance is None:
+                return None
+            
+            fragment_info = parser_instance.parse_block_fragment(code)
+            if fragment_info is None:
+                return None
+            
+            is_compound = fragment_info.get("is_compound", False)
+            has_errors = fragment_info.get("has_errors", False)
+            
+            if not is_compound and not has_errors:
+                return None
+            
+            return self._normalize_block_via_treesitter(code, target_indent)
+        except Exception as e:
+            logger.debug(f"_try_treesitter_compound_normalization failed: {e}", exc_info=True)
+            return None
+
+
 
     def _python_body_offset_for_node(self, node_type: Optional[str]) -> int:
         """Return the indentation offset (in spaces) to apply to a CODE BLOCK that is inserted INTO the body of a Python block header node.
@@ -4248,10 +4885,14 @@ class FileModifier:
         4. Joined pattern search (pattern as single string in joined source)
         """
         def normalize(s: str) -> str:
+            # Сначала expandtabs(4) — иначе табы не схлопываются в .split()
+            # и паттерн не найдётся в файлах со смешанными пробел/таб отступами.
+            s = s.expandtabs(4)
             # Replace non-breaking spaces and unify quotes
             s = s.replace('\xa0', ' ').replace('"', "'")
             # Collapse whitespace
             return ' '.join(s.split())
+        
         
         def normalize_aggressive(s: str) -> str:
             # Even more aggressive: remove ALL whitespace for comparison
@@ -4452,6 +5093,83 @@ class FileModifier:
         )
         return match_start, match_end
 
+    def _expand_compound_block_python(self, lines: List[str], match_start: int, match_end: int, scope_end: int) -> Tuple[int, int]:
+        """Expand a single-line match that landed on a Python compound-statement header (for/if/while/with/try/def/class/elif/else/except/finally and async variants) so the returned range covers the FULL block suite. PRIMARY strategy: re-parse the enclosing scope with tree-sitter via _find_anchor_node_python and use the matched node's real end_line — this is robust and avoids indentation heuristics. FALLBACK strategy (only if tree-sitter cannot resolve the node, e.g. an incomplete/invalid block): an indentation scan that consumes deeper-indented body lines plus chained clauses (elif/else/except/finally). Returns (match_start, expanded_match_end). Returns the input range unchanged when the matched line is not a compound header, the match already spans multiple lines, or on any failure (non-destructive)."""
+        if match_end - match_start != 1:
+            return match_start, match_end
+        if match_start < 0 or match_start >= len(lines):
+            return match_start, match_end
+
+        try:
+            header = lines[match_start].expandtabs(4)
+            header_stripped = header.strip()
+            if not header_stripped or header_stripped.startswith('#'):
+                return match_start, match_end
+
+            COMPOUND_PREFIXES = ('for ', 'if ', 'while ', 'with ', 'try', 'def ', 'class ', 'elif ', 'else', 'except', 'finally', 'async def ', 'async for ', 'async with ', 'match ', 'case ')
+            is_keyword = any(header_stripped == kw.strip().rstrip(':') or header_stripped.startswith(kw) for kw in COMPOUND_PREFIXES)
+            is_compound = header_stripped.endswith(':') and is_keyword
+
+            if not is_compound:
+                return match_start, match_end
+        except Exception as e:
+            logger.debug(f"_expand_compound_block_python header check failed: {e}")
+            return match_start, match_end
+
+        # PRIMARY — tree-sitter node boundary
+        try:
+            scope_lines = lines[match_start:min(scope_end, len(lines))]
+            scope_text = ''.join(scope_lines)
+            anchor_node = self._find_anchor_node_python(scope_text, header_stripped)
+            if anchor_node is not None:
+                node_end = anchor_node.get('end_line')
+                if isinstance(node_end, int) and node_end >= 0:
+                    ts_expanded_end = match_start + node_end + 1
+                    ts_expanded_end = min(ts_expanded_end, scope_end, len(lines))
+                    if ts_expanded_end > match_end:
+                        logger.debug(f"_expand_compound_block_python: tree-sitter expanded match from [{match_start+1}:{match_end}] to [{match_start+1}:{ts_expanded_end}] (node_type={anchor_node.get('node_type')})")
+                        return match_start, ts_expanded_end
+        except Exception as e:
+            logger.debug(f"_expand_compound_block_python: tree-sitter path failed, using fallback: {e}")
+
+        # FALLBACK — indentation scan
+        try:
+            header_indent = len(header) - len(header.lstrip(' '))
+            expanded_end = match_end
+            idx = match_start + 1
+            while idx < min(scope_end, len(lines)):
+                cur = lines[idx]
+                if cur.strip() == '':
+                    idx += 1
+                    continue
+                cur_e = cur.expandtabs(4)
+                cur_indent = len(cur_e) - len(cur_e.lstrip(' '))
+                cur_s = cur_e.strip()
+                if cur_indent > header_indent:
+                    expanded_end = idx + 1
+                    idx += 1
+                    continue
+                if cur_indent == header_indent:
+                    if cur_s.endswith(':') and any(cur_s == c.rstrip(':') or cur_s.startswith(c) for c in ('elif ', 'else', 'except', 'finally')):
+                        expanded_end = idx + 1
+                        idx += 1
+                        continue
+                    else:
+                        break
+                else:  # cur_indent < header_indent
+                    break
+
+            while expanded_end > match_start + 1 and lines[expanded_end - 1].strip() == '':
+                expanded_end -= 1
+
+            if expanded_end > match_end:
+                logger.debug(f"_expand_compound_block_python: heuristic expanded match from [{match_start+1}:{match_end}] to [{match_start+1}:{expanded_end}] (header_indent={header_indent})")
+            return match_start, max(expanded_end, match_end)
+        except Exception as e:
+            logger.debug(f"_expand_compound_block_python fallback failed: {e}")
+            return match_start, match_end
+
+
     def _replace_in_method(
         self,
         existing_content: str,
@@ -4466,6 +5184,9 @@ class FileModifier:
                 - target_method: Имя метода
                 - replace_pattern: Что заменять
                 - code: На что заменять
+        
+        ВАЖНО: line_indent берётся ТОЛЬКО из lines[match_start] (строка файла,
+        где найден replace_pattern). _resolve_insertion_indent_python НЕ вызывается.
         """
         target_class = instruction.target_class
         # FIX: Sanitize method name
@@ -4516,9 +5237,11 @@ class FileModifier:
         match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
         
         # Expand single-line match to cover full multi-line expression
-        # (e.g. `result = {` should expand to include the entire dict literal)
         if match_start is not None and match_end is not None:
             match_start, match_end = self._expand_multiline_block(
+                lines, match_start, match_end, method_end
+            )
+            match_start, match_end = self._expand_compound_block_python(
                 lines, match_start, match_end, method_end
             )
         
@@ -4529,11 +5252,9 @@ class FileModifier:
             for i in range(method_start, method_end):
                 if i < len(lines):
                     line_stripped = lines[i].strip()
-                    # Exact match: the stripped line must equal the comment pattern exactly
                     if line_stripped == comment_pattern:
                         matches.append(i)
             
-            # Only use if exactly one unique match found
             if len(matches) == 1:
                 match_start = matches[0]
                 match_end = matches[0] + 1
@@ -4548,62 +5269,142 @@ class FileModifier:
                 message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
             )
         
+        # line_indent — ЕДИНСТВЕННЫЙ ИСТОЧНИК: строка файла где найден replace_pattern.
+        # Шаг 1: вычислить базовый отступ строки-паттерна.
         old_line = lines[match_start]
         expanded_old = old_line.expandtabs(4)
         line_indent = len(expanded_old) - len(expanded_old.lstrip(' '))
+        logger.debug(
+            f"_replace_in_method: text-derived line_indent={line_indent} "
+            f"(from lines[{match_start}], content={old_line.rstrip()!r})"
+        )
 
-        # Attempt structural indent resolution via Tree-sitter.
-        # Use the replace_pattern as anchor with mode='replace' so the new
-        # block gets the same indentation as the node being replaced.
-        # Falls back to text-derived line_indent if resolution fails.
-        if replace_pattern and replace_pattern.strip():
-            # Extract method text for structural analysis
-            _method_lines_for_resolve = lines[method_start:method_end]
-            _method_text_for_resolve = ''.join(_method_lines_for_resolve)
-            _resolved_indent = self._resolve_insertion_indent_python(
-                _method_text_for_resolve, replace_pattern, 'replace'
-            )
-            if _resolved_indent is not None:
-                logger.debug(
-                    f"_replace_in_method: structural indent resolved="
-                    f"{_resolved_indent} (text_indent={line_indent})"
-                )
-                line_indent = _resolved_indent
+        # Шаг 2: уточнение для случая когда replace_pattern — block-header.
+        # Контракт: "для первой строки CODE BLOCK добавляем столько отступов,
+        # сколько было у replace pattern". Это line_indent — уже правильно.
+        # НО: если CODE BLOCK содержит составной оператор (if/for/def/...) и
+        # replace_pattern сам является block-header — нормализация должна
+        # применять line_indent к первой строке CODE BLOCK и сохранять
+        # относительные отступы внутри. _normalize_block_for_insertion делает
+        # именно это через _strip_code_block_to_zero_base + effective_indent.
+        # Дополнительного уточнения через _find_container_indent_at_insertion
+        # НЕ требуется: для REPLACE мы ЗАМЕНЯЕМ паттерн, а не ВСТАВЛЯЕМ после него.
+        # Отступ первой строки CODE BLOCK = отступ replace_pattern = line_indent. ✅
 
         _method_lines_for_norm = lines[method_start:method_end]
         _method_text_for_norm = ''.join(_method_lines_for_norm)
+
+        # Шаг 3: если replace_pattern является block-header и CODE BLOCK
+        # НЕ содержит того же заголовка (т.е. LLM написал только тело),
+        # нужно добавить +4 к line_indent. Проверяем это через
+        # _find_container_indent_at_insertion с insert_after=True
+        # (смысл: "какой отступ у тела этого блока?").
+        # Шаг 3: если replace_pattern является block-header и CODE BLOCK
+        # НЕ содержит того же заголовка (т.е. LLM написал только тело),
+        # нужно добавить +4 к line_indent. Проверяем это через анализ CODE BLOCK.
+        _replace_stripped = next(
+            (ln.strip() for ln in replace_pattern.splitlines() if ln.strip()),
+            replace_pattern.strip()
+        )
+        _code_first_stripped = next(
+            (ln.strip() for ln in code.splitlines() if ln.strip()),
+            ''
+        )
+        # Определяем: является ли replace_pattern block-header
+        _BLOCK_HEADER_PREFIXES = (
+            'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
+            'async def ', 'async for ', 'async with ', 'match ',
+        )
+        _replace_is_block_header = (
+            _replace_stripped.endswith(':') and
+            any(
+                _replace_stripped == kw or _replace_stripped.startswith(kw)
+                for kw in _BLOCK_HEADER_PREFIXES
+            )
+        )
+        # Определяем: расширенный match охватывает больше одной строки?
+        # Если match_end > match_start + 1, значит _expand_compound_block_python
+        # захватил тело блока — CODE BLOCK заменяет header+body → не нужен +4.
+        _match_is_single_line = (match_end - match_start) <= 1
+
+        # Определяем: CODE BLOCK начинается с того же block-header что replace_pattern,
+        # или CODE BLOCK НЕ содержит block-header вообще (только тело).
+        _code_first_is_block_header = (
+            _code_first_stripped.endswith(':') and
+            any(
+                _code_first_stripped == kw or _code_first_stripped.startswith(kw)
+                for kw in _BLOCK_HEADER_PREFIXES
+            )
+        )
+        # Применяем +4 ТОЛЬКО если:
+        # 1. replace_pattern — block-header
+        # 2. match расширился не более чем на 1 строку (только заголовок)
+        # 3. CODE BLOCK НЕ начинается с block-header (т.е. LLM дал только тело)
+        _code_omits_header = (
+            _replace_is_block_header and
+            _match_is_single_line and
+            not _code_first_is_block_header
+        )
+        if _code_omits_header:
+            # CODE BLOCK содержит только тело → первая строка должна иметь line_indent+4
+            _body_indent = line_indent + 4
+            logger.debug(
+                f"_replace_in_method: replace_pattern is block-header, code omits header → "
+                f"body_indent={_body_indent} (line_indent={line_indent}+4)"
+            )
+        else:
+            # Стандартный случай: CODE BLOCK начинается с той же строки что и паттерн,
+            # или match охватил весь блок (header+body) → используем line_indent
+            _body_indent = line_indent
+            logger.debug(
+                f"_replace_in_method: standard replace, body_indent={_body_indent}"
+            )
+
         formatted_code = self._normalize_block_for_insertion(
             code,
-            line_indent,
+            _body_indent,
             file_path=None,
             method_text=_method_text_for_norm,
             anchor=replace_pattern,
+            mode='replace',
+            target_class=target_class,
+            target_method=target_method,
         )
 
         # Ensure newline at end of formatted code
         if not formatted_code.endswith('\n'):
             formatted_code += '\n'
         
-        
-        
-        # Replace lines: handle splitting formatted_code if it has newlines
+        # Replace lines
         if '\n' in formatted_code.rstrip('\n'):
-            # Multi-line replacement
             new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         else:
-            # Single-line replacement
             new_lines = lines[:match_start] + [formatted_code] + lines[match_end:]
         
         new_content = ''.join(new_lines)
 
-        # Full-file quick check (ast.parse for Python / tree-sitter otherwise)
-        # + non-destructive fallback to the ORIGINAL un-normalized code so the
-        # original CODE BLOCK proceeds through the existing staging pipeline.
+        # Full-file quick check (ast.parse для Python) + non-destructive fallback
         emitted_code = formatted_code
         _syntax_ok = self._validate_full_content(new_content, file_path=None)
         _struct_ok = _syntax_ok and self._validate_structural_integrity(existing_content, new_content)
         if not _syntax_ok or not _struct_ok:
             reason = "syntax" if not _syntax_ok else "structural integrity"
+            # Получить конкретное сообщение ошибки ast.parse для терминала
+            _ast_error_msg = ''
+            if not _syntax_ok:
+                try:
+                    ast.parse(new_content)
+                except SyntaxError as _se:
+                    _ast_error_msg = f"SyntaxError: {_se.msg} (line {_se.lineno})"
+                except Exception as _e:
+                    _ast_error_msg = f"{type(_e).__name__}: {_e}"
+            print(
+                f"\033[33m[NORMALIZE REPLACE_IN_METHOD]\033[0m "
+                f"ast.parse нашёл ошибку после нормализации — "
+                f"возвращён оригинальный код LLM. "
+                f"Причина: {reason}. "
+                + (f"Ошибка: {_ast_error_msg}" if _ast_error_msg else "")
+            )
             logger.debug(
                 f"_replace_in_method: full-file {reason} validation failed, "
                 f"falling back to original un-normalized block"
@@ -4612,7 +5413,6 @@ class FileModifier:
             fallback_lines = lines[:match_start] + [fallback_code] + lines[match_end:]
             new_content = ''.join(fallback_lines)
             emitted_code = fallback_code
-
 
 
         # Store inserted block info for SyntaxChecker
@@ -5078,6 +5878,104 @@ class FileModifier:
         Returns code as-is to let SyntaxChecker handle indentation fixes reliably.
         """
         return code
+
+    def _normalize_method_indent_for_class(self, code: str) -> str:
+        """Обязательная PEP8-нормализация отступов для методов класса.
+        Применяется ТОЛЬКО для режимов INSERT_INTO_CLASS и REPLACE_METHOD.
+        НЕ затрагивает PATCH_METHOD / REPLACE_IN_METHOD.
+
+        Алгоритм:
+          1. Снять fence-маркеры (```python ... ```).
+          2. Найти первую непустую строку кода (сигнатуру: def / async def / @decorator).
+          3. Вычислить её текущий отступ current_first_indent.
+          4. Вычислить delta = 4 - current_first_indent.
+          5. Сдвинуть ВСЕ строки на delta (сохраняя относительные отступы тела).
+          Результат: сигнатура всегда имеет ровно 4 пробела, тело — 8+ (4 + собственный отступ).
+
+        Покрывает два типа ошибок LLM:
+          1. Сигнатура без отступа (0 пробел), тело с правильными относительными → delta=+4.
+          2. Весь метод на 0 (как функция модуля) → delta=+4 (тот же случай).
+          3. Сигнатура с fence-маркерами → fence удаляется перед нормализацией.
+        """
+        try:
+            if not code or not code.strip():
+                return code
+
+            # Шаг 1: Снять fence-маркеры (```python ... ``` или ``` ... ```)
+            _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
+            _raw_lines = code.splitlines()
+            _start = 0
+            _end = len(_raw_lines)
+            for _i, _ln in enumerate(_raw_lines):
+                if not _ln.strip():
+                    continue
+                if _fence_re.match(_ln):
+                    _start = _i + 1
+                    break
+            for _i in range(len(_raw_lines) - 1, _start - 1, -1):
+                if not _raw_lines[_i].strip():
+                    continue
+                if _fence_re.match(_raw_lines[_i]):
+                    _end = _i
+                    break
+            if _start > 0 or _end < len(_raw_lines):
+                _stripped = '\n'.join(_raw_lines[_start:_end])
+                if _stripped.strip():
+                    code = _stripped
+
+            # Шаг 2: expandtabs + splitlines
+            code = code.expandtabs(4)
+            lines = code.splitlines()
+
+            # Шаг 3: найти первую непустую строку (сигнатуру)
+            first_nonempty_idx = None
+            for i, line in enumerate(lines):
+                if line.strip() != '':
+                    first_nonempty_idx = i
+                    break
+            if first_nonempty_idx is None:
+                return code
+
+            current_first_indent = len(lines[first_nonempty_idx]) - len(lines[first_nonempty_idx].lstrip())
+            delta = 4 - current_first_indent
+
+            if delta == 0:
+                print(
+                    f"\033[36m[NORMALIZE REPLACE_METHOD/insert_class]\033[0m "
+                    f"delta=0, отступ уже корректен (first_indent={current_first_indent})"
+                )
+                return code
+
+            # Шаг 4: сдвиг всех строк на delta
+            result_lines = []
+            if delta > 0:
+                for line in lines:
+                    if line.strip() == '':
+                        result_lines.append('')
+                    else:
+                        result_lines.append((' ' * delta) + line)
+            else:
+                for line in lines:
+                    if line.strip() == '':
+                        result_lines.append('')
+                    else:
+                        current_indent = len(line) - len(line.lstrip())
+                        new_indent = max(0, current_indent + delta)
+                        result_lines.append(' ' * new_indent + line.lstrip())
+
+            result = '\n'.join(result_lines)
+            print(
+                f"\033[32m[NORMALIZE REPLACE_METHOD/insert_class]\033[0m "
+                f"Нормализация применена: first_indent={current_first_indent} → 4 "
+                f"(delta={delta:+d})"
+            )
+            return result
+        except Exception as e:
+            print(
+                f"\033[31m[NORMALIZE REPLACE_METHOD/insert_class]\033[0m "
+                f"Ошибка нормализации: {e} — возвращён оригинальный код"
+            )
+            return code
 
 
     def _prepare_code_for_mode_switch(self, code: str) -> str:
@@ -5888,149 +6786,286 @@ class FileModifier:
             logger.debug(f"Smart multilang code modification failed with exception: {e}")
             return None
 
-def _normalize_python_code(self, existing_content: str, instruction: ModifyInstruction, is_replace: bool) -> Optional[ModifyResult]:
-    """
-    Apply the smart edit using the corrected line-based indentation and guarantee
-    ast.parse() post-validation with non-destructive fallback.
-    
-    Returns ModifyResult on success, or None to signal fallback to the standard
-    pipeline with the original unmodified instruction.code.
-    """
-    try:
-        target_class = instruction.target_class
-        target_method = instruction.target_method.strip().rstrip('()') if instruction.target_method else None
-        if not target_method:
-            return None
+    def _is_block_header_line(self, line: str, method_text: str) -> bool:
+            """Return True if the given source line is a block-opening header in the Python AST."""
+            BLOCK_KEYWORDS = (
+                'if ', 'elif ', 'else:', 'for ', 'while ', 'with ', 'try:',
+                'except', 'finally:', 'def ', 'class ', 'async def ',
+                'async for ', 'async with ', 'match '
+            )
+            BARE_KEYWORDS = ('else:', 'try:', 'finally:')
+
+            stripped = line.strip()
+            if not stripped:
+                return False
+            if not (any(stripped.startswith(kw) for kw in BLOCK_KEYWORDS) or stripped in BARE_KEYWORDS):
+                return False
+
+            BLOCK_HEADER_TYPES = frozenset({
+                'if_statement', 'for_statement', 'while_statement', 'with_statement',
+                'try_statement', 'match_statement', 'function_definition',
+                'class_definition', 'decorated_definition',
+                'else_clause', 'elif_clause', 'except_clause', 'finally_clause'
+            })
+
+            try:
+                parser = _get_tree_sitter_parser()
+                if parser is None:
+                    return True
+                parse_result = parser.parse(method_text)
+                src_lines = method_text.splitlines()
+                target_line_idx = None
+                for idx, src_line in enumerate(src_lines):
+                    if src_line.strip() == stripped:
+                        target_line_idx = idx
+                        break
+                if target_line_idx is None:
+                    return True
+                node = parse_result.root_node.descendant_for_point_range(
+                    (target_line_idx, 0), (target_line_idx + 1, 0)
+                )
+                while node is not None and node.type not in BLOCK_HEADER_TYPES:
+                    if node.parent is None or node.parent.start_point[0] != target_line_idx:
+                        break
+                    node = node.parent
+                return node is not None and node.type in BLOCK_HEADER_TYPES
+            except Exception:
+                return True
+
+    def _compute_effective_indent_for_scenario(
+        self,
+        scenario: str,
+        anchor_node: Optional[Dict[str, Any]],
+        target_indent: int,
+        mode: str,
+        stripped_code: str,
+    ) -> int:
+        """Computes PEP8-compliant effective indent for the 4 scenarios."""
+        BLOCK_HEADER_TYPES = frozenset({
+            'if_statement', 'for_statement', 'while_statement', 'with_statement',
+            'try_statement', 'match_statement', 'function_definition',
+            'class_definition', 'decorated_definition',
+            'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
+        })
+        if anchor_node is None:
+            return target_indent
+        node_indent = anchor_node['indent']
+        node_type = anchor_node['node_type']
+        is_block_header = self._first_non_comment_line_is_compound(stripped_code)
+        if is_block_header:
+            return node_indent
+        if mode == 'after' and node_type in BLOCK_HEADER_TYPES:
+            return node_indent + 4
+        return node_indent
+
+    def _classify_insertion_scenario(
+        self,
+        anchor_node: Optional[Dict[str, Any]],
+        target_class: Optional[str],
+        method_text: str,
+    ) -> str:
+        """Returns one of 'method_simple' | 'function_simple' | 'nested_in_method' | 'nested_in_function'."""
+        is_in_class = bool(target_class and target_class.strip())
+        is_inside_nested = False
+        if anchor_node is not None and method_text:
+            is_inside_nested = self._check_anchor_inside_nested_function(method_text, anchor_node)
+        if is_in_class and is_inside_nested:
+            return 'nested_in_method'
+        if is_in_class and not is_inside_nested:
+            return 'method_simple'
+        if not is_in_class and is_inside_nested:
+            return 'nested_in_function'
+        return 'function_simple'
+
+    def _first_non_comment_line_is_compound(self, stripped_code: str) -> bool:
+        """Returns True if the first non-comment line of already zero-based stripped_code is a Python compound statement header."""
+        COMPOUND_HEADERS = frozenset({
+            'if ', 'elif ', 'else:', 'for ', 'while ', 'with ', 'try:',
+            'except', 'finally:', 'def ', 'class ', 'async def ',
+            'async for ', 'async with ', 'match ',
+        })
+        for line in stripped_code.splitlines():
+            s = line.strip()
+            if s and not s.startswith('#'):
+                if any(s.startswith(kw) for kw in COMPOUND_HEADERS) or s in ('else:', 'try:', 'finally:'):
+                    return True
+                return False
+        return False
+
+    def _check_anchor_inside_nested_function(self, method_text: str, anchor_node: Dict[str, Any]) -> bool:
+        """Uses TS AST of method_text to determine if anchor_node lies inside a nested function_definition (not the top-level def)."""
+        try:
+            parser = _get_tree_sitter_parser()
+            if parser is None:
+                return False
+            parse_result = parser.parse(method_text)
+            if not parse_result or not parse_result.root_node:
+                return False
+            anchor_start_line = anchor_node.get('start_line', -1)
+            func_nodes = []
+
+            def collect_funcs(node, depth=0):
+                if node.type == 'function_definition':
+                    func_nodes.append((node, depth))
+                for child in node.children:
+                    collect_funcs(child, depth + 1)
+
+            collect_funcs(parse_result.root_node)
+            if not func_nodes:
+                return False
+            top_level_start = min(n.start_point[0] for n, _ in func_nodes)
+            for func_node, depth in func_nodes:
+                if func_node.start_point[0] == top_level_start:
+                    continue
+                if func_node.start_point[0] < anchor_start_line <= func_node.end_point[0]:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _normalize_python_code(self, existing_content: str, instruction: ModifyInstruction, is_replace: bool) -> Optional[ModifyResult]:
+        """
+        Apply the smart edit using the corrected line-based indentation and guarantee
+        ast.parse() post-validation with non-destructive fallback.
         
-        ts_parser = _get_tree_sitter_parser()
-        if not ts_parser:
-            return None
-        
-        parse_result = ts_parser.parse(existing_content)
-        if target_class:
-            method_info = parse_result.get_method(target_class, target_method)
-        else:
-            method_info = parse_result.get_function(target_method)
-        
-        if not method_info:
-            return None
-        
-        method_start = method_info.span.start_line - 1
-        method_end = method_info.span.end_line
-        lines = existing_content.splitlines(keepends=True)
-        method_lines = lines[method_start:method_end]
-        method_text = ''.join(method_lines)
-        
-        # Determine anchor text based on mode
-        if is_replace:
-            anchor = instruction.replace_pattern
-        else:
-            anchor = instruction.insert_before or instruction.insert_after
-        
-        if not anchor:
-            return None
-        
-        # Find the anchor node (now returns line-based indent from source line)
-        anchor_node = self._find_anchor_node_python(method_text, anchor)
-        if not anchor_node:
-            return None
-        
-        # target_indent is now the matched statement line's leading-whitespace count
-        target_indent = anchor_node['indent']
-        
-        # === Re-indentation block: tab-safe, robust common-prefix dedent ===
-        # Step 1: Tab unification of the LLM block
-        raw_code = instruction.code.expandtabs(4).rstrip('\r\n')
-        
-        # Step 2: Robust common-prefix removal (replaces textwrap.dedent)
-        raw_lines = raw_code.splitlines()
-        
-        # Find first non-blank line to determine base_strip
-        base_strip = 0
-        for line in raw_lines:
-            if line.strip():
-                base_strip = len(line) - len(line.lstrip(' '))
-                break
-        
-        # Remove up to base_strip leading spaces from each non-blank line
-        dedented_lines = []
-        for line in raw_lines:
-            if not line.strip():
-                dedented_lines.append('')
+        Returns ModifyResult on success, or None to signal fallback to the standard
+        pipeline with the original unmodified instruction.code.
+        """
+        try:
+            target_class = instruction.target_class
+            target_method = instruction.target_method.strip().rstrip('()') if instruction.target_method else None
+            if not target_method:
+                return None
+            
+            ts_parser = _get_tree_sitter_parser()
+            if not ts_parser:
+                return None
+            
+            parse_result = ts_parser.parse(existing_content)
+            if target_class:
+                method_info = parse_result.get_method(target_class, target_method)
             else:
-                # Remove up to base_strip leading spaces from the START only
-                leading_spaces = len(line) - len(line.lstrip(' '))
-                strip_count = min(base_strip, leading_spaces)
-                dedented_lines.append(line[strip_count:])
-        
-        # Step 3: Re-indent to target base
-        indent_prefix = ' ' * target_indent
-        normalized_lines = []
-        for line in dedented_lines:
-            if line:  # non-blank
-                normalized_lines.append(indent_prefix + line)
+                method_info = parse_result.get_function(target_method)
+            
+            if not method_info:
+                return None
+            
+            method_start = method_info.span.start_line - 1
+            method_end = method_info.span.end_line
+            lines = existing_content.splitlines(keepends=True)
+            method_lines = lines[method_start:method_end]
+            method_text = ''.join(method_lines)
+            
+            # Determine anchor text based on mode
+            if is_replace:
+                anchor = instruction.replace_pattern
             else:
-                normalized_lines.append('')
-        normalized_code = '\n'.join(normalized_lines)
-        
-        # Compute absolute line positions
-        node_start_abs = method_start + anchor_node['start_line']
-        node_end_abs = method_start + anchor_node['end_line']
-        
-        if is_replace:
-            # Replace mode: replace inclusive line span node_start_abs..node_end_abs
-            new_lines = lines[:node_start_abs] + [normalized_code + '\n'] + lines[node_end_abs + 1:]
-            lines_removed = node_end_abs - node_start_abs + 1
-            start_line = node_start_abs
-            end_line = node_start_abs + len(normalized_code.splitlines())
-        else:
-            # Insert mode: anchor node is guaranteed statement-level
-            if instruction.insert_after:
-                # Insert AFTER node_end_abs
-                insert_pos = node_end_abs + 1
+                anchor = instruction.insert_before or instruction.insert_after
+            
+            if not anchor:
+                return None
+            
+            # Find the anchor node (now returns line-based indent from source line)
+            anchor_node = self._find_anchor_node_python(method_text, anchor)
+            if not anchor_node:
+                return None
+            
+            # target_indent is now the matched statement line's leading-whitespace count
+            target_indent = anchor_node['indent']
+            
+            # === Re-indentation block: tab-safe, robust common-prefix dedent ===
+            # Step 1: Tab unification of the LLM block
+            raw_code = instruction.code.expandtabs(4).rstrip('\r\n')
+            
+            # Step 2: Robust common-prefix removal (replaces textwrap.dedent)
+            raw_lines = raw_code.splitlines()
+            
+            # Find first non-blank line to determine base_strip
+            base_strip = 0
+            for line in raw_lines:
+                if line.strip():
+                    base_strip = len(line) - len(line.lstrip(' '))
+                    break
+            
+            # Remove up to base_strip leading spaces from each non-blank line
+            dedented_lines = []
+            for line in raw_lines:
+                if not line.strip():
+                    dedented_lines.append('')
+                else:
+                    # Remove up to base_strip leading spaces from the START only
+                    leading_spaces = len(line) - len(line.lstrip(' '))
+                    strip_count = min(base_strip, leading_spaces)
+                    dedented_lines.append(line[strip_count:])
+            
+            # Step 3: Re-indent to target base
+            indent_prefix = ' ' * target_indent
+            normalized_lines = []
+            for line in dedented_lines:
+                if line:  # non-blank
+                    normalized_lines.append(indent_prefix + line)
+                else:
+                    normalized_lines.append('')
+            normalized_code = '\n'.join(normalized_lines)
+            
+            # Compute absolute line positions
+            node_start_abs = method_start + anchor_node['start_line']
+            node_end_abs = method_start + anchor_node['end_line']
+            
+            if is_replace:
+                # Replace mode: replace inclusive line span node_start_abs..node_end_abs
+                new_lines = lines[:node_start_abs] + [normalized_code + '\n'] + lines[node_end_abs + 1:]
+                lines_removed = node_end_abs - node_start_abs + 1
+                start_line = node_start_abs
+                end_line = node_start_abs + len(normalized_code.splitlines())
             else:
-                # Insert BEFORE node_start_abs
-                insert_pos = node_start_abs
-            new_lines = lines[:insert_pos] + [normalized_code + '\n'] + lines[insert_pos:]
-            lines_removed = 0
-            start_line = insert_pos
-            end_line = insert_pos + len(normalized_code.splitlines())
-        
-        new_content = ''.join(new_lines)
-        
-        # Mandatory post-validation: ast.parse must succeed
-        # If it raises ANY exception (SyntaxError, IndentationError, etc.), return None
-        # to trigger non-destructive fallback to the standard pipeline
-        ast.parse(new_content)
-        
-        # Success path: update _last_inserted_block and return ModifyResult
-        FileModifier._last_inserted_block = {
-            "start_line": start_line,
-            "end_line": end_line,
-            "code": normalized_code,
-            "target_indent": target_indent
-        }
-        
-        target_name = f"{target_class}.{target_method}" if target_class else target_method
-        if is_replace:
-            message = f"Smart replaced code in '{target_name}'"
-            changes_made = [f"Smart replaced lines {node_start_abs + 1}-{node_end_abs + 1} in {target_name}"]
-        else:
-            action_str = "after" if instruction.insert_after else "before"
-            message = f"Smart inserted code {action_str} anchor in '{target_name}'"
-            changes_made = [f"Smart inserted code {action_str} anchor at line {start_line + 1} in {target_name}"]
-        
-        return ModifyResult(
-            success=True,
-            new_content=new_content,
-            message=message,
-            changes_made=changes_made,
-            lines_added=len(normalized_code.splitlines()),
-            lines_removed=lines_removed
-        )
-    except Exception as e:
-        logger.debug(f"Smart Python code modification failed with exception: {e}")
-        return None
+                # Insert mode: anchor node is guaranteed statement-level
+                if instruction.insert_after:
+                    # Insert AFTER node_end_abs
+                    insert_pos = node_end_abs + 1
+                else:
+                    # Insert BEFORE node_start_abs
+                    insert_pos = node_start_abs
+                new_lines = lines[:insert_pos] + [normalized_code + '\n'] + lines[insert_pos:]
+                lines_removed = 0
+                start_line = insert_pos
+                end_line = insert_pos + len(normalized_code.splitlines())
+            
+            new_content = ''.join(new_lines)
+            
+            # Mandatory post-validation: ast.parse must succeed
+            # If it raises ANY exception (SyntaxError, IndentationError, etc.), return None
+            # to trigger non-destructive fallback to the standard pipeline
+            ast.parse(new_content)
+            
+            # Success path: update _last_inserted_block and return ModifyResult
+            FileModifier._last_inserted_block = {
+                "start_line": start_line,
+                "end_line": end_line,
+                "code": normalized_code,
+                "target_indent": target_indent
+            }
+            
+            target_name = f"{target_class}.{target_method}" if target_class else target_method
+            if is_replace:
+                message = f"Smart replaced code in '{target_name}'"
+                changes_made = [f"Smart replaced lines {node_start_abs + 1}-{node_end_abs + 1} in {target_name}"]
+            else:
+                action_str = "after" if instruction.insert_after else "before"
+                message = f"Smart inserted code {action_str} anchor in '{target_name}'"
+                changes_made = [f"Smart inserted code {action_str} anchor at line {start_line + 1} in {target_name}"]
+            
+            return ModifyResult(
+                success=True,
+                new_content=new_content,
+                message=message,
+                changes_made=changes_made,
+                lines_added=len(normalized_code.splitlines()),
+                lines_removed=lines_removed
+            )
+        except Exception as e:
+            logger.debug(f"Smart Python code modification failed with exception: {e}")
+            return None
 
 
 
