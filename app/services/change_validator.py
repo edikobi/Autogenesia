@@ -583,11 +583,23 @@ class ChangeValidator:
                             language="python",
                         ))
     
+    
+    
+    
                 # === STAGE VALID CHANGES ===
                 if check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
+                    # === ОТЛАДКА 2: Проверка авто-фикса ===
+                    is_reverted = (check_result.fixed_content.strip() == content.strip())
+                    print(f"🔍 [TRACE-AUTOFIX] Файл: {file_path}")
+                    print(f"   Код из VFS:       {len(content)} символов")
+                    print(f"   Код после фикса:  {len(check_result.fixed_content)} символов")
+                    print(f"   Код изменен:      {not is_reverted}")
+                    if len(check_result.fixed_content) < len(content) - 50:
+                        print("[TRACE-AUTOFIX] ВНИМАНИЕ: Авто-фикс значительно уменьшил размер файла (возможен откат к старой версии)")
+                    # =====================================
+
                     logger.info(f"[VALIDATION] Staging auto-fixed content for {file_path}")
                     self.vfs.stage_change(file_path, check_result.fixed_content)
-
             # ========================================================================
             # NON-PYTHON FILE VALIDATION (JS/TS, Go, Java)
             # Uses two-phase approach:
@@ -1902,6 +1914,14 @@ class ChangeValidator:
                 else:
                     logger.warning(f"Staged file has no content: {file_path}")
                     continue
+            
+            # === ОТЛАДКА 3: Проверка материализации ===
+            print(f"🔍 [TRACE-MATERIALIZE] Подготовка файла для RuntimeTester: {file_path}")
+            print(f"   Размер записываемого кода: {len(content)} символов")
+            if "TESTER_TOOLS" in content and "TESTER_UNIQUE_TOOLS" not in content:
+                print(f"❌ [TRACE-MATERIALIZE] ВНИМАНИЕ! Во временную папку записан СТАРЫЙ код (найден TESTER_TOOLS)!")
+            elif "TESTER_UNIQUE_TOOLS" in content:
+                print(f"✅ [TRACE-MATERIALIZE] Временная папка содержит НОВЫЙ код (найден TESTER_UNIQUE_TOOLS).")
             
             dest_path = Path(temp_dir) / file_path
             dest_path.parent.mkdir(parents=True, exist_ok=True)

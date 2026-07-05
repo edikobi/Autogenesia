@@ -3873,6 +3873,21 @@ Remember: You can override the validator if you believe the critique is incorrec
                 # 5. Application attempt
                 result = self.file_modifier.apply_code_block(existing_content, block)
                 
+                
+                if result.success and result.new_content is not None:
+                    final_content = result.new_content
+                    
+                    # === ОТЛАДКА 1: Проверка FileModifier ===
+                    is_identical = (final_content.strip() == existing_content.strip())
+                    print(f"🔍 [TRACE-STAGE] Файл: {block.file_path} | Режим: {block.mode}")
+                    print(f"   Старый код: {len(existing_content)} символов")
+                    print(f"   Новый код:  {len(final_content)} символов")
+                    print(f"   Изменения есть: {not is_identical}")
+                    if is_identical and block.mode == "REPLACE_FILE":
+                        print(f"❌ [TRACE-STAGE] ВНИМАНИЕ! FileModifier вернул success, но код идентичен старому!")
+                    # ==========================================
+
+                    _, ext = os.path.splitext(block.file_path)                
                 if result.success and result.new_content is not None:
                     # 6. Integrity validation [V18.20]
                     final_content = result.new_content
@@ -4381,8 +4396,26 @@ Remember: You can override the validator if you believe the critique is incorrec
         is_python = (language.lower() == 'python')
 
         if is_python:
+            # === TIER 1: СТРОГИЙ КОНТРОЛЬ СИНТАКСИСА (ast.parse) ===
+            # Прогоняем итоговый контент через ast.parse ДО Pyright.
+            # Pyright может "проглотить" поломанные отступы (fault tolerance),
+            # ast.parse жестко ловит SyntaxError и IndentationError.
+            try:
+                import ast
+                ast.parse(content)
+            except SyntaxError as e:
+                err_line = e.lineno if e.lineno else 0
+                err_col = e.offset if e.offset else 0
+                err_msg = e.msg if e.msg else "Invalid syntax"
+                # Формат ошибки строго соответствует контракту Pyright:
+                error_details.append(f"Line {err_line}:{err_col} - syntax: {err_msg}")
+                logger.warning(f"ast.parse strictly caught syntax error: {err_msg} (line {err_line})")
+                # Возвращаем ошибку немедленно, не запуская Pyright
+                return True, "SYNTAX_ERROR", error_details
+
             temp_root = None
             try:
+                # 1. Materialize the FULL project...            try:
                 # 1. Materialize the FULL project (with VFS staged changes) so
                 #    pyright sees every sibling module -> no false reportMissingImports.
                 temp_root = self._materialize_vfs_for_pyright()

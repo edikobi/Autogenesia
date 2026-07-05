@@ -3107,6 +3107,75 @@ class FileModifier:
         method_start = method_info.span.start_line - 1
         method_end = method_info.span.end_line
         
+    # ═══════════════════════════════════════════════════════════════════
+    # 🔍 DIAGNOSTIC: Tree-sitter span vs. target pattern (read-only) ()
+    # ═══════════════════════════════════════════════════════════════════
+        try:
+            _diag_pattern = (insert_before or insert_after or "").strip()
+            _diag_target = f"{target_class}.{target_method}" if target_class else target_method
+            _diag_total_lines = len(lines)
+            _diag_span_size = method_end - method_start
+            
+            print(f"\n{'─'*70}")
+            print(f"🔍 [DIAG-PATCH] target='{_diag_target}'")
+            print(f"   Tree-sitter span: lines [{method_start + 1} .. {method_end}] "
+                f"({_diag_span_size} lines)")
+            print(f"   File total lines: {_diag_total_lines}")
+            print(f"   has_errors inside: {method_info.has_errors}")
+            print(f"   body_start_line:   {method_info.body_start_line}")
+            
+            if _diag_pattern:
+                _diag_method_lines = lines[method_start:method_end]
+                _diag_in_span = any(_diag_pattern in l for l in _diag_method_lines)
+                _diag_in_file = any(_diag_pattern in l for l in lines)
+                
+                print(f"   Search pattern:   {_diag_pattern!r}")
+                print(f"   → in method span: {'✅ YES' if _diag_in_span else '❌ NO'}")
+                print(f"   → in full file:   {'✅ YES' if _diag_in_file else '❌ NO'}")
+                
+                if _diag_in_file and not _diag_in_span:
+                    # Паттерн есть в файле, но Tree-sitter обрезал span!
+                    print(f"\n   ⚠️  PATTERN OUTSIDE TREE-SITTER SPAN!")
+                    print(f"   Tree-sitter закрыл функцию на строке {method_end}, "
+                        f"но паттерн находится дальше:")
+                    for _i, _line in enumerate(lines):
+                        if _diag_pattern in _line:
+                            _in_marker = "IN span" if method_start <= _i < method_end else "OUTSIDE"
+                            print(f"     Line {_i + 1:5d} [{_in_marker:>8s}]: "
+                                f"{_line.rstrip()[:100]!r}")
+                    
+                    # Показать, что находится на границе span
+                    if method_end <= _diag_total_lines:
+                        print(f"\n   📍 At span boundary (line {method_end}):")
+                        for _b in range(max(0, method_end - 2), 
+                                        min(_diag_total_lines, method_end + 3)):
+                            _marker = "← SPAN END" if _b == method_end - 1 else ""
+                            _indent = len(lines[_b]) - len(lines[_b].lstrip())
+                            print(f"     {_b + 1:5d} [indent={_indent:2d}]: "
+                                f"{lines[_b].rstrip()[:80]!r}  {_marker}")
+                
+                elif not _diag_in_file:
+                    # Паттерна НЕТ ВЕЗДЕ — предыдущий REPLACE блок его удалил
+                    print(f"\n   🔴 PATTERN NOT FOUND ANYWHERE IN FILE!")
+                    print(f"   Previous REPLACE_IN_METHOD block likely deleted it.")
+                    _similar = [(i, l.rstrip()) for i, l in enumerate(lines) 
+                                if 'elif choice' in l or 'elif ' in l]
+                    if _similar:
+                        print(f"   Similar 'elif' lines in file:")
+                        for _i, _l in _similar[:8]:
+                            print(f"     Line {_i + 1:5d}: {_l[:100]!r}")
+                else:
+                    # Паттерн в span — значит проблема в find_best_match
+                    print(f"\n   ℹ️  Pattern IS in span. "
+                        f"If staging fails, check find_best_match() logic.")
+            else:
+                print(f"   (no insert_before/insert_after — insertion at end of method)")
+            
+            print(f"{'─'*70}\n")
+        except Exception as _diag_err:
+            print(f"⚠️ [DIAG-PATCH] Diagnostic failed: {_diag_err}")
+        # ═══════════════════════════════════════════════════════════════════        
+        
         # Получаем строки метода
         method_lines = lines[method_start:method_end]
 
@@ -4241,30 +4310,10 @@ class FileModifier:
         target_class: Optional[str] = None,
         target_method: Optional[str] = None,
     ) -> str:
-        """Normalize a raw LLM code block to the correct indentation.
-
-        Этап 1: Снять fence-маркеры (```python ... ```).
-        Этап 0: Предварительная нормализация "ошибки первой линии" —
-                ВСЕГДА проверяем, что вторая непустая строка CODE BLOCK
-                имеет отступ = first_indent + 4. Если нет — сдвигаем
-                ВСЁ тело (все строки кроме первой) на нужный delta,
-                сохраняя внутренние относительные отступы тела.
-                Это решает случай когда LLM пишет первую строку с 0
-                отступов, а тело с абсолютными отступами места вставки.
-        Этап 2: _strip_code_block_to_zero_base — первая строка → 0,
-                относительные отступы сохранить.
-        Этап 3: Добавить target_indent к каждой строке.
-
-        ВАЖНО: effective_indent = target_indent.
-        +4 для block-headers вычисляется в _find_container_indent_at_insertion
-        и передаётся сюда уже в target_indent. Двойного +4 нет.
-        Параметры mode, anchor, method_text, target_class, target_method сохранены
-        для обратной совместимости вызывающего кода.
-        """
         if code is None or not code.strip():
             return code
 
-        _original_code = code  # сохранить для сравнения
+        _original_code = code
 
         # ── Этап 1: Снять fence-маркеры ──────────────────────────────────────
         _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
@@ -4288,140 +4337,127 @@ class FileModifier:
             if _stripped.strip():
                 code = _stripped
             else:
-                logger.debug(
-                    "_normalize_block_for_insertion: block is empty after fence stripping, "
-                    "returning original code unchanged"
-                )
                 return code
 
         try:
-            # ── Этап 0: Нормализация "ошибки первой линии" ───────────────────
-            # Два типа аномалий LLM:
-            #
-            # ТИП А (тело занижено): first_indent нормальный, но тело
-            #   сдвинуто влево — second_indent < first_indent + 4.
-            #   Решение: поднять тело вправо на delta = (first_indent+4) - second_indent.
-            #
-            # ТИП Б (первая строка занижена): LLM написал первую строку
-            #   с отступом 0, а тело — с абсолютными отступами места вставки.
-            #   Т.е. second_indent > first_indent + 4.
-            #   Решение: поднять первую строку до second_indent - 4,
-            #   чтобы сохранить корректную относительную структуру.
-            #   После этого _strip_code_block_to_zero_base корректно
-            #   сведёт всё к нулю.
-            #
-            # Без исправления: _strip_code_block_to_zero_base использует
-            # first_indent как base_strip. Если first_indent=0 и тело имеет
-            # абсолютные отступы 12+, strip ничего не снимает, а reindent
-            # добавляет target_indent поверх абсолютных отступов → SyntaxError.
+            # ── Этап 0: Выравнивание "ошибки первой линии" ───────────────────
             _pre_lines = code.expandtabs(4).splitlines()
 
-            # Найти первую и вторую непустые не-комментарные строки.
             _nonempty_nc = []
             for _pi, _pl in enumerate(_pre_lines):
                 _ps = _pl.strip()
                 if _ps and not _ps.startswith('#'):
                     _nonempty_nc.append((_pi, len(_pl) - len(_pl.lstrip(' '))))
                 if len(_nonempty_nc) >= 2:
-                    break  # достаточно двух строк для проверки
-
-            if len(_nonempty_nc) >= 2:
-                _first_pi, _first_indent = _nonempty_nc[0]
-                _second_pi, _second_indent = _nonempty_nc[1]
+                    break
 
             if len(_nonempty_nc) >= 2:
                 _first_pi, _first_indent = _nonempty_nc[0]
                 _second_pi, _second_indent = _nonempty_nc[1]
                 
-                # ── Фаза 0: PEP8-aware вычисление ожидаемого отступа ──────────
                 _first_line_text = _pre_lines[_first_pi].strip()
-                
-                # 1. Удаляем комментарии для чистоты синтаксического анализа
                 _code_part = _first_line_text.split('#')[0].rstrip()
                 
-                # 2. Жесткие критерии Sibling (ожидаемый отступ = first_indent + 0)
-                _is_sibling = True
-                
-                # Если строка - декоратор, следующая (def/class) должна быть на 0
-                if _code_part.startswith('@'):
+                # Гвард 1: Незакрытые скобки
+                _clean_for_brackets = re.sub(r'(\"\"\".*?\"\"\"|\'\'\'.*?\'\'\'|\".*?\"|\'.*?\')', '', _code_part)
+                _open_b = sum(_clean_for_brackets.count(c) for c in '([{')
+                _close_b = sum(_clean_for_brackets.count(c) for c in ')]}')
+                _has_unclosed_bracket = _open_b > _close_b
+
+                # Гвард 3: Незакрытые строки
+                _has_unclosed_string = False
+                for _quote in ("'''", '"""'):
+                    if _code_part.count(_quote) % 2 != 0:
+                        _has_unclosed_string = True
+                        break
+
+                if not _has_unclosed_bracket and not _has_unclosed_string:
                     _is_sibling = True
-                # Если строка заканчивается двоеточием (if, for, def и т.д.)
-                elif _code_part.endswith(':'):
-                    _is_sibling = False
-                # Если строка заканчивается обратным слешем (продолжение строки)
-                elif _code_part.endswith('\\'):
-                    _is_sibling = False
-                # Если строка заканчивается оператором (незавершенное выражение)
-                elif _code_part.endswith(('+', '-', '*', '/', '=', ',', '(', '[', '{', 'and', 'or', '&', '|', '%')):
-                    _is_sibling = False
-                # Если строка - чистый строковый литерал (неявная конкатенация)
-                elif _code_part.startswith(('"""', "'''", '"', "'")):
-                    _is_sibling = False
-                else:
-                    # 3. Проверка баланса скобок (игнорируя строки внутри них)
-                    # Регулярка убирает строковые литералы, чтобы скобки в них не считались
-                    _clean_for_brackets = re.sub(r'(\"\"\".*?\"\"\"|\'\'\'.*?\'\'\'|\".*?\"|\'.*?\')', '', _code_part)
-                    _open_b = sum(_clean_for_brackets.count(c) for c in '([{')
-                    _close_b = sum(_clean_for_brackets.count(c) for c in ')]}')
-                    if _open_b > _close_b:
-                        _is_sibling = False
-                
-                # 4. Вычисление ожидаемого абсолютного отступа второй строки
-                if _is_sibling:
-                    _expected_second = _first_indent
-                else:
-                    _expected_second = _first_indent + 4
-
-                # 5. Rigid-body сдвиг тела (если реальный отступ не совпадает с ожидаемым)
-                if _second_indent != _expected_second:
-                    _delta = _expected_second - _second_indent
-                    _result_pre = []
-                    for _pi, _pl in enumerate(_pre_lines):
-                        if _pi == _first_pi:
-                            # Первую строку не трогаем
-                            _result_pre.append(_pl)
-                        elif not _pl.strip():
-                            # Пустые строки → пустыми
-                            _result_pre.append('')
-                        else:
-                            # Все остальные строки: сдвигаем на _delta
-                            _cur_ind = len(_pl) - len(_pl.lstrip(' '))
-                            _new_ind = max(0, _cur_ind + _delta)
-                            _result_pre.append(' ' * _new_ind + _pl.lstrip(' '))
-                    code = '\n'.join(_result_pre)
-                    print(
-                        f"\033[36m[NORMALIZE Этап0 {mode}]\033[0m "
-                        f"Тело сдвинуто на delta={_delta:+d}: second_indent={_second_indent} → {_expected_second} "
-                        f"(first_indent={_first_indent}, sibling={_is_sibling})"
-                    )
                     
-            # ── Этап 2: strip к нулевой базе ─────────────────────────────────
-            stripped_code = self._strip_code_block_to_zero_base(code)
-            # Гарантируем отсутствие выживших табов после strip.
-            stripped_code = stripped_code.expandtabs(4)
+                    if _code_part.startswith('@'):
+                        _is_sibling = True
+                    elif _code_part.endswith(':'):
+                        _is_sibling = False
+                    elif _code_part.endswith('\\'):
+                        _is_sibling = False
+                    elif _code_part.endswith(('+', '-', '*', '/', '=', ',', '(', '[', '{', 'and', 'or', '&', '|', '%')):
+                        _is_sibling = False
+                    elif _code_part.startswith(('"""', "'''", '"', "'")):
+                        _is_sibling = False
+                    
+                    if _is_sibling:
+                        _expected_second = _first_indent
+                    else:
+                        _expected_second = _first_indent + 4
 
-            # ── Этап 3: добавить target_indent ───────────────────────────────
-            effective_indent = target_indent
-            logger.debug(
-                f"_normalize_block_for_insertion: effective_indent={effective_indent}, "
-                f"target_indent={target_indent}"
-            )
-
-            stripped_lines = stripped_code.splitlines()
-            result_lines = []
-            for line in stripped_lines:
-                if line.strip():
-                    rel_indent = len(line) - len(line.lstrip(' '))
-                    result_lines.append(
-                        ' ' * (effective_indent + rel_indent) + line.lstrip(' ')
-                    )
-                else:
-                    result_lines.append('')
-            result = '\n'.join(result_lines)
-
+                    if _second_indent != _expected_second:
+                        _delta = _expected_second - _second_indent
+                        
+                        if _delta < 0:
+                            # ТИП Б: Тело сдвинуто вправо сильнее, чем ожидалось.
+                            # LLM написал первую строку с 0, а тело с 16.
+                            if _is_sibling:
+                                # Для независимых выражений выравниваем по телу
+                                _new_first_indent = _second_indent
+                            else:
+                                # Для блоков (if/for/def) первая строка должна быть на 4 левее тела!
+                                _new_first_indent = max(0, _second_indent - 4)
+                                
+                            _pre_lines[_first_pi] = (' ' * _new_first_indent) + _pre_lines[_first_pi].lstrip(' ')
+                            print(
+                                f"\033[36m[NORMALIZE Этап0 {mode}]\033[0m "
+                                f"Тип Б: первая строка поднята с {_first_indent} → {_new_first_indent} "
+                                f"(чтобы сохранить тело second_indent={_second_indent})"
+                            )
+                        else:
+                            # ТИП А: Тело сдвинуто влево (second_indent < expected).
+                            # LLM написал первую строку с 16, а тело с 0.
+                            # Мы сдвигаем всё тело вправо на delta.
+                            _result_pre = []
+                            for _pi, _pl in enumerate(_pre_lines):
+                                if _pi == _first_pi:
+                                    _result_pre.append(_pl)
+                                elif not _pl.strip():
+                                    _result_pre.append('')
+                                else:
+                                    _cur_ind = len(_pl) - len(_pl.lstrip(' '))
+                                    _new_ind = _cur_ind + _delta
+                                    _result_pre.append(' ' * _new_ind + _pl.lstrip(' '))
+                            _pre_lines = _result_pre
+                            print(
+                                f"\033[36m[NORMALIZE Этап0 {mode}]\033[0m "
+                                f"Тип А: тело сдвинуто на delta={_delta:+d}: second_indent={_second_indent} → {_expected_second}"
+                            )
+            
+            # ── Этап 2: Унифицированный сдвиг к target_indent ────────────────
+            _base_indent = None
+            for _pl in _pre_lines:
+                _ps = _pl.strip()
+                if _ps and not _ps.startswith('#'):
+                    _base_indent = len(_pl) - len(_pl.lstrip(' '))
+                    break
+            
+            if _base_indent is None:
+                return code
+                
+            _shift_delta = target_indent - _base_indent
+            
+            if _shift_delta == 0:
+                _result = '\n'.join(_pre_lines)
+            else:
+                _result_lines = []
+                for _pl in _pre_lines:
+                    if not _pl.strip():
+                        _result_lines.append('')
+                    else:
+                        _cur_ind = len(_pl) - len(_pl.lstrip(' '))
+                        _new_ind = max(0, _cur_ind + _shift_delta)
+                        _result_lines.append(' ' * _new_ind + _pl.lstrip(' '))
+                _result = '\n'.join(_result_lines)
+            
             # ── Терминальный вывод ────────────────────────────────────────────
             _orig_stripped = _original_code.strip()
-            _result_stripped = result.strip()
+            _result_stripped = _result.strip()
             if _orig_stripped != _result_stripped:
                 _mode_label = f"mode={mode}"
                 _indent_label = f"target_indent={target_indent}"
@@ -4436,11 +4472,13 @@ class FileModifier:
                     f"(target_indent={target_indent}, mode={mode})"
                 )
 
-            return result
+            return _result
+
         except Exception as e:
             logger.debug(f"_normalize_block_for_insertion fallback: {e}")
             return code
-
+        
+                
     def _normalize_compound_block(self, code: str, effective_indent: int) -> str:
         """Dedicated normalization for code blocks that BEGIN with a compound-statement header (try:/for:/if:/while:/with:/def:/class:/elif:/else:/except:/finally:). Unlike the flat-statement path, the dedent base is taken from the HEADER line's own indentation so the relative internal indentation of the suite body is preserved. Returns the re-indented block, or the original `code` on any failure."""
         if not code or not code.strip():
@@ -5263,6 +5301,85 @@ class FileModifier:
         # Находим диапазон метода
         method_start = method_info.span.start_line - 1
         method_end = method_info.span.end_line
+        
+    # ═══════════════════════════════════════════════════════════════════
+    # 🔍 DIAGNOSTIC: Tree-sitter span vs. replace_pattern (read-only)
+    # ═══════════════════════════════════════════════════════════════════
+        try:
+            _diag_rp = (replace_pattern or "").strip()
+            _diag_target = f"{target_class}.{target_method}" if target_class else target_method
+            _diag_total_lines = len(lines)
+            _diag_span_size = method_end - method_start
+            
+            print(f"\n{'─'*70}")
+            print(f"🔍 [DIAG-REPLACE] target='{_diag_target}'")
+            print(f"   Tree-sitter span: lines [{method_start + 1} .. {method_end}] "
+                f"({_diag_span_size} lines)")
+            print(f"   File total lines: {_diag_total_lines}")
+            print(f"   has_errors inside: {method_info.has_errors}")
+            
+            if _diag_rp:
+                _diag_method_lines = lines[method_start:method_end]
+                # Нормализованный поиск (как в _find_multiline_match)
+                _diag_rp_norm = ' '.join(_diag_rp.split())
+                _diag_in_span = any(
+                    _diag_rp in l or _diag_rp_norm in ' '.join(l.split())
+                    for l in _diag_method_lines
+                )
+                _diag_in_file = any(
+                    _diag_rp in l or _diag_rp_norm in ' '.join(l.split())
+                    for l in lines
+                )
+                
+                # Показываем первые 60 символов паттерна
+                _diag_rp_short = _diag_rp[:80] + "..." if len(_diag_rp) > 80 else _diag_rp
+                print(f"   Replace pattern:  {_diag_rp_short!r}")
+                print(f"   → in method span: {'✅ YES' if _diag_in_span else '❌ NO'}")
+                print(f"   → in full file:   {'✅ YES' if _diag_in_file else '❌ NO'}")
+                
+                if _diag_in_file and not _diag_in_span:
+                    print(f"\n   ⚠️  PATTERN OUTSIDE TREE-SITTER SPAN!")
+                    for _i, _line in enumerate(lines):
+                        if _diag_rp in _line or _diag_rp_norm in ' '.join(_line.split()):
+                            _in_marker = "IN span" if method_start <= _i < method_end else "OUTSIDE"
+                            print(f"     Line {_i + 1:5d} [{_in_marker:>8s}]: "
+                                f"{_line.rstrip()[:100]!r}")
+                
+                elif not _diag_in_file:
+                    print(f"\n   🔴 PATTERN NOT FOUND ANYWHERE!")
+                    # Показать первые 30 символов паттерна для ручного поиска
+                    _diag_first_line = _diag_rp.split('\n')[0][:60]
+                    print(f"   First line of pattern: {_diag_first_line!r}")
+                    # Ищем похожие
+                    _similar = [(i, l.rstrip()) for i, l in enumerate(lines)
+                                if any(word in l for word in _diag_first_line.split()[:3])
+                                and l.strip()]
+                    if _similar:
+                        print(f"   Lines containing similar words:")
+                        for _i, _l in _similar[:5]:
+                            print(f"     Line {_i + 1:5d}: {_l[:100]!r}")
+                
+                # Всегда показываем, что будет ЗАМЕЩЕНО (если найдено)
+                if _diag_in_span:
+                    _diag_match_start = None
+                    for _i, _ml in enumerate(_diag_method_lines):
+                        if _diag_rp in _ml:
+                            _diag_match_start = _i
+                            break
+                    if _diag_match_start is not None:
+                        _abs_line = method_start + _diag_match_start + 1
+                        print(f"\n   📍 Will REPLACE at line {_abs_line}:")
+                        for _s in range(max(0, _diag_match_start - 1),
+                                        min(len(_diag_method_lines), _diag_match_start + 4)):
+                            _abs = method_start + _s + 1
+                            _marker = " ← MATCH" if _s == _diag_match_start else ""
+                            print(f"     {_abs:5d}: "
+                                f"{_diag_method_lines[_s].rstrip()[:80]!r}{_marker}")
+            
+            print(f"{'─'*70}\n")
+        except Exception as _diag_err:
+            print(f"⚠️ [DIAG-REPLACE] Diagnostic failed: {_diag_err}")
+    # ═══════════════════════════════════════════════════════════════════        
         
         # Используем _find_multiline_match для поиска паттерна
         match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
