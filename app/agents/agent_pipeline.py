@@ -18,6 +18,7 @@ Key principles:
 """
 
 from __future__ import annotations
+from app.agents.tester import TesterAgent, TesterReport
 
 import asyncio
 import logging
@@ -692,6 +693,8 @@ class AgentPipeline:
         self._pending_user_request: str = ""
         self._pending_orchestrator_instruction: str = ""
         self._current_generated_code: str = ""
+
+        self._tester_report: Optional['TesterReport'] = None
         
         self._last_pyright_warnings: List[str] = []
         
@@ -2433,10 +2436,11 @@ class AgentPipeline:
         return None
 
     async def run_feedback_cycle(
-        self,
-        user_feedback: str,
-        history: List[Dict[str, str]],
-    ) -> PipelineResult:
+            self,
+            user_feedback: str,
+            history: List[Dict[str, str]],
+            tester_report: Optional[str] = None,
+        ) -> PipelineResult:
         """
         Run a feedback cycle based on user critique.
         
@@ -2486,6 +2490,17 @@ class AgentPipeline:
         
         # Build enhanced history with user feedback
         working_history = history.copy()
+
+        if tester_report:
+            working_history.insert(0, {
+                "role": "user",
+                "content": (
+                    f"[TESTER REPORT - MANDATORY FOR REVIEW]\n\n"
+                    f"{tester_report}\n\n"
+                    "⚠️ This report is from an independent testing agent. "
+                    "Address ALL issues found before making other changes."
+                )
+            })
         working_history.append({
             "role": "user",
             "content": f"""[USER FEEDBACK - MANDATORY]
@@ -3520,6 +3535,53 @@ Remember: You can override the validator if you believe the critique is incorrec
         self._pending_changes = []
         self._update_status(PipelineStatus.CANCELLED, "Changes discarded")
         logger.info("Pending changes discarded")
+
+    async def run_tester(
+            self,
+            user_additional_input: str = "",
+            tester_model: Optional[str] = None,
+        ) -> Optional['TesterReport']:
+            """
+            Run the TesterAgent to independently verify the staged code changes.
+
+            Creates a TesterAgent with read-only VFS access, runs it, stores the
+            report, and returns it. The tester checks requirements compliance,
+            compiles/runs code, and produces a structured verdict.
+
+            Args:
+                user_additional_input: Additional testing instructions from the user.
+                tester_model: LLM model to use for testing (None = orchestrator model).
+
+            Returns:
+                TesterReport with original and translated reports, or None on error.
+            """
+            try:
+                model = tester_model or self._orchestrator_model
+                orchestrator_plan = getattr(self, '_prefilter_advice', '') or ''
+
+                agent = TesterAgent(
+                    project_dir=self.project_dir,
+                    vfs=self.vfs,
+                    project_index=self.project_index,
+                    user_request=self._pending_user_request,
+                    orchestrator_plan=orchestrator_plan,
+                    tester_model=model,
+                    user_additional_input=user_additional_input,
+                    project_python_path=self._project_python_path,
+                )
+
+                report = await agent.run()
+                self._tester_report = report
+                return report
+
+            except Exception as e:
+                logger.error(f"run_tester failed: {e}", exc_info=True)
+                return TesterReport(
+                    original_report="",
+                    translated_report="",
+                    success=False,
+                    error=str(e),
+                )
     
     # ========================================================================
     # INTERNAL: ORCHESTRATOR
@@ -3942,8 +4004,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                     err_type = err_type_obj.value
                     is_python = block.file_path.endswith('.py')
                     
-                    if err_type in ["class_not_found", "method_not_found", "function_not_found", "insert_pattern_not_found"]:
-                        dependency_queue.append((block_idx, block, backup_content, current_change, result.message))
+                    if err_type in ["class_not_found", "method_not_found", "function_not_found", "insert_pattern_not_found", "replace_pattern_not_found", "ambiguous_replace_pattern"]:
+                        dependency_queue.append((block_idx, block, backup_content, current_change, result.message))                    
                     elif err_type == "syntax_validation_failed" and not is_python:
                         # ПЕРЕХВАТ: отправляем проваленный diff в Pass 2 (AI Fixer) ТОЛЬКО для не-Python!
                         # Parse concrete error lines from the message (strip the preamble)

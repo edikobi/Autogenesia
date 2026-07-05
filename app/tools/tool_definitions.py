@@ -846,3 +846,14 @@ def get_tool_names() -> List[str]:
 "extract_media",
         "read_line_context",
     ]
+
+# Re-export Tester tools for unified access
+from app.tools.tester_tool_definitions import (  # noqa: E402, F401
+    RUFF_TOOL,
+    CHECK_ENVIRONMENT_TOOL,
+    COMPILE_CODE_TOOL,
+    RUN_CODE_TOOL,
+    GIT_DIFF_VFS_DISK_TOOL,
+    WRITE_TEST_FILE_TOOL,
+    TESTER_TOOLS,
+)

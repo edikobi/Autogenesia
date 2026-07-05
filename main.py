@@ -366,7 +366,7 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     (
         "2",
         cfg.MODEL_SONNET_4_5,
-        "Claude Sonnet 4.6",
+        "Claude Sonnet 4.5",
         "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует."
     ),
     (
@@ -4923,6 +4923,43 @@ async def handle_ask_mode(query: str):
         logger.error(f"Unexpected error in handle_ask_mode: {e}", exc_info=True)
         print_error(f"Неожиданная ошибка: {e}")
 
+async def _select_tester_model(state) -> Optional[str]:
+    """
+    Interactive selection of the model for TesterAgent.
+
+    Shows available orchestrator models and lets the user pick one,
+    or use the default (same as orchestrator model).
+
+    Args:
+        state: Global AppState instance.
+
+    Returns:
+        Selected model ID string, or the current orchestrator model as default.
+    """
+    current_model = state.pipeline._orchestrator_model if state.pipeline else None
+
+    console.print("\n[bold]Выберите модель для Тестировщика:[/]")
+    console.print(
+        f"  [green]0[/] - По умолчанию "
+        f"(модель Оркестратора: {get_model_short_name(current_model) if current_model else 'авто'})"
+    )
+
+    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+        console.print(f"  [green]{key}[/] - {short_name}")
+
+    choice = console.input(
+        f"\n[bold]Ваш выбор (0-{len(AVAILABLE_ORCHESTRATOR_MODELS)}):[/] "
+    ).strip()
+
+    if choice == "0" or choice == "":
+        return current_model
+
+    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+        if key == choice:
+            return model_id
+
+    return current_model
+
 
 async def handle_agent_mode(query: str):
     """Обработка режима Агента - Автономная генерация кода с валидацией"""
@@ -5502,9 +5539,9 @@ async def handle_agent_mode(query: str):
             
             try:
                 choice = prompt_with_navigation(
-                    "Выбор",
-                    choices=["1", "2", "3"],
-                    default="1"
+                    "Ваш выбор (1/2/3/4)",
+                    choices=["1", "2", "3", "4"],
+                    default=None
                 )
             except BackException:
                 return "cancel"
@@ -5907,14 +5944,16 @@ async def handle_agent_mode(query: str):
             console.print("[bold green][1][/] ✅ Применить изменения")
             console.print("[bold yellow][2][/] ✏️  Отправить на доработку с комментарием")
             console.print("[bold red][3][/] ❌ Выйти в главное меню (без применения)")
+
+            console.print("[bold blue][4][/] 🧪 Вызвать Тестировщика")
             console.print()
             
             choice = None
             while choice is None:
                 try:
                     choice = prompt_with_navigation(
-                        "Ваш выбор (1/2/3)",
-                        choices=["1", "2", "3"],
+                        "Ваш выбор (1/2/3/4)",
+                        choices=["1", "2", "3", "4"],
                         default=None
                     )
                 except (BackException, BackToMenuException, QuitException) as nav_exc:
@@ -5925,13 +5964,7 @@ async def handle_agent_mode(query: str):
                     raise nav_exc
                 except Exception:
                     # Empty Enter or any other unexpected error — re-prompt
-                    console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Отмена[/]")
-                    choice = None
-                else:
-                    # Validate that choice is one of the expected values
-                    if choice not in ("1", "2", "3"):
-                        console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Отмена[/]")
-                        choice = None
+                    console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Отмена, [bold]4[/] — Тестировщик[/]")
             
             logger.info(f"User confirmation choice: {choice}")
             
@@ -6019,6 +6052,130 @@ async def handle_agent_mode(query: str):
                     print_warning("Замечание не может быть пустым")
                     continue
             
+            elif choice == "4":
+                # === ТЕСТИРОВЩИК ===
+                tester_model = await _select_tester_model(state)
+                try:
+                    additional_input = Prompt.ask("[dim]Что проверить дополнительно? (Enter — пропустить)[/]", default="")
+                except KeyboardInterrupt:
+                    additional_input = ""
+                
+                console.print("\n[dim]⏳ Запускаем Тестировщика...[/]")
+                report = await state.pipeline.run_tester(
+                    user_additional_input=additional_input,
+                    tester_model=tester_model
+                )
+                
+                if report and report.success and report.translated_report:
+                    console.print()
+                    console.print(Panel(
+                        Markdown(report.translated_report),
+                        title="🧪 Отчёт Тестировщика",
+                        border_style="blue",
+                        padding=(1, 2)
+                    ))
+                    
+                    # Post-report menu (NO option 4 to prevent infinite recursion)
+                    console.print()
+                    console.print("[bold]Действие после отчёта:[/]")
+                    console.print("[bold green][1][/] ✅ Применить изменения")
+                    console.print("[bold yellow][2][/] ✏️  Отправить на доработку")
+                    console.print("[bold red][3][/] ❌ Выйти в главное меню")
+                    console.print()
+                    
+                    post_choice = None
+                    while post_choice is None:
+                        try:
+                            post_choice = prompt_with_navigation(
+                                "Ваш выбор (1/2/3)",
+                                choices=["1", "2", "3"],
+                                default=None
+                            )
+                        except (BackException, BackToMenuException, QuitException) as nav_exc:
+                            await state.pipeline.discard_pending_changes()
+                            raise nav_exc
+                        except Exception:
+                            console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Выйти[/]")
+                            post_choice = None
+                        else:
+                            if post_choice not in ("1", "2", "3"):
+                                console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Выйти[/]")
+                                post_choice = None
+                    
+                    if post_choice == "1":
+                        # Apply changes — same logic as outer choice == "1"
+                        console.print("\n[dim]⏳ Применение изменений...[/]")
+                        try:
+                            apply_result = await state.pipeline.apply_pending_changes()
+                            if apply_result.success:
+                                print_success(f"✅ Изменения применены в {len(apply_result.applied_files)} файл(ах)!")
+                                if apply_result.applied_files:
+                                    console.print("\n[dim]Изменённые файлы:[/]")
+                                    for f in apply_result.applied_files:
+                                        console.print(f"   [green]✓[/] {f}")
+                                if apply_result.backup_session_id:
+                                    console.print(f"\n[dim]💾 Бэкап создан: [cyan]{apply_result.backup_session_id}[/][/]")
+                                # Update index
+                                if state.is_new_project and state.project_dir:
+                                    if await build_project_indexes(state.project_dir):
+                                        state.project_index = await load_project_index(state.project_dir)
+                                        state.is_new_project = False
+                                elif state.project_dir:
+                                    await run_incremental_update(state.project_dir)
+                                    state.project_index = await load_project_index(state.project_dir)
+                                    if state.pipeline:
+                                        state.pipeline.project_index = state.project_index
+                            else:
+                                print_error("Не удалось применить изменения")
+                                if apply_result.errors:
+                                    for err in apply_result.errors:
+                                        console.print(f"   [red]• {err}[/]")
+                        except Exception as e:
+                            logger.error(f"Error applying changes after tester: {e}", exc_info=True)
+                            print_error(f"Ошибка при применении: {e}")
+                        break
+                    
+                    elif post_choice == "2":
+                        # Send for revision with optional tester report attachment
+                        try:
+                            attach_report = Confirm.ask("Прикрепить отчёт Тестировщика к замечанию?", default=True)
+                        except KeyboardInterrupt:
+                            attach_report = False
+                        
+                        try:
+                            user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
+                        except KeyboardInterrupt:
+                            user_feedback = ""
+                        
+                        if user_feedback.strip():
+                            console.print("\n[dim]⏳ Запускаем цикл доработки...[/]")
+                            new_result = await state.pipeline.run_feedback_cycle(
+                                user_feedback=user_feedback,
+                                history=history,
+                                tester_report=report.original_report if attach_report else None
+                            )
+                            if new_result and new_result.success:
+                                result = new_result
+                                console.print("\n[bold green]✅ Код исправлен! Проверьте новые изменения.[/]")
+                                continue
+                            else:
+                                print_warning("Не удалось исправить код по вашей критике")
+                                continue
+                        else:
+                            print_warning("Замечание не может быть пустым")
+                            continue
+                    
+                    elif post_choice == "3":
+                        await state.pipeline.discard_pending_changes()
+                        exit_response = "## 🚫 Запрос отменён\n\n*Пользователь вышел после отчёта Тестировщика.*"
+                        await save_message("assistant", exit_response)
+                        print_info("Изменения отменены")
+                        raise BackToMenuException()
+                
+                else:
+                    error_msg = report.error if (report and report.error) else "неизвестная ошибка"
+                    print_error(f"Тестировщик не смог завершить анализ: {error_msg}")
+                    continue
             elif choice == "3":
                 # === ВЫХОД В ГЛАВНОЕ МЕНЮ ===
                 await state.pipeline.discard_pending_changes()
@@ -7440,4 +7597,5 @@ if __name__ == "__main__":
     
     # Запуск
     asyncio.run(main())
+
 
