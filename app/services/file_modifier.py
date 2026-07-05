@@ -819,7 +819,7 @@ class FileModifier:
                                 repaired_content = None
                                 try:
                                     from app.services.syntax_checker import SyntaxChecker
-                                    checker = SyntaxChecker(use_black=False, use_autopep8=True,
+                                    checker = SyntaxChecker(use_black=False, use_autopep8=False,
                                                            project_python_path=self.project_python_path)
                                     fix_result = checker.check_python(result.new_content, auto_fix=True)
                                     if fix_result.was_auto_fixed and fix_result.fixed_content:
@@ -1166,7 +1166,7 @@ class FileModifier:
                                     repaired_content = None
                                     try:
                                         from app.services.syntax_checker import SyntaxChecker
-                                        checker = SyntaxChecker(use_black=False, use_autopep8=True,
+                                        checker = SyntaxChecker(use_black=False, use_autopep8=False,
                                                                project_python_path=self.project_python_path)
                                         fix_result = checker.check_python(result.new_content, auto_fix=True)
                                         if fix_result.was_auto_fixed and fix_result.fixed_content:
@@ -2313,30 +2313,7 @@ class FileModifier:
     ) -> ModifyResult:
         """Заменяет весь файл"""
         new_content = instruction.code
-    
-        # Detect if this is non-Python content by attempting to parse as Python
-        if instruction.preserve_imports and existing_content:
-            # Try to parse existing content as Python
-            try:
-                ast.parse(existing_content)
-                # Also try to parse new content as Python
-                try:
-                    ast.parse(new_content)
-                    # Both parse successfully - safe to preserve imports
-                    existing_imports = self._extract_imports(existing_content)
-                    new_imports = self._extract_imports(new_content)
-                
-                    missing = set(existing_imports) - set(new_imports)
-                    if missing:
-                        import_block = '\n'.join(sorted(missing))
-                        new_content = import_block + '\n\n' + new_content
-                except SyntaxError:
-                    # New content is not valid Python - skip import preservation
-                    pass
-            except SyntaxError:
-                # Existing content is not valid Python (non-Python file) - skip import preservation
-                pass
-    
+        
         old_lines = len(existing_content.splitlines()) if existing_content else 0
         new_lines = len(new_content.splitlines())
     
@@ -2347,8 +2324,7 @@ class FileModifier:
             changes_made=["Replaced entire file content"],
             lines_added=max(0, new_lines - old_lines),
             lines_removed=max(0, old_lines - new_lines),
-        )
-  
+        )  
   
     
     def _insert_into_class(
@@ -6298,7 +6274,7 @@ class FileModifier:
             # Pass project python path to ensure formatting tools are found in project's venv
             checker = SyntaxChecker(
                 use_black=False, 
-                use_autopep8=True,
+                use_autopep8=False,
                 project_python_path=self.project_python_path
             )
             
