@@ -215,6 +215,23 @@ class FeedbackLoopState:
     def can_run_tests(self) -> bool:
         """NEW: Check if we can run more tests."""
         return self.test_runs < self.max_test_runs
+
+    def reset_iteration_limits(self) -> None:
+        """Reset iteration counters to zero for a new feedback cycle.
+
+        Resets orchestrator_revisions, validator_attempts, and test_runs to 0.
+        Does NOT modify history lists, limit fields, or cumulative metrics.
+        After calling this method, can_revise_instruction(), can_retry_validation(),
+        and can_run_tests() will all return True.
+        """
+        self.orchestrator_revisions = 0
+        self.validator_attempts = 0
+        self.test_runs = 0
+        logger.info(
+            f"FeedbackLoop: Iteration limits reset. "
+            f"Preserved {len(self.revision_history)} revision records, "
+            f"{len(self.validation_history)} validation records in history."
+        )
     
     def get_remaining_test_runs(self) -> int:
         """Get number of remaining test runs allowed."""

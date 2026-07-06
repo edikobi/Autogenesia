@@ -2484,6 +2484,10 @@ class AgentPipeline:
             )
             self.feedback_loop.add_user_feedback(user_feedback, replaces_validator=True)
         
+# === CRITICAL: Reset iteration limits for each user feedback cycle ===
+        # Each user feedback gets a fresh set of iterations
+        self.feedback_loop.reset_iteration_limits()
+        logger.info("run_feedback_cycle: Iteration limits reset for new feedback cycle")
         # === CRITICAL: Do NOT clear VFS — preserve staged files from previous iterations ===
         # self.vfs.discard_all()  # REMOVED
         # self._pending_changes = []  # REMOVED
@@ -2526,7 +2530,13 @@ Please analyze this feedback and provide a revised instruction.""",
         while iteration < max_iterations:
             iteration += 1
             
-            # Check if we can still revise
+# (can_revise_instruction check removed — iteration < max_iterations is the sole limiter)
+            # if not self.feedback_loop.can_revise_instruction():
+            #     logger.warning(f"run_feedback_cycle: Max revisions reached")
+            #     result.status = PipelineStatus.FAILED
+            #     result.errors.append("Max revision iterations reached")
+            #     result.duration_ms = (time.time() - start_time) * 1000
+            #     return result
             if not self.feedback_loop.can_revise_instruction():
                 logger.warning(f"run_feedback_cycle: Max revisions reached")
                 result.status = PipelineStatus.FAILED
@@ -5829,133 +5839,32 @@ Remember: You can override the validator if you believe the critique is incorrec
                         errors=["Validation failed"],
                     )        
         
-        elif action == "replace" and user_message:
-            # User provides custom critique instead of validator
-            logger.info("User replacing validator critique with custom feedback")
-            self.feedback_loop.add_user_feedback(user_message, replaces_validator=True)
-            
-            if history:
-                # Re-run with user's feedback
-                enhanced_history = history.copy()
-                enhanced_history.append({
-                    "role": "user",
-                    "content": f"[USER FEEDBACK - MUST ADDRESS]\n{user_message}",
-                })
-                
-                self.vfs.discard_all()
-                
-                orchestrator_result = await self._run_orchestrator(
-                    user_request=self._pending_user_request,
-                    history=enhanced_history,
-                    orchestrator_model=self._orchestrator_model,
-                )
-                
-                code_blocks, _ = await self._run_code_generator(
-                    instruction=orchestrator_result.instruction,
-                    target_file=orchestrator_result.target_file,
-                    target_files=getattr(orchestrator_result, 'target_files', []),  # NEW
-                )
-                
-                if code_blocks:
-                    await self._stage_code_blocks(code_blocks)
-                    
-                    # Run full validation with tests
-                    validation_result = await self._run_validation(include_tests=True)
-                    
-                    if validation_result.success:
-                        self._pending_changes = await self._build_pending_changes(
-                            code_blocks=code_blocks,
-                            validation_passed=True,
-                            ai_validation_passed=True,
-                        )
-                        self._pending_orchestrator_instruction = orchestrator_result.instruction
-                        
-                        return PipelineResult(
-                            success=True,
-                            status=PipelineStatus.AWAITING_CONFIRMATION,
-                            instruction=orchestrator_result.instruction,
-                            code_blocks=code_blocks,
-                            validation_result=validation_result.to_dict(),
-                            pending_changes=self._pending_changes,
-                            diffs=self.vfs.get_all_diffs(),
-                        )
-                    else:
-                        return PipelineResult(
-                            success=False,
-                            status=PipelineStatus.FAILED,
-                            validation_result=validation_result.to_dict(),
-                            errors=["Validation failed after user feedback"],
-                        )
-            
-            return None        
-        
         elif action == "accept":
-            # User accepts validator critique - send to orchestrator
-            logger.info("User accepted validator critique")
+            # User accepts the validator's critique — delegate to run_feedback_cycle
+            logger.info("User accepted AI Validator critique, delegating to run_feedback_cycle")
             
-            if history:
-                feedback = self.feedback_loop.get_feedback_for_orchestrator()
-                enhanced_history = history.copy()
-                
-                if feedback.get("validator_feedback"):
-                    enhanced_history.append({
-                        "role": "user",
-                        "content": f"[VALIDATOR FEEDBACK - ACCEPTED BY USER]\n{feedback['validator_feedback']}\n\nPlease revise.",
-                    })
-                
-                self.vfs.discard_all()
-                
-                orchestrator_result = await self._run_orchestrator(
-                    user_request=self._pending_user_request,
-                    history=enhanced_history,
-                    orchestrator_model=self._orchestrator_model,
-                )
-                
-                self.feedback_loop.record_orchestrator_revision(
-                    reason="User accepted validator critique",
-                    previous_instruction=self._pending_orchestrator_instruction,
-                    new_instruction=orchestrator_result.instruction,
-                )
-                
-                code_blocks, _ = await self._run_code_generator(
-                    instruction=orchestrator_result.instruction,
-                    target_file=orchestrator_result.target_file,
-                    target_files=getattr(orchestrator_result, 'target_files', []),  # NEW
-                )
-                
-                if code_blocks:
-                    await self._stage_code_blocks(code_blocks)
-                    
-                    # Run full validation with tests
-                    validation_result = await self._run_validation(include_tests=True)
-                    
-                    if validation_result.success:
-                        self._pending_changes = await self._build_pending_changes(
-                            code_blocks=code_blocks,
-                            validation_passed=True,
-                            ai_validation_passed=True,
-                        )
-                        self._pending_orchestrator_instruction = orchestrator_result.instruction
-                        
-                        return PipelineResult(
-                            success=True,
-                            status=PipelineStatus.AWAITING_CONFIRMATION,
-                            instruction=orchestrator_result.instruction,
-                            code_blocks=code_blocks,
-                            validation_result=validation_result.to_dict(),
-                            pending_changes=self._pending_changes,
-                            diffs=self.vfs.get_all_diffs(),
-                            feedback_iterations=self.feedback_loop.orchestrator_revisions,
-                        )
-                    else:
-                        return PipelineResult(
-                            success=False,
-                            status=PipelineStatus.FAILED,
-                            validation_result=validation_result.to_dict(),
-                            errors=["Validation failed after revision"],
-                        )
+            # Retrieve validator feedback text
+            feedback_data = self.feedback_loop.get_feedback_for_orchestrator()
+            validator_text = feedback_data.get("validator_feedback", "")
             
-            return None        
+            if validator_text:
+                user_feedback_text = f"[VALIDATOR FEEDBACK - ACCEPTED BY USER]\n{validator_text}"
+            else:
+                user_feedback_text = "Please fix the issues found by the AI Validator."
+            
+            return await self.run_feedback_cycle(
+                user_feedback=user_feedback_text,
+                history=history or [],
+            )
+        elif action == "replace" and user_message:
+            # User provides custom critique — delegate to run_feedback_cycle
+            logger.info("User replacing validator critique with custom feedback")
+            
+            # Delegate to run_feedback_cycle — preserves VFS, full validation, reset limits
+            return await self.run_feedback_cycle(
+                user_feedback=user_message,
+                history=history or [],
+            )
         
         return None
     
