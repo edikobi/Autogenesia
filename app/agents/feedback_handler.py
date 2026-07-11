@@ -200,7 +200,7 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "description": "The file was ALREADY syntactically broken (containing ERROR or MISSING nodes) before any changes were applied.",
             "cause": "Manual file corruption, previous failed staging, or incorrect merge.",
             "solution": "1. Use read_file to examine the file and identify pre-existing syntax errors. 2. Fix the file FIRST by rewriting the broken part using REPLACE_FILE mode. 3. Ensure the file passes basic syntax check before attempting atomic method/class replacements.",
-            "mode_hint": "Rewrite the file to a valid state using REPLACE_FILE before making granular changes.",
+            "mode_hint": "MANDATORY: Use REPLACE_FILE to overwrite the entire broken file. CRITICAL: You MUST preserve ALL existing working code, variables, and logic — only fix the broken syntax.",
         },
         StagingErrorType.SYNTAX_VALIDATION_FAILED: {
             "description": "The applied code change breaks the file's syntax structure, making classes/methods unparseable.",
@@ -224,7 +224,7 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
             "description": "The REPLACE_PATTERN or INSERT anchor matched more than one location in the file.",
             "cause": "The pattern text is too short or non-unique — it appears identically two or more times in the file.",
             "solution": "1. Use read_file to find all occurrences of the pattern. 2. Make the pattern longer and more specific so it matches exactly ONE location. 3. Include surrounding context lines in the pattern (e.g., the preceding or following line) to make it unique.",
-            "mode_hint": "Use a longer, context-specific replace_pattern that uniquely identifies one location",
+            "mode_hint": "Use a longer, context-specific replace_pattern that uniquely identifies one location.REWRITE FULL METHOD/FUNCTION: Output the entire method/function body with your changes — but you MUST preserve ALL existing code inside. Do not remove any logic, loops, or variables that already work",
         },
         StagingErrorType.REPLACE_PATTERN_NOT_FOUND: {
             "description": "The pattern specified in REPLACE_PATTERN was not found in the target file (or within the specified TARGET_METHOD/CLASS scope).",

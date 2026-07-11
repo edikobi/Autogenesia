@@ -60,6 +60,10 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
     
     error_lower = error_message.lower()
     
+    # 0. AMBIGUOUS PATTERN (Highest priority to prevent wrong replacements)
+    if "ambiguous replace_pattern" in error_lower or "occurrences found" in error_lower:
+        return StagingErrorType.AMBIGUOUS_REPLACE_PATTERN
+    
     # 1. SPECIFIC TARGETING ERRORS (Highest priority)
     # If something is "not found", it's a targeting error, even if it caused structure breakage
     if "ambiguous_target_method" in error_lower:
@@ -3291,6 +3295,7 @@ class FileModifier:
         node_info = None
         
         # Helper to find robust match
+        # Helper to find robust match
         def find_best_match(pattern: str, lines: List[str]) -> Tuple[Optional[int], Optional[str]]:
             if not pattern:
                 return None, None
@@ -3298,25 +3303,58 @@ class FileModifier:
             pattern_stripped = pattern.strip()
             
             # Pass 1: Exact match of stripped content
+            exact_matches = []
             for i, line in enumerate(lines):
                 if line.strip() == pattern_stripped:
-                    return i, line
+                    exact_matches.append((i, line))
+            
+            if len(exact_matches) == 1:
+                return exact_matches[0]
+            elif len(exact_matches) > 1:
+                logger.warning(
+                    f"find_best_match: Ambiguous anchor '{pattern[:40]}' "
+                    f"found {len(exact_matches)} exact matches. "
+                    f"Returning no match to prevent wrong insertion."
+                )
+                return None, None
             
             # Pass 2: Substring match (robust to spacing)
+            substring_matches = []
             for i, line in enumerate(lines):
                 # Normalize spaces to single space for comparison
                 line_norm = ' '.join(line.split())
                 pattern_norm = ' '.join(pattern.split())
                 if pattern_norm in line_norm:
-                    return i, line
+                    substring_matches.append((i, line))
+            
+            if len(substring_matches) == 1:
+                return substring_matches[0]
+            elif len(substring_matches) > 1:
+                logger.warning(
+                    f"find_best_match: Ambiguous substring anchor '{pattern[:40]}' "
+                    f"found {len(substring_matches)} matches. "
+                    f"Returning no match to prevent wrong insertion."
+                )
+                return None, None
             
             # Pass 3: Fallback loose substring
+            loose_matches = []
             for i, line in enumerate(lines):
                 if pattern_stripped in line:
-                    return i, line
-                    
+                    loose_matches.append((i, line))
+            
+            if len(loose_matches) == 1:
+                return loose_matches[0]
+            elif len(loose_matches) > 1:
+                logger.warning(
+                    f"find_best_match: Ambiguous loose anchor '{pattern[:40]}' "
+                    f"found {len(loose_matches)} matches. "
+                    f"Returning no match to prevent wrong insertion."
+                )
+                return None, None
+                
             return None, None
-
+        
         # 1. Determine insertion point
         method_text = ''.join(method_lines)
         
@@ -3330,6 +3368,7 @@ class FileModifier:
                 insert_line_offset = line_offset + 1
                 context_line_for_indent = matched_line
                 is_block_node = self._is_block_statement(node_info['node_type'])
+            
             else:
                 # Fallback to text search
                 idx, match_line = find_best_match(insert_after, method_lines)
@@ -3337,11 +3376,19 @@ class FileModifier:
                     insert_line_offset = idx + 1
                     context_line_for_indent = match_line
                 else:
+                    # Distinguish between "not found" and "ambiguous"
+                    count = sum(1 for line in method_lines if insert_after in line)
+                    if count > 1:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Ambiguous replace_pattern: Anchor '{insert_after[:40]}' has {count} occurrences found in method '{target_method}'",
+                        )
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
                         message=f"Pattern '{insert_after}' not found in method '{target_method}'",
-                    )
+                    )        
         
         elif insert_before:
             # Try Tree-sitter first
@@ -3353,6 +3400,7 @@ class FileModifier:
                 insert_line_offset = line_offset
                 context_line_for_indent = matched_line
                 is_block_node = self._is_block_statement(node_info['node_type'])
+            
             else:
                 # Fallback to text search
                 idx, match_line = find_best_match(insert_before, method_lines)
@@ -3360,11 +3408,19 @@ class FileModifier:
                     insert_line_offset = idx
                     context_line_for_indent = match_line
                 else:
+                    # Distinguish between "not found" and "ambiguous"
+                    count = sum(1 for line in method_lines if insert_before in line)
+                    if count > 1:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Ambiguous replace_pattern: Anchor '{insert_before[:40]}' has {count} occurrences found in method '{target_method}'",
+                        )
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
                         message=f"Pattern '{insert_before}' not found in method '{target_method}'",
-                    )
+                    )        
         
         else:
             # Default: before first return or at end
@@ -4981,17 +5037,28 @@ class FileModifier:
             target = pattern_lines[0]
             target_aggressive = normalize_aggressive(pattern)
             
+            matches_idx = []
             for i in range(start_idx, end_idx):
                 if i < len(source_lines):
                     source_norm = normalize(source_lines[i])
-                    # Try substring match first
                     if target in source_norm:
-                        return (i, i + 1)
-                    # Try aggressive match (ignoring all whitespace)
+                        matches_idx.append(i)
+                        continue  # Don't check aggressive if normal matched
                     source_aggressive = normalize_aggressive(source_lines[i])
                     if target_aggressive in source_aggressive:
-                        return (i, i + 1)
-            return (None, None)
+                        matches_idx.append(i)
+            
+            if len(matches_idx) == 1:
+                return (matches_idx[0], matches_idx[0] + 1)
+            elif len(matches_idx) > 1:
+                logger.warning(
+                    f"_find_multiline_match: Ambiguous single-line pattern '{target[:40]}' "
+                    f"found {len(matches_idx)} times in range [{start_idx}:{end_idx}]. "
+                    f"Returning no match to prevent wrong replacement."
+                )
+                return (None, None)
+            return (None, None)        
+        
         
         # 3. Case 2: Multi-line pattern - try exact match first
         for i in range(start_idx, end_idx - len(pattern_lines) + 1):
@@ -5413,11 +5480,25 @@ class FileModifier:
         # Check if match_start is None
         if match_start is None:
             target_name = f"{target_class}.{target_method}" if target_class else target_method
+            
+            # Check for ambiguity to provide a precise error
+            pattern_lines = [line.strip() for line in replace_pattern.splitlines() if line.strip()]
+            if len(pattern_lines) == 1:
+                target = pattern_lines[0]
+                count = sum(1 for line in lines[method_start:method_end] if target in line)
+                if count > 1:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Ambiguous replace_pattern: {count} occurrences found in '{target_name}'",
+                    )
+            
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
-            )
+            )        
+        
         
         # line_indent — ЕДИНСТВЕННЫЙ ИСТОЧНИК: строка файла где найден replace_pattern.
         # Шаг 1: вычислить базовый отступ строки-паттерна.

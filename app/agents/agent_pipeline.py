@@ -3930,9 +3930,10 @@ Remember: You can override the validator if you believe the critique is incorrec
                     details = "; ".join(pre_corrupted_files[block.file_path])
                     logger.error(f"Phase 0 Guard: Block {block_idx+1} rejected due to pre-existing corruption in {block.file_path}. Details: {details}")
                     msg = f"File {block.file_path} is already broken (pre-existing corruption). Details: {details}. Fix its structure manually or use REPLACE_FILE mode."
+                    msg += " MANDATORY: Use MODE: REPLACE_FILE to overwrite the entire file. Surgical edits CANNOT work on a broken file."
                     final_errors.append(self._format_staging_error(block, "PRE_EXISTING_CORRUPTION", msg, backup_content))
                     continue
-
+                
                 # 3. Parser readiness
                 if not self._ensure_parsers_ready(block.file_path):
                     final_errors.append(self._format_staging_error(block, "STAGING_SYSTEM_ERROR", "Parser unavailable", backup_content))
