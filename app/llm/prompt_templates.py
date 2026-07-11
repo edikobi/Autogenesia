@@ -4890,7 +4890,7 @@ def _build_orchestrator_system_prompt_ask_agent() -> str:
     prompt_parts.append('')    
     
     # === Dependency Management Tools ===
-    prompt_parts.append('- list_installed_packages(): Check what Python packages are available')
+    prompt_parts.append('- list_installed_packages(): Check what  packages are available')
     prompt_parts.append('  📋 Use BEFORE generating code with external libraries')
     prompt_parts.append('  Returns: List of installed packages with versions')
     prompt_parts.append('')
@@ -6551,13 +6551,16 @@ def _get_python_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
-    # Example 3: Add new method
+    # Example 3: Add new Function
     parts.append("**Example 3: Add New Function (Module Scope)**")
     parts.append("```")
     parts.append("### CODE_BLOCK")
     parts.append("FILE: app/services/calculations.py")
     parts.append("MODE: ADD_NEW_FUNCTION")
-    parts.append("# Adds a new standalone function to the end of the file or module")
+    parts.append("INSERT_AFTER: calculate_base_price")
+    parts.append("# Adds a new standalone function after the specified existing function/class.")
+    parts.append("# If INSERT_AFTER is omitted, it's added at the end of the file,")
+    parts.append("# but before 'if __name__ == \"__main__\":' if present.")
     parts.append("")
     parts.append("```python")
     parts.append("def calculate_tax(amount: float, rate: float) -> float:")
@@ -6568,8 +6571,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("```")
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
-    parts.append("")
-    
+    parts.append("")    
     
     
     # Example 4: Create new file
@@ -6708,7 +6710,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("")    
     
     # Example 8: Insert lines inside existing method (PATCH_METHOD)
-    parts.append("**Example 8: Insert lines inside existing method (PATCH_METHOD)**")
+    parts.append("**Example : Insert lines inside existing method (PATCH_METHOD)**")
     parts.append("")
     parts.append("Use PATCH_METHOD when you need to ADD lines inside an existing method")
     parts.append("WITHOUT replacing the entire method.")
@@ -6729,6 +6731,26 @@ def _get_python_prompt_injection() -> str:
     parts.append("- PATCH_METHOD: Insert NEW lines (method body grows)")
     parts.append("- REPLACE_METHOD: Replace ENTIRE method (provide complete new code)")
     parts.append("")    
+    
+    parts.append("**Example 8: Insert lines inside existing method (PATCH_METHOD)**")
+    parts.append("Use PATCH_METHOD when you need to ADD lines inside an existing method WITHOUT replacing the entire method.")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: app/services/user.py")
+    parts.append("MODE: PATCH_METHOD")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("TARGET_METHOD: update_profile")
+    parts.append("INSERT_AFTER: if not user:")
+    parts.append("")
+    parts.append("```python")
+    parts.append("        # Log the update attempt")
+    parts.append("        logger.info(f'Updating profile for user {user_id}')")
+    parts.append("        user.updated_at = datetime.utcnow()")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")    
+    
     
     
     parts.append("**Example 9: Replacing a class attribute or field (REPLACE_IN_CLASS)")
@@ -6777,12 +6799,12 @@ def _get_python_prompt_injection() -> str:
     parts.append("REPLACE_PATTERN: return PostgresDsn.build(") # The line(s) to find
     parts.append("")
     parts.append("```python")
-    parts.append("# Replaces only the matching pattern lines:")
-    parts.append("return PostgresDsn.build(")
-    parts.append("    scheme='postgresql+asyncpg',")
-    parts.append("    user=values.get('POSTGRES_USER'),")
-    parts.append("    password=values.get('POSTGRES_PASSWORD'),")
-    parts.append(")")
+    parts.append("        # Replaces only the matching pattern lines:")
+    parts.append("        return PostgresDsn.build(")
+    parts.append("            scheme='postgresql+asyncpg',")
+    parts.append("            user=values.get('POSTGRES_USER'),")
+    parts.append("            password=values.get('POSTGRES_PASSWORD'),")
+    parts.append("        )")
     parts.append("```")
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
@@ -6798,13 +6820,12 @@ def _get_python_prompt_injection() -> str:
     parts.append("REPLACE_PATTERN: data = json.load(f)")
     parts.append("")
     parts.append("```python")
-    parts.append("# Replaces only the matching pattern line within the function body")
-    parts.append("data = json.loads(f.read())")
+    parts.append("    # Replaces only the matching pattern line within the function body")
+    parts.append("    data = json.loads(f.read())")
     parts.append("```")
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
-
 
     # Example 13: Insert inside Function (NEW)
     parts.append("**Example 13: Insert inside Global Function**")
@@ -6816,8 +6837,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("INSERT_BEFORE: return") # Insert before the return statement
     parts.append("")
     parts.append("```python")
-    parts.append("await init_db()")
-    parts.append("logger.info('Database initialized')")
+    parts.append("    await init_db()")
+    parts.append("    logger.info('Database initialized')")
     parts.append("```")
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
@@ -6839,6 +6860,24 @@ def _get_python_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    
+    parts.append("")
+    parts.append("**Example 15: Replace global variable**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: app/config.py")
+    parts.append("MODE: REPLACE_GLOBAL")
+    parts.append("REPLACE_PATTERN: DEBUG = True")
+    parts.append("")
+    parts.append("```python")
+    parts.append("DEBUG = False")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")    
+    
+    
 
     return "\n".join(parts)
 
