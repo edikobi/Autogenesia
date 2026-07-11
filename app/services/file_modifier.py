@@ -71,7 +71,7 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
     if "class" in error_lower and "not found" in error_lower:
         return StagingErrorType.CLASS_NOT_FOUND
     if ("pattern" in error_lower or "anchor" in error_lower) and "not found" in error_lower:
-        if mode == "DIFF_REPLACE":
+        if mode in ("DIFF_REPLACE", "REPLACE_GLOBAL"):
             return StagingErrorType.REPLACE_PATTERN_NOT_FOUND
         return StagingErrorType.INSERT_PATTERN_NOT_FOUND
     if "insert_after_target" in error_lower and "not found" in error_lower:
@@ -104,6 +104,8 @@ def classify_staging_error(error_message: str, mode: Optional[str] = None) -> "S
         return StagingErrorType.MISSING_TARGET_METHOD
     if "target_function" in error_lower and "required" in error_lower:
         return StagingErrorType.MISSING_TARGET_FUNCTION
+    if "replace_pattern" in error_lower and "required" in error_lower:
+        return StagingErrorType.REPLACE_PATTERN_NOT_FOUND    
     
     # 5. MISC
     if "unknown mode" in error_lower or "valid modes" in error_lower:
@@ -5682,20 +5684,28 @@ class FileModifier:
         
         parse_result = ts_parser.parse(existing_content)
         
-        insert_line = len(lines)  # По умолчанию в конец файла
+        parse_result = ts_parser.parse(existing_content)
         
+        # 1. Ищем блок if __name__ == "__main__": (чтобы не вставлять после него)
+        main_block_line = None
+        for i, line in enumerate(lines):
+            if re.match(r'^if\s+__name__\s*==\s*["\']__main__["\']\s*:', line.strip()):
+                main_block_line = i
+                break
+        
+        # По умолчанию вставляем в конец файла, НО если есть main-блок, то перед ним
+        insert_line = len(lines)
+        if main_block_line is not None:
+            insert_line = main_block_line
+        
+        # 2. Если указан insert_after, ищем его и переопределяем insert_line
         if insert_after:
-            # Ищем функцию или класс для вставки после
             found = False
-            
-            # Проверяем функции
             for func in parse_result.functions:
                 if func.name == insert_after:
                     insert_line = func.span.end_line
                     found = True
                     break
-            
-            # Проверяем классы
             if not found:
                 for cls in parse_result.classes:
                     if cls.name == insert_after:
@@ -5703,19 +5713,33 @@ class FileModifier:
                         found = True
                         break
         
-        # Нормализуем отступ функции (должен быть 0 для module-level)
-        formatted_code = self._analyze_and_normalize_indent(code, 0)
+        # 3. Нормализуем отступ функции (должен быть 0 для module-level)
+        formatted_code = self._analyze_and_normalize_indent(code, 0).strip()
         
-        # Добавляем пустые строки для PEP8
-        prefix = '\n\n'
-        if insert_line == 0 or (insert_line > 0 and not lines[insert_line - 1].strip()):
-            prefix = '\n'
+        # 4. Формируем отступы по PEP8 (2 пустые строки до и после для module-level)
+        prefix = '\n\n\n'  # 2 blank lines before
+        if insert_line == 0:
+            prefix = ''
+        elif insert_line > 0 and not lines[insert_line - 1].strip():
+            prefix = '\n\n'
+            if insert_line > 1 and not lines[insert_line - 2].strip():
+                prefix = '\n'
         
-        formatted_code = prefix + formatted_code + '\n'
+        suffix = '\n\n\n'  # 2 blank lines after
+        if insert_line == len(lines):
+            suffix = '\n'
+        elif insert_line < len(lines) and not lines[insert_line].strip():
+            suffix = '\n\n'
+            if insert_line + 1 < len(lines) and not lines[insert_line + 1].strip():
+                suffix = '\n'
+        
+        formatted_code = prefix + formatted_code + suffix
         
         # Вставляем
         lines.insert(insert_line, formatted_code)
-        new_content = ''.join(lines)
+        new_content = ''.join(lines)        
+        
+        
         
         return ModifyResult(
             success=True,
@@ -5783,11 +5807,17 @@ class FileModifier:
                     break
             
             if target_node is None:
+                logger.warning(
+                    f"[STAGING FAILED] REPLACE_GLOBAL: Pattern '{replace_pattern}' not found in global scope. "
+                    f"This may indicate a rename scenario where REPLACE_PATTERN should be the OLD variable name."
+                )
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
                     message=f"Pattern '{replace_pattern}' not found in global scope",
-                )
+                    error_type=StagingErrorType.REPLACE_PATTERN_NOT_FOUND,
+                )            
+            
             
             # Определяем точный диапазон замены
             start_line = target_node.start_point[0]
@@ -5825,8 +5855,8 @@ class FileModifier:
                 success=False,
                 new_content=existing_content,
                 message=f"Error replacing global: {e}",
-            )
-    
+                error_type=StagingErrorType.UNKNOWN,
+            )    
     
     # ========================================================================
     # HELPER METHODS (большинство удалено)
