@@ -366,7 +366,7 @@ AVAILABLE_ORCHESTRATOR_MODELS = [
     (
         "2",
         cfg.MODEL_SONNET_4_5,
-        "Claude Sonnet 4.5",
+        "Claude Sonnet 4.6",
         "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует."
     ),
     (
@@ -5027,7 +5027,6 @@ async def handle_agent_mode(query: str):
                         break
                 
                 # Ask user for feedback
-                from rich.prompt import Prompt
                 console.print("\n[bold yellow]План готов. Введите '!ok' на английском языке для утверждения плана и начала реализации.[/]")
                 console.print("[dim]Введите '!cancel' для отмены или напишите свои правки к плану (они будут переданы планировщику для доработки).[/]")
                 
