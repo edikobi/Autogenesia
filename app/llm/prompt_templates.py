@@ -133,9 +133,11 @@ def get_model_cognitive_type(model_id: str) -> str:
         if "chat" in model_lower:
             return "executor"
     
-    # === FALLBACK: Exact match from dictionary ===
-    if model_id in MODEL_COGNITIVE_TYPES:
-        return MODEL_COGNITIVE_TYPES[model_id]
+    # === FALLBACK: Exact match from dictionary (prefix-agnostic) ===
+    _norm = Config.normalize_model_id(model_id)
+    _norm_dict = {Config.normalize_model_id(k): v for k, v in MODEL_COGNITIVE_TYPES.items()}
+    if _norm in _norm_dict:
+        return _norm_dict[_norm]
     
     # === DEFAULT ===
     return "general"
@@ -987,7 +989,7 @@ def _get_adaptive_block_ask(model_id: str) -> str:
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
-    if model_id == Config.MODEL_GPT_5_2_Codex:
+    if Config.is_model(model_id, Config.MODEL_GPT_5_2_Codex):
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
 
     # для остальных
@@ -1016,7 +1018,7 @@ def _get_adaptive_block_new_project(model_id: str) -> str:
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
-    if model_id == Config.MODEL_GPT_5_2_Codex:
+    if Config.is_model(model_id, Config.MODEL_GPT_5_2_Codex):
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # executor and general - no modifications
@@ -1127,16 +1129,16 @@ def _get_adaptive_block_ask_agent(model_id: str) -> str:
         base_block = _ADAPTIVE_BLOCK_EXECUTOR
     else:
         base_block = ""
-    if model_id == Config.MODEL_GLM_5_2:
+    if Config.is_model(model_id, Config.MODEL_GLM_5_2):
         return _ADAPTIVE_BLOCK_GLM_5_2_AGENT
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
-    if model_id == Config.MODEL_GPT_5_2_Codex:
+    if Config.is_model(model_id, Config.MODEL_GPT_5_2_Codex):
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
+    if Config.is_model(model_id, Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -1171,17 +1173,17 @@ def _get_adaptive_block_new_project_agent(model_id: str) -> str:
     else:
         base_block = ""
     
-    if model_id == Config.MODEL_GLM_5_2:
+    if Config.is_model(model_id, Config.MODEL_GLM_5_2):
         return _ADAPTIVE_BLOCK_GLM_5_2_AGENT
     
     
     # 1. SPECIFIC MODEL OVERRIDES (Priority 1)
     # GPT-5.2 Codex needs special handling for recursive refinement issues
-    if model_id == Config.MODEL_GPT_5_2_Codex:
+    if Config.is_model(model_id, Config.MODEL_GPT_5_2_Codex):
         return _ADAPTIVE_BLOCK_GPT5_2_CODEX
     
     # SPECIAL: Add Claude delegation block ONLY for Opus 4.5 and Sonnet 4.5
-    if model_id in (Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
+    if Config.is_model(model_id, Config.MODEL_OPUS_4_5, Config.MODEL_SONNET_4_5, Config.MODEL_SONNET_4_6, Config.MODEL_OPUS_4_8):
         if base_block:
             return base_block + "\n" + _ADAPTIVE_BLOCK_CLAUDE_DELEGATION
         else:
@@ -6428,8 +6430,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("| PATCH_METHOD | Insert lines INSIDE existing method | TARGET_CLASS (if in class), TARGET_METHOD, INSERT_AFTER or INSERT_BEFORE |")
     parts.append("| INSERT_IN_CLASS | Add a NEW ATTRIBUTE/FIELD to class body  | TARGET_CLASS, INSERT_AFTER |")
     parts.append("| REPLACE_IN_CLASS | Replace a class ATTRIBUTE/FIELD in class body | TARGET_CLASS, TARGET_ATTRIBUTE, REPLACE_PATTERN |")
-    parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional) |")
-    parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN |")
+    parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional), INSERT_AFTER or INSERT_BEFORE (optional) |")
+    parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN, INSERT_AFTER or INSERT_BEFORE (optional) |")
     parts.append("| INSERT_IN_FUNCTION | Insert lines INSIDE existing function | TARGET_FUNCTION, INSERT_AFTER or INSERT_BEFORE |")
     parts.append("| ADD_NEW_FUNCTION | Add new global function | (none) |")
     parts.append("")
@@ -6448,7 +6450,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("")
     parts.append("=" * 60)
     parts.append("")
-    parts.append("REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, and REPLACE_GLOBAL support multi-line REPLACE_PATTERN.")
+    parts.append("REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, REPLACE_IN_CLASS and REPLACE_GLOBAL support multi-line REPLACE_PATTERN.")
     parts.append("A multi-line pattern consists of 2–10 consecutive lines copied exactly from the original file.")
     parts.append("")
     parts.append("HOW TO WRITE a multi-line REPLACE_PATTERN:")
@@ -6463,7 +6465,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("UNIQUENESS RULE FOR REPLACE_PATTERN")
     parts.append("=" * 60)
     parts.append("")
-    parts.append("For REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, and REPLACE_GLOBAL modes, the REPLACE_PATTERN must be unique within the target scope.")
+    parts.append("For REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, REPLACE_IN_CLASS and REPLACE_GLOBAL modes, the REPLACE_PATTERN must be unique within the target scope.")
     parts.append("")
     parts.append("DECISION ALGORITHM (follow strictly):")
     parts.append("1. Identify the target scope (method body, function body, or global scope).")
@@ -6813,6 +6815,7 @@ def _get_python_prompt_injection() -> str:
     # Example 11: Surgical Replacement (NEW)
     parts.append("**Example 11: Surgical Replacement inside Method**")
     parts.append("Performs surgical changes within the Method Body (indented logic). Matches Orchestrator's 'Method Body' scope.")
+    parts.append("If `REPLACE_PATTERN` is not unique, add `INSERT_AFTER` or `INSERT_BEFORE` to narrow the search scope and avoid 'Ambiguous replace_pattern' errors.")
     parts.append("```")
     parts.append("### CODE_BLOCK")
     parts.append("FILE: app/core/config.py")
@@ -6867,6 +6870,7 @@ def _get_python_prompt_injection() -> str:
 
 
     parts.append("**Example 12: Surgical Replace inside Function (Module Scope)**")
+    parts.append("If `REPLACE_PATTERN` is not unique, add `INSERT_AFTER` or `INSERT_BEFORE` to narrow the search scope and avoid 'Ambiguous replace_pattern' errors.")
     parts.append("```")
     parts.append("### CODE_BLOCK")
     parts.append("FILE: app/tui.py")
@@ -6975,7 +6979,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("7. MATCH STYLE — follow the existing code style in the file")
     parts.append("8. USE THE CORRECT PROGRAMMING LANGUAGE — generate code in the language appropriate for each file (Python, JavaScript, TypeScript, Java, Go).")
     # новояз
-    parts.append("9. MULTI-LINE REPLACE_PATTERN: REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, and REPLACE_GLOBAL support multi-line REPLACE_PATTERN. Indentation must strictly match the original file byte-for-byte. FORBIDDEN: replacing an entire method or function this way — use REPLACE_METHOD / REPLACE_FUNCTION instead.")    
+    parts.append("9. MULTI-LINE REPLACE_PATTERN: REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, REPLACE_IN_CLASS and REPLACE_GLOBAL support multi-line REPLACE_PATTERN. Indentation must strictly match the original file byte-for-byte. FORBIDDEN: replacing an entire method or function this way — use REPLACE_METHOD / REPLACE_FUNCTION instead.")    
     parts.append("10. REPLACE_PATTERN UNIQUENESS: You MUST ensure that the REPLACE_PATTERN appears exactly once in the target scope. If you detect multiple occurrences, you are REQUIRED to either expand the pattern to a multi-line unique block or switch to REPLACE_METHOD/REPLACE_FUNCTION. Submitting a non-unique pattern is a critical error that will abort staging. Follow the UNIQUENESS RULE section above.")    
     parts.append("11. Your code must be complete – it must not end with an unfinished statement (e.g., trailing comma, unmatched parenthesis, or incomplete line).")    
 

@@ -419,11 +419,16 @@ class IntraSessionCompressor:
         try:
             from app.llm.api_client import call_llm
             
+            from config.intermediate_agent_models import get_intermediate_model
+            summarizer_model, _, summarizer_provider = get_intermediate_model("context_manager", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
             summary = await call_llm(
-                model=cfg.MODEL_GEMINI_2_FLASH,
+                model=summarizer_model,
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0,
                 max_tokens=500,
+                preferred_provider=summarizer_provider,
+                is_intermediate=True,
             )
             
             return summary.strip()

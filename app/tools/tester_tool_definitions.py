@@ -35,7 +35,8 @@ RUFF_TOOL: Dict[str, Any] = {
     "function": {
         "name": "run_ruff",
         "description": (
-            "Run the ruff linter on a file from the Virtual File System. "
+            "Run the ruff linter on a file from VFS (staged version). "
+            "The file is executed in the workspace context. "
             "Returns linting results in JSON format. "
             "Use this to check code quality, style violations, and potential bugs. "
             "Supports custom rule selection, ignore rules, auto-fix mode, and TOML config override."
@@ -105,6 +106,7 @@ COMPILE_CODE_TOOL: Dict[str, Any] = {
         "name": "compile_code",
         "description": (
             "Compile a file from VFS for syntax and type checking without executing it. "
+            "The file is written to the workspace directory for compilation. "
             "Supports Python (py_compile), Java (javac), Go (go build), JavaScript/TypeScript (tsc). "
             "Returns compilation output with success/failure status."
         ),
@@ -136,9 +138,11 @@ RUN_CODE_TOOL: Dict[str, Any] = {
     "function": {
         "name": "run_code",
         "description": (
-            "Execute a file from VFS and return its output (stdout, stderr, exit code, duration). "
+            "Execute a file from VFS or test workspace and return its output (stdout, stderr, exit code, duration). "
+            "Project files are read from VFS and executed within the full project workspace. "
+            "Test files are executed from the isolated workspace. "
+            "All imports resolve to VFS-staged versions. "
             "Supports Python, Java, Go, JavaScript, and TypeScript. "
-            "The file is written to an isolated temp directory before execution. "
             "Timeout is configurable (default 30s, max 120s)."
         ),
         "parameters": {
@@ -146,7 +150,10 @@ RUN_CODE_TOOL: Dict[str, Any] = {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the file in VFS to execute."
+                    "description": (
+                        "Path to the file in VFS (e.g., 'app/main.py') or basename of a test file "
+                        "in the workspace (e.g., 'test_auth.py')."
+                    ),
                 },
                 "language": {
                     "type": "string",
@@ -207,8 +214,10 @@ WRITE_TEST_FILE_TOOL: Dict[str, Any] = {
     "function": {
         "name": "write_test_file",
         "description": (
-            "Write a test file to the agent's isolated temporary directory. "
-            "This DOES NOT modify project files — the test file exists only in the temp directory. "
+            "Write a test file to the agent's isolated workspace directory (which contains the full "
+            "project with VFS-staged changes). "
+            "This DOES NOT modify project files. "
+            "The test file can import any project module and will see VFS-staged versions. "
             "Use this to create test scripts that you can then execute with run_code. "
             "The file_name must be a basename only (no directory paths)."
         ),

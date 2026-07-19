@@ -755,74 +755,108 @@ class MultiLanguageParser:
     }
 
     def __init__(self):
-        """Initialize parser cache."""
-        self._parsers: Dict[str, any] = {}
-        self._languages: Dict[str, any] = {}
+            """Initialize parser cache."""
+            self._parsers: Dict[str, any] = {}
+            self._languages: Dict[str, any] = {}
+            
+            if 'tsx' not in MultiLanguageParser.LANGUAGE_CONFIGS:
+                MultiLanguageParser.LANGUAGE_CONFIGS['tsx'] = {
+                    'module': 'tree_sitter_typescript',
+                    'attr': 'language_tsx',
+                    'extensions': ['.tsx'],
+                    'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+                    'class_types': ['class_declaration'],
+                    'body_type': 'statement_block',
+                }
+                # Remove '.tsx' from typescript extensions
+                ts_config = MultiLanguageParser.LANGUAGE_CONFIGS['typescript']
+                if '.tsx' in ts_config.get('extensions', []):
+                    ts_config['extensions'].remove('.tsx')
+
+
+            # === ДОБАВЛЕНО: Регистрация JSX для парсинга React файлов ===
+            # Стандартный парсер JavaScript не понимает JSX-теги (<div> и т.д.).
+            # Используем language_tsx, так как она является надмножеством и отлично парсит .jsx
+            if 'jsx' not in MultiLanguageParser.LANGUAGE_CONFIGS:
+                MultiLanguageParser.LANGUAGE_CONFIGS['jsx'] = {
+                    'module': 'tree_sitter_typescript',
+                    'attr': 'language_tsx',
+                    'extensions': ['.jsx'],
+                    'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+                    'class_types': ['class_declaration'],
+                    'body_type': 'statement_block',
+                }
+                # Убираем .jsx из javascript, чтобы не было конфликта
+                js_config = MultiLanguageParser.LANGUAGE_CONFIGS.get('javascript', {})
+                if '.jsx' in js_config.get('extensions', []):
+                    js_config['extensions'].remove('.jsx')
 
     def _get_parser_for_language(self, language: str) -> tuple:
-        """Get or create parser for specified language.
-        
-        Returns:
-            tuple: (parser, language_object)
-            
-        Raises:
-            ValueError: If language is not supported.
-        """
-        if language in self._parsers:
-            return (self._parsers[language], self._languages[language])
+            """Get or create parser for specified language.
 
-        if language not in self.LANGUAGE_CONFIGS:
-            raise ValueError(f"Unsupported language: {language}")
+            Returns:
+                tuple: (parser, language_object)
 
-        config = self.LANGUAGE_CONFIGS[language]
+            Raises:
+                ValueError: If language is not supported.
+            """
+            if language in self._parsers:
+                return (self._parsers[language], self._languages[language])
 
-        try:
-            # Import tree_sitter Parser class
-            from tree_sitter import Language, Parser
-            
-            # Import the tree-sitter language module
-            module_name = config['module']
-            module = __import__(module_name)
+            if language not in self.LANGUAGE_CONFIGS:
+                raise ValueError(f"Unsupported language: {language}")
+            config = self.LANGUAGE_CONFIGS[language]
 
-            # Get the language object
-            if 'attr' in config:
-                # For TypeScript, need to access specific attribute
-                lang_func = getattr(module, config['attr'])
-                lang_data = lang_func()
-            else:
-                # For others, use default language attribute
-                lang_data = module.language()
+            try:
+                # Import tree_sitter Parser class
+                from tree_sitter import Language, Parser
 
-            if isinstance(lang_data, Language):
-                lang_obj = lang_data
-            else:
-                lang_obj = Language(lang_data)
+                # Import the tree-sitter language module
+                module_name = config['module']
+                module = __import__(module_name)
 
-            # Create parser
-            parser = Parser(lang_obj)
+                # Get the language object
+                if 'attr' in config:
+                    # For TypeScript, need to access specific attribute
+                    lang_func = getattr(module, config['attr'])
+                    lang_data = lang_func()
+                else:
+                    # For others, use default language attribute
+                    lang_data = module.language()
 
-            # Cache for future use
-            self._parsers[language] = parser
-            self._languages[language] = lang_obj
+                if isinstance(lang_data, Language):
+                    lang_obj = lang_data
+                else:
+                    lang_obj = Language(lang_data)
 
-            return (parser, lang_obj)
+                # Create parser
+                parser = Parser(lang_obj)
 
-        except ImportError as e:
-            raise ValueError(f"Tree-sitter language module not installed for {language}: {e}")
-        except Exception as e:
-            raise ValueError(f"Failed to initialize parser for {language}: {e}")
+                # Cache for future use
+                self._parsers[language] = parser
+                self._languages[language] = lang_obj
+
+                return (parser, lang_obj)
+
+            except ImportError as e:
+                raise ValueError(f"Tree-sitter language module not installed for {language}: {e}")
+            except Exception as e:
+                raise ValueError(f"Failed to initialize parser for {language}: {e}")
 
 
 
     def get_language_for_file(self, file_path: str) -> Optional[str]:
-        """Detect language from file extension"""
-        ext = Path(file_path).suffix.lower()
-        
-        for language, config in self.LANGUAGE_CONFIGS.items():
-            if ext in config.get("extensions", []):
-                return language
-        
-        return None
+            """Detect language from file extension"""
+            ext = Path(file_path).suffix.lower()
+
+            if ext == '.tsx':
+                return 'tsx'
+
+            for language, config in self.LANGUAGE_CONFIGS.items():
+                if ext in config.get("extensions", []):
+                    return language
+
+            return None
 
     def is_supported(self, file_path: str) -> bool:
         """Check if file type is supported for parsing"""
@@ -1220,120 +1254,150 @@ class MultiLanguageParser:
         return [e for e in errors if "Missing" in e]
 
     def auto_fix_syntax(self, source_code: str, language: str) -> Tuple[str, bool]:
-        """
-        Fix syntax errors in source code using a language-specific strategy.
-    
-        For Java: Uses tree-sitter to detect missing semicolons and applies
-        a safe, line-aware insertion strategy.
-    
-        For other languages: Returns code unchanged (no fixes attempted).
-    
-        Args:
-            source_code: The source code to fix.
-            language: The language of the source code.
-    
-        Returns:
-            Tuple[str, bool]: (fixed_code, was_fixed)
-        """
-        try:
-            # Only attempt fixes for Java
-            if language.lower() != "java":
-                return (source_code, False)
-        
-            # Get parser for Java
+            """
+            Fix syntax errors in source code using a language-specific strategy.
+
+            Supports Java, JavaScript, TypeScript, TSX, and Go.
+            For other languages, returns code unchanged.
+
+            Args:
+                source_code: The source code to fix.
+                language: The language of the source code.
+
+            Returns:
+                Tuple[str, bool]: (fixed_code, was_fixed)
+            """
             try:
-                parser_info = self._get_parser_for_language(language)
-                parser = parser_info[0]
-            except ValueError:
-                logger.warning(f"No parser available for {language}")
-                return (source_code, False)
-        
-            source_bytes = source_code.encode('utf-8')
-            tree = parser.parse(source_bytes)
-        
-            # === STEP 1: Find missing semicolons ===
-            missing_semicolon_lines = set()
-        
-            def collect_missing_semicolons(node):
-                """Recursively find is_missing nodes with type ';'"""
-                if node.is_missing and node.type == ";":
-                    # Get the 1-indexed line number where semicolon is expected
-                    line_num = node.start_point[0] + 1
-                    missing_semicolon_lines.add(line_num)
-            
-                for child in node.children:
-                    collect_missing_semicolons(child)
-        
-            collect_missing_semicolons(tree.root_node)
-        
-            if not missing_semicolon_lines:
-                return (source_code, False)
-        
-            # === STEP 2: Split source into lines ===
-            lines = source_code.split('\n')
-            modified = False
-        
-            # === STEP 3: Process each line with missing semicolon ===
-            for line_num in sorted(missing_semicolon_lines):
-                # Convert to 0-indexed
-                line_idx = line_num - 1
-            
-                if line_idx < 0 or line_idx >= len(lines):
-                    continue
-            
-                line = lines[line_idx]
-                stripped = line.rstrip()
-            
-                # === SAFETY CHECKS ===
-            
-                # Check 1: Line is not empty
-                if not stripped:
-                    continue
-            
-                # Check 2: Line does not already end with ; { } ,
-                if stripped[-1] in (';', '{', '}', ','):
-                    continue
-            
-                # Check 3: Line is not a comment
-                stripped_lstrip = stripped.lstrip()
-                if stripped_lstrip.startswith('//') or stripped_lstrip.startswith('/*') or stripped_lstrip.startswith('*'):
-                    continue
-            
-                # Check 4: Line does not start with Java block keywords
-                block_keywords = (
-                    'if', 'else', 'for', 'while', 'do', 'try', 'catch', 'finally',
-                    'switch', 'class', 'interface', 'enum', '@',
-                    'public', 'private', 'protected', 'static', 'abstract',
-                    'synchronized', 'native'
-                )
-            
-                # Check if line starts with any keyword
-                first_word = stripped_lstrip.split()[0] if stripped_lstrip.split() else ''
-                if first_word in block_keywords:
-                    # Additional check: if line contains { at the end, skip it
-                    if '{' in stripped:
+                # Language-specific fixable token types
+                fixable_tokens = {
+                    'java': {';'},
+                    'javascript': {';', ')', '}', ']'},
+                    'typescript': {';', ')', '}', ']'},
+                    'tsx': {';', ')', '}', ']'},
+                    'go': {'{', '}', ')'},
+                }
+
+                if language.lower() not in fixable_tokens:
+                    return (source_code, False)
+
+                fixable = fixable_tokens[language.lower()]
+
+                # Get parser for this language
+                try:
+                    parser_info = self._get_parser_for_language(language)
+                    parser = parser_info[0]
+                except ValueError:
+                    logger.warning(f"No parser available for {language}")
+                    return (source_code, False)
+
+                source_bytes = source_code.encode('utf-8')
+                tree = parser.parse(source_bytes)
+
+                # Collect missing token placements
+                missing_token_lines: Dict[int, str] = {}
+
+                def collect_missing_nodes(node):
+                    """Recursively find is_missing nodes and record what token is missing."""
+                    missing_attr = getattr(node, 'is_missing', False)
+                    is_miss = missing_attr() if callable(missing_attr) else bool(missing_attr)
+                    if is_miss and node.type in fixable:
+                        line_num = node.start_point[0] + 1
+                        token_type = node.type
+                        # For Go, we need to be careful about token placement
+                        if token_type not in missing_token_lines or token_type == '{':
+                            # Later '{' overrides earlier (closest to the declaration)
+                            missing_token_lines[line_num] = token_type
+                    for child in node.children:
+                        collect_missing_nodes(child)
+
+                collect_missing_nodes(tree.root_node)
+
+                if not missing_token_lines:
+                    return (source_code, False)
+
+                # Sort by line number for stable insertion
+                lines = source_code.split('\n')
+                modified = False
+
+                for line_num in sorted(missing_token_lines.keys()):
+                    line_idx = line_num - 1
+                    if line_idx < 0 or line_idx >= len(lines):
                         continue
-            
-                # Check 5: Line is not a standalone { or }
-                if stripped in ('{', '}'):
-                    continue
-            
-                # === INSERT SEMICOLON ===
-                # Preserve trailing whitespace/newline
-                trailing_ws = line[len(stripped):]
-                lines[line_idx] = stripped + ';' + trailing_ws
-                modified = True
-        
-            if not modified:
+                    line = lines[line_idx]
+                    stripped = line.rstrip()
+                    token_type = missing_token_lines[line_num]
+
+                    # Safety checks
+                    if not stripped:
+                        continue
+                    # Don't add token if line already ends with one of these
+                    if stripped[-1] in ';{}],':
+                        continue
+                    # Skip comment lines
+                    stripped_lstrip = stripped.lstrip()
+                    if stripped_lstrip.startswith('//') or stripped_lstrip.startswith('/*') or stripped_lstrip.startswith('*'):
+                        continue
+                    if stripped_lstrip.startswith('#'):
+                        continue
+
+                    # Skip block keywords at start of line (language-specific)
+                    if language.lower() in ('java', 'javascript', 'typescript', 'tsx'):
+                        block_keywords = (
+                            'if', 'else', 'for', 'while', 'do', 'try', 'catch', 'finally',
+                            'switch', 'class', 'interface', 'enum', '@',
+                            'public', 'private', 'protected', 'static', 'abstract',
+                            'synchronized', 'native', 'function', 'const', 'let', 'var',
+                            'import', 'export', 'from',
+                        )
+                        first_word = stripped_lstrip.split()[0] if stripped_lstrip.split() else ''
+                        if first_word in block_keywords and '{' in stripped:
+                            continue
+                    elif language.lower() == 'go':
+                        block_keywords = (
+                            'if', 'else', 'for', 'switch', 'select', 'func', 'type', 'var', 'const',
+                            'import', 'package', 'return',
+                        )
+                        first_word = stripped_lstrip.split()[0] if stripped_lstrip.split() else ''
+                        if first_word in block_keywords and token_type == '{':
+                            continue
+                        if first_word in block_keywords and token_type == '}':
+                            continue
+                        if stripped in ('{', '}'):
+                            continue
+
+                    # Insert token
+                    trailing_ws = line[len(stripped):]
+                    if language.lower() == 'go':
+                        if token_type == '{':
+                            # Go requires { on the same line, at the end
+                            lines[line_idx] = stripped + ' {'
+                        elif token_type == '}':
+                            # Insert on a new line with appropriate indentation (same as current line)
+                            indent = line[:len(line) - len(line.lstrip())]
+                            lines[line_idx] = stripped + trailing_ws
+                            # Insert new line after, but we already iterate by line_idx, so we need to be careful.
+                            # Instead, we'll insert a new line after the current line.
+                            # We'll do the modification by inserting into list; but since we are iterating sorted lines,
+                            # it's safe as we'll not encounter new lines again.
+                            lines.insert(line_idx + 1, indent + '}')
+                            modified = True
+                            continue
+                        elif token_type == ')':
+                            lines[line_idx] = stripped + ')'
+                    else:
+                        lines[line_idx] = stripped + token_type + trailing_ws
+
+                    modified = True
+
+                if not modified:
+                    return (source_code, False)
+
+                fixed_code = '\n'.join(lines)
+                return (fixed_code, True)
+
+            except Exception as e:
+                logger.warning(f"Failed to auto-fix syntax for {language}: {e}")
                 return (source_code, False)
-        
-            # === STEP 5: Reconstruct source ===
-            fixed_code = '\n'.join(lines)
-            return (fixed_code, True)
-    
-        except Exception as e:
-            logger.warning(f"Failed to auto-fix syntax for {language}: {e}")
-            return (source_code, False)
 
     def get_defined_elements(self, source_code: str, language: str) -> set[str]:
         """

@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List
 import sys
-import requests
+from app.llm.api_client import call_llm
+from config.intermediate_agent_models import get_intermediate_model
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -125,35 +126,26 @@ class IndexUpdater:
     """
 
     def __init__(self, project_root: str):
-        self.project_root = Path(project_root).resolve()
-        self.scanner = ProjectScanner(project_root)
-        self.reader = FileReaderTool(project_root)
-        self.token_counter = TokenCounter()
+            """Initialize IndexUpdater with provider-aware model selection."""
+            self.project_root = Path(project_root).resolve()
+            self.scanner = ProjectScanner(project_root)
+            self.reader = FileReaderTool(project_root)
+            self.token_counter = TokenCounter()
 
-        self.api_key = cfg.OPENROUTER_API_KEY
-        self.base_url = cfg.OPENROUTER_BASE_URL
-        self.model = cfg.MODEL_QWEN  # должен быть qwen/qwen-2.5-coder-32b-instruct
+            self.model, _, self.model_provider = get_intermediate_model("index_updater", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+            # No longer need direct api_key/base_url — call_llm handles routing
 
-    def _call_qwen(self, messages: List[Dict[str, str]]) -> str:
-        """
-        Вызов Qwen через OpenRouter.
-        Ожидается, что Qwen вернёт JSON-строку с результатами анализа.
-        """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost",
-        }
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 2000,
-            "temperature": 0.1,
-        }
-        resp = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    async def _call_qwen(self, messages: List[Dict[str, str]]) -> str:
+            """Call Qwen via call_llm with provider-aware model selection."""
+            result = await call_llm(
+                model=self.model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=2000,
+                preferred_provider=self.model_provider,
+                is_intermediate=True,
+            )
+            return result
 
     def _load_project_map(self) -> Dict[str, Any]:
         path = self.project_root / "project_map.json"
@@ -171,14 +163,10 @@ class IndexUpdater:
         path = self.project_root / "semantic_index.json"
         path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def update_index(self) -> None:
-        """
-        Главный метод: запускает индексацию изменённых файлов.
-        """
+    async def update_index(self) -> None:
         project_map = self._load_project_map()
         semantic_index = self._load_semantic_index()
 
-        # Простейшая логика изменений: сравниваем hash
         existing_files = semantic_index.get("files", {})
         changed_files = []
 
@@ -195,8 +183,6 @@ class IndexUpdater:
             rel_path = f["path"]
             file_type = f["type"]
 
-            # Чанкируем файл (в XML) с учётом лимитов Qwen
-            # 1. оценка токенов системного промпта
             prompt_tokens = self.token_counter.count(SYSTEM_PROMPT)
             available_for_chunks = max(QWEN_CONTEXT_LIMIT - prompt_tokens - 2000, 2000)
 
@@ -215,9 +201,7 @@ class IndexUpdater:
 
             file_entries = []
 
-            # Шлём чанки батчами, чтобы не превышать лимит
             for chunk_xml in read_res.chunks_xml:
-                # Подсчитываем токены чанка
                 chunk_tokens = self.token_counter.count(chunk_xml)
                 if prompt_tokens + chunk_tokens > QWEN_CONTEXT_LIMIT:
                     continue
@@ -226,26 +210,15 @@ class IndexUpdater:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": chunk_xml},
                 ]
-                reply = self._call_qwen(messages)
+                reply = await self._call_qwen(messages)
 
-                # reply должен быть JSON — парсим
                 try:
                     info = json.loads(reply)
                 except json.JSONDecodeError:
                     continue
 
-                # info ожидается вида:
-                # {
-                #   "target": {"kind": "method", "name": "login", "parent": "User", "file": "app/auth.py"},
-                #   "syntax_ok": true,
-                #   "syntax_errors": [],
-                #   "calls": [{"type": "method", "name": "check_password", "class": "User"}, ...],
-                #   "files_touched": ["db/session.py"],
-                #   "summary": "Short description..."
-                # }
                 file_entries.append(info)
 
-            # Обновляем semantic_index для файла
             semantic_index["files"][rel_path] = {
                 "hash": f["hash"],
                 "type": file_type,

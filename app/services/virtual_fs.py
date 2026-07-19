@@ -16,6 +16,7 @@ Virtual File System Layer для Agent Mode.
 
 from __future__ import annotations
 
+import shutil
 import ast
 import re
 import logging

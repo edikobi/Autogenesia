@@ -718,11 +718,16 @@ class ProjectMapBuilder:
         ]
         
         try:
+            from config.intermediate_agent_models import get_intermediate_model
+            describe_model, _, describe_provider = get_intermediate_model("project_map", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
             response = await call_llm(
-                model=cfg.PROJECT_MAP_DESCRIBE_MODEL,
+                model=describe_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=300,
+                preferred_provider=describe_provider,
+                is_intermediate=True,
             )
             
             description = response.strip()

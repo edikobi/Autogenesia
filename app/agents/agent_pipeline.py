@@ -639,9 +639,13 @@ class AgentPipeline:
         
         # [NEW] Модель оркестратора (если None — используется роутер)
         self._orchestrator_model: Optional[str] = None
+        # [NEW] Per-role provider для оркестратора (если None — fallback к selected_agent_provider)
+        self._orchestrator_provider: Optional[str] = None
         
         # [NEW] Модель генератора
         self._generator_model: Optional[str] = generator_model
+        # [NEW] Per-role provider для генератора (если None — fallback к selected_agent_provider)
+        self._generator_provider: Optional[str] = None
         
         # Initialize services
         self.vfs = VirtualFileSystem(self.project_dir)
@@ -695,6 +699,8 @@ class AgentPipeline:
         self._current_generated_code: str = ""
 
         self._tester_report: Optional['TesterReport'] = None
+
+        self._tester_agent: Optional['TesterAgent'] = None
         
         self._last_pyright_warnings: List[str] = []
         
@@ -795,6 +801,38 @@ class AgentPipeline:
             logger.info(f"AgentPipeline: generator model set to {cfg.get_model_display_name(model)}")
         else:
             logger.info("AgentPipeline: generator model set to default (from config)")    
+
+    def set_orchestrator_provider(self, provider: Optional[str]):
+        """
+        Set the per-role provider for the orchestrator.
+        
+        When the orchestrator uses a fixed model (router disabled), this provider
+        is passed as preferred_provider when calling the orchestrator LLM. When
+        the router is enabled, the router determines the provider itself and this
+        value is not used.
+        
+        Args:
+            provider: Provider name (e.g., "opencode_go") or None to fall back to
+                      cfg.get_selected_agent_provider().
+        """
+        self._orchestrator_provider = provider
+        if provider:
+            logger.info(f"AgentPipeline: orchestrator provider set to {provider}")
+
+    def set_generator_provider(self, provider: Optional[str]):
+        """
+        Set the per-role provider for the code generator.
+        
+        This provider is passed as preferred_provider when calling the code
+        generator LLM, overriding cfg.get_selected_agent_provider().
+        
+        Args:
+            provider: Provider name (e.g., "opencode_go") or None to fall back to
+                      cfg.get_selected_agent_provider().
+        """
+        self._generator_provider = provider
+        if provider:
+            logger.info(f"AgentPipeline: generator provider set to {provider}")
     
     async def process_request(
             self,
@@ -1602,6 +1640,26 @@ class AgentPipeline:
                                         error_lines=[i.line for i in file_issues],
                                     )
                                 logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
+                            
+                        # === Route TSX syntax errors through dedicated feedback channel ===
+                        tsx_syntax_issues = [
+                            issue for issue in blocking_errors
+                            if getattr(issue, 'code', None) == "tsx_syntax_error"
+                            and getattr(issue, 'language', None) == "tsx"
+                        ]
+                        if tsx_syntax_issues:
+                            from collections import defaultdict
+                            tsx_issues_by_file = defaultdict(list)
+                            for issue in tsx_syntax_issues:
+                                tsx_issues_by_file[issue.file_path].append(issue)
+                            for file_path, file_issues in tsx_issues_by_file.items():
+                                self.feedback_loop.add_ts_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                )
+                            logger.info(f"[PIPELINE] Routing {len(tsx_syntax_issues)} TSX syntax errors through dedicated feedback channel")                            
+                            
                             feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
                         
                             working_history.append({
@@ -2919,6 +2977,28 @@ Please analyze this feedback and provide a revised instruction.""",
                                 error_lines=[i.line for i in file_issues],
                             )
                         logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
+                    
+                    
+                        # === Route TSX syntax errors through dedicated feedback channel ===
+                        tsx_syntax_issues = [
+                            issue for issue in blocking_errors
+                            if getattr(issue, 'code', None) == "tsx_syntax_error"
+                            and getattr(issue, 'language', None) == "tsx"
+                        ]
+                        if tsx_syntax_issues:
+                            from collections import defaultdict
+                            tsx_issues_by_file = defaultdict(list)
+                            for issue in tsx_syntax_issues:
+                                tsx_issues_by_file[issue.file_path].append(issue)
+                            for file_path, file_issues in tsx_issues_by_file.items():
+                                self.feedback_loop.add_ts_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                )
+                            logger.info(f"[PIPELINE] Routing {len(tsx_syntax_issues)} TSX syntax errors through dedicated feedback channel")                            
+                    
+                    
                     feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
                     
                     working_history.append({
@@ -3550,6 +3630,8 @@ Remember: You can override the validator if you believe the critique is incorrec
             self,
             user_additional_input: str = "",
             tester_model: Optional[str] = None,
+            tester_provider: Optional[str] = None,
+            on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
         ) -> Optional['TesterReport']:
             """
             Run the TesterAgent to independently verify the staged code changes.
@@ -3561,12 +3643,15 @@ Remember: You can override the validator if you believe the critique is incorrec
             Args:
                 user_additional_input: Additional testing instructions from the user.
                 tester_model: LLM model to use for testing (None = orchestrator model).
+                tester_provider: Per-role provider for the tester (None = orchestrator provider).
+                on_tool_call: Optional callback for real-time tool call streaming.
 
             Returns:
                 TesterReport with original and translated reports, or None on error.
             """
             try:
                 model = tester_model or self._orchestrator_model
+                provider = tester_provider if tester_provider is not None else self._orchestrator_provider
                 orchestrator_plan = getattr(self, '_prefilter_advice', '') or ''
 
                 agent = TesterAgent(
@@ -3576,10 +3661,13 @@ Remember: You can override the validator if you believe the critique is incorrec
                     user_request=self._pending_user_request,
                     orchestrator_plan=orchestrator_plan,
                     tester_model=model,
+                    tester_provider=provider,
                     user_additional_input=user_additional_input,
                     project_python_path=self._project_python_path,
+                    on_tool_call=on_tool_call,
                 )
 
+                self._tester_agent = agent
                 report = await agent.run()
                 self._tester_report = report
                 return report
@@ -3592,6 +3680,29 @@ Remember: You can override the validator if you believe the critique is incorrec
                     success=False,
                     error=str(e),
                 )
+
+    async def ask_tester_followup(self, user_question: str) -> Optional[dict]:
+        """Forward a follow-up question to the TesterAgent.
+
+        Args:
+            user_question: The user's follow-up question text.
+
+        Returns:
+            Dict with response data from TesterAgent.ask_followup, or None if unavailable.
+        """
+        if self._tester_agent is None:
+            return None
+        try:
+            return await self._tester_agent.ask_followup(user_question)
+        except Exception as e:
+            logger.error(f"ask_tester_followup failed: {e}", exc_info=True)
+            return None
+
+    def cleanup_tester(self) -> None:
+        """Clean up the TesterAgent resources and release references."""
+        if self._tester_agent is not None:
+            self._tester_agent.cleanup()
+            self._tester_agent = None
     
     # ========================================================================
     # INTERNAL: ORCHESTRATOR
@@ -3614,14 +3725,23 @@ Remember: You can override the validator if you believe the critique is incorrec
         from app.agents.router import route_request
         
         # Определяем модель: либо переданную, либо через роутер
+        orchestrator_provider: Optional[str] = None
         if orchestrator_model:
             model = orchestrator_model
-            logger.info(f"Pipeline: Using pre-selected model {cfg.get_model_display_name(model)}")
+            # Per-role provider for fixed model (overrides selected_agent_provider)
+            orchestrator_provider = self._orchestrator_provider
+            logger.info(f"Pipeline: Using pre-selected model {cfg.get_model_display_name(model)} "
+                        f"(provider: {orchestrator_provider})")
         else:
             routing = await route_request(user_request, self.project_index)
             model = routing.orchestrator_model
+            orchestrator_provider = routing.orchestrator_provider
             logger.info(f"Pipeline: Router selected {cfg.get_model_display_name(model)} "
-                    f"(complexity: {routing.complexity_level})")
+                    f"(complexity: {routing.complexity_level}, provider: {orchestrator_provider})")
+        
+        # Effective preferred provider: per-role (fixed model) or router's choice.
+        # Falls back to selected_agent_provider only when neither is set (intermediate agents).
+        effective_provider = orchestrator_provider or cfg.get_selected_agent_provider()
         
         # === ИСПРАВЛЕНИЕ: Загружаем compact_index.md вместо генерации JSON ===
         compact_index = _load_compact_index_md(self.project_dir)
@@ -3671,6 +3791,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             project_map=project_map,
             tool_executor=tool_executor_with_callbacks,
             prefilter_advice=prefilter_advice,
+            preferred_provider=effective_provider,
         )
         
         # Report thinking
@@ -3736,6 +3857,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                 instruction=instruction,
                 file_contents=file_contents,
                 model=self._generator_model,
+                preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
             )
         
             # NEW LOGIC: Retry if blocks are empty but instruction requires code
@@ -3765,6 +3887,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                             instruction=retry_instruction,
                             file_contents=file_contents,
                             model=self._generator_model,
+                            preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
                         )
                     
                         if not blocks:
@@ -3869,10 +3992,10 @@ Remember: You can override the validator if you believe the critique is incorrec
         from app.services.file_modifier import classify_staging_error
 
         _lang_map = {
-            '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
-            '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
-            '.c': 'c', '.cpp': 'cpp', '.cs': 'c_sharp'
-        }
+                    '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'jsx',
+                    '.ts': 'typescript', '.tsx': 'tsx', '.go': 'go',
+                    '.c': 'c', '.cpp': 'cpp', '.cs': 'c_sharp'
+                }
 
         # --- PHASE 0: Pre-check file integrity ---
         logger.info(f"Phase 0: Checking integrity of {len(code_blocks)} target files")
@@ -3933,7 +4056,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                     msg += " MANDATORY: Use MODE: REPLACE_FILE to overwrite the entire file. Surgical edits CANNOT work on a broken file."
                     final_errors.append(self._format_staging_error(block, "PRE_EXISTING_CORRUPTION", msg, backup_content))
                     continue
-                
+
                 # 3. Parser readiness
                 if not self._ensure_parsers_ready(block.file_path):
                     final_errors.append(self._format_staging_error(block, "STAGING_SYSTEM_ERROR", "Parser unavailable", backup_content))
@@ -3943,6 +4066,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                 if block.code and '\t' in block.code:
                     block.code = block.code.replace('\t', '    ')
 
+                print(f"📝 [DEBUG-CODE] Файл: {block.file_path} | Длина кода ИИ: {len(block.code or '')} символов")                
+               
                 # 5. Application attempt
                 result = self.file_modifier.apply_code_block(existing_content, block)
                 
@@ -3975,7 +4100,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                     error_details = []
 
                     if is_code_file:
-                        lang_name = block.language or _lang_map.get(ext, 'unknown') if not is_python else 'python'
+                        lang_name = _lang_map.get(ext, 'unknown') if not is_python else 'python'
                         parser_obj = self.ts_parser if is_python else self.ml_parser
                         
                         try:
@@ -4064,8 +4189,11 @@ Remember: You can override the validator if you believe the critique is incorrec
 
                 _, ext = os.path.splitext(block.file_path)
                 is_python = (ext == '.py')
-                lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if not is_python else 'python'
+                lang_name = _lang_map.get(ext.lower(), 'unknown') if not is_python else 'python'
+                
+                
                 parser_obj = self.ts_parser if is_python else self.ml_parser
+                
 
                 # 1. CREATE SNAPSHOT (state before THIS fix attempt)
                 snapshot_content = current_vfs_content
@@ -4202,7 +4330,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                             is_broken, _, _ = self._check_tree_structure_broken(self.ts_parser, result.new_content, block, file_path=block.file_path, baseline_content=current_content)
                         elif self.ml_parser and self.ml_parser.is_supported(block.file_path):
                             _, ext = os.path.splitext(block.file_path)
-                            lang_name = block.language or _lang_map.get(ext.lower(), 'unknown') if ext.lower() != '.py' else 'python'
+                            lang_name = _lang_map.get(ext.lower(), 'unknown') if ext.lower() != '.py' else 'python'
                             is_val, _ = self.ml_parser.validate_syntax(result.new_content, lang_name)
                             is_broken = not is_val
                         
@@ -4712,7 +4840,28 @@ Remember: You can override the validator if you believe the critique is incorrec
             if not is_valid or missing_nodes:
                 # Combine distinct errors
                 all_errors = list(set(ts_errors + missing_nodes))
+
+                # [TSX FIX] Baseline filtering for non-Python files:
+                # Exclude tree-sitter errors that already existed in the baseline
+                # content. This prevents false-positive staging errors for .tsx
+                # files (and other non-Python files) that have pre-existing
+                # tree-sitter warnings/errors in the original code.
+                if baseline_content is not None and baseline_content != content:
+                    try:
+                        _, baseline_ts_errors = parser.validate_syntax(baseline_content, language)
+                        baseline_missing = parser.get_missing_nodes(baseline_content, language)
+                        baseline_error_strs = set(str(e) for e in (baseline_ts_errors + baseline_missing))
+                        all_errors = [e for e in all_errors if str(e) not in baseline_error_strs]
+                        logger.debug(
+                            f"Non-Python baseline filtering for {language}: "
+                            f"{len(all_errors)} errors after filtering "
+                            f"(baseline had {len(baseline_error_strs)} errors)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Non-Python baseline filtering failed for {language}: {e}")
+
                 error_details.extend([str(e) for e in all_errors[:5]])
+
 
         if error_details:
             # Deduplicate errors
@@ -5044,8 +5193,8 @@ Remember: You can override the validator if you believe the critique is incorrec
         
         # Mapping for markdown language blocks
         _lang_map = {
-            '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
-            '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+            '.py': 'python', '.java': 'java', '.js': 'javascript', '.jsx': 'jsx',
+            '.ts': 'typescript', '.tsx': 'tsx', '.go': 'go',
             '.c': 'c', '.cpp': 'cpp', '.cs': 'c_sharp', '.sql': 'sql',
             '.sh': 'bash', '.yml': 'yaml', '.yaml': 'yaml', '.json': 'json'
         }
@@ -6287,11 +6436,29 @@ Please analyze the errors and provide a revised instruction.""",
             else:
                 # Fallback: apply code block to original content
                 # This shouldn't normally happen if _stage_code_blocks succeeded
-                result = self.file_modifier.apply_code_block(original_content, block)
-                logger.warning(
-                    f"_build_pending_changes: No staged content for {block.file_path}, "
-                    f"falling back to apply_code_block (success={result.success})"
-                )
+                if block.code is None:
+                    logger.error(f"_build_pending_changes: block.code is None for {block.file_path}")
+                    result = ModifyResult(
+                        success=False,
+                        new_content="",
+                        message="Error: block.code is None",
+                        changes_made=[]
+                    )
+                else:
+                    try:
+                        result = self.file_modifier.apply_code_block(original_content, block)
+                        logger.warning(
+                            f"_build_pending_changes: No staged content for {block.file_path}, "
+                            f"falling back to apply_code_block (success={result.success})"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to apply code block for {block.file_path}: {e}")
+                        result = ModifyResult(
+                            success=False,
+                            new_content="",
+                            message=f"Error: {e}",
+                            changes_made=[]
+                        )            
             
             pending.append(PendingChange(
                 file_path=block.file_path,
@@ -6457,11 +6624,11 @@ Please analyze the errors and provide a revised instruction.""",
             ".ts": "//", ".tsx": "//", ".go": "//",
         }
         ts_lang_map = {
-            ".java": "java",
-            ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-            ".ts": "typescript", ".tsx": "typescript",
-            ".go": "go",
-        }
+                    '.java': 'java',
+                    '.js': 'javascript', '.jsx': 'jsx', '.mjs': 'javascript',
+                    '.ts': 'typescript', '.tsx': 'tsx',
+                    '.go': 'go',
+                }
         prefix = comment_prefix_map.get(ext)
         if prefix is None:
             return {"success": False, "error": f"Unsupported extension: {ext}"}

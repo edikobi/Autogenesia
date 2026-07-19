@@ -1,0 +1,36 @@
+{
+  "openrouter": {
+    "api_key": "",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "routerai": {
+    "api_key": "",
+    "base_url": "https://routerai.ru/api/v1"
+  },
+  "deepseek": {
+    "api_key": "",
+    "base_url": "https://api.deepseek.com"
+  },
+  "glm": {
+    "api_key": "",
+    "base_url": "https://api.z.ai/api/paas/v4/"
+  },
+  "opencode_go": {
+    "api_key": "",
+    "base_url": "https://opencode.ai/zen/go/v1"
+  },
+  "qwencloud": {
+    "api_key": "",
+    "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+  },
+  "reasoning_effort": "max",
+  "disabled_providers": [
+    "routerai",
+    "openrouter",
+    "opencode_go"
+  ],
+  "provider_entry_order": [
+    "opencode_go"
+  ],
+  "selected_agent_provider": "deepseek"
+}

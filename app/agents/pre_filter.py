@@ -272,6 +272,7 @@ async def analyze_query(
     is_planning: bool = False,
     is_new_project: bool = False,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
+    preferred_provider: Optional[str] = None,
 ) -> PreFilterAdvice:
     """Анализирует запрос пользователя и готовит рекомендации для Оркестратора.
 
@@ -283,6 +284,9 @@ async def analyze_query(
         index: Полный семантический индекс
         mode: Режим работы (NORMAL или ADVANCED)
         model: Модель для использования (если None, используется из конфига)
+        preferred_provider: Per-role provider chosen together with the model
+            (overrides cfg.get_selected_agent_provider()). Used only when model
+            is explicitly provided; otherwise the dynamic selection's provider is used.
 
     Returns:
         PreFilterAdvice с анализом и рекомендациями
@@ -292,7 +296,14 @@ async def analyze_query(
     try:
         # Получить модель если не указана
         if model is None:
-            model = cfg.AGENT_MODELS.get("pre_filter") or cfg.MODEL_NORMAL
+            from config.intermediate_agent_models import get_orchestrator_model_for_agent
+            model, _, model_provider = get_orchestrator_model_for_agent(
+                cfg.get_available_providers(),
+                preferred_provider=cfg.get_selected_agent_provider(),
+            )
+        else:
+            # Per-role provider chosen by the user together with the model.
+            model_provider = preferred_provider
         
         logger.info(f"[PRE-FILTER] analyze_query called: mode={mode.value}, model={model}")
         
@@ -330,6 +341,7 @@ async def analyze_query(
                 messages=messages,
                 temperature=0,
                 max_tokens=2000,
+                preferred_provider=model_provider,
             )
             
             elapsed = time.time() - start_time
@@ -351,6 +363,7 @@ async def analyze_query(
                     tool_executor=tool_executor,
                     max_tool_calls=50,
                     on_tool_call=on_tool_call,
+                    preferred_provider=model_provider,
                 )
                 elapsed = time.time() - start_time
                 logger.info(f"[PRE-FILTER] Planning mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
@@ -464,7 +477,8 @@ async def _run_advanced_prefilter(
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
-                max_tokens=15000,
+                max_tokens=10000,
+                preferred_provider=model_provider,
             )
             
             content = response.get("content", "")
@@ -539,7 +553,8 @@ async def _run_advanced_prefilter(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=15000,
+            max_tokens=10000,
+            preferred_provider=model_provider,
         )
         
         return final_response, tool_calls_count, model
@@ -583,97 +598,56 @@ async def run_planning_loop(
     tool_executor: ToolExecutor,
     max_tool_calls: int = 50,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
+    preferred_provider: Optional[str] = None,
 ) -> tuple:
-    """Запускает продвинутый цикл планирования с fallback-логикой."""
+    """Запускает продвинутый цикл планирования с graceful degradation.
+
+    Provider-aware model selection is used; no hardcoded fallback models.
+    The outer try/except provides graceful degradation (returns empty string +
+    tool count + model) if any exception occurs.
+    """
     tool_calls_count = 0
-    from config.settings import cfg
-    fallback_model = cfg.MODEL_DEEPSEEK_REASONER
     current_model = model
     retry_count = 0
-    
-    # Точные фразы ошибок OpenRouter для инициации fallback
-    OPENROUTER_ERROR_PHRASES = [
-        "Insufficient credits",
-        "Rate limit reached",
-        "Provider returned an error",
-        "Request timed out",
-        "Model is overloaded",
-        "No available model provider",
-        "Unknown model",
-        "Internal Server Error",
-        "upstream request timeout",
-        "Bad Gateway"
-    ]
 
-    def is_openrouter_error(msg: str) -> bool:
-        """Проверяет, содержит ли сообщение об ошибке точные фразы OpenRouter."""
-        if not msg:
-            return False
-        return any(phrase.lower() in msg.lower() for phrase in OPENROUTER_ERROR_PHRASES)
-    
     try:
         available_tools = [
             tool for tool in ORCHESTRATOR_TOOLS
             if tool.get("function", {}).get("name") != "run_project_tests"
         ]
-        
+
         while tool_calls_count < max_tool_calls:
-            try:
-                response = await call_llm_with_tools(
-                    model=current_model,
-                    messages=messages,
-                    tools=available_tools,
-                    temperature=0,
-                    max_tokens=15000,
-                )
-            except Exception as e:
-                error_str = str(e)
-                if is_openrouter_error(error_str):
-                    logger.warning(f"[PRE-FILTER] OpenRouter provider error detected. Falling back to {fallback_model}. Error: {error_str}")
-                    print(f"\n⚠️  [PRE-FILTER] Обнаружен сбой провайдера OpenRouter. Переключение на запасную модель {fallback_model}...")
-                    current_model = fallback_model
-                    response = await call_llm_with_tools(
-                        model=current_model,
-                        messages=messages,
-                        tools=available_tools,
-                        temperature=0,
-                        max_tokens=4000,
-                    )
-                else:
-                    # Если это не ошибка OpenRouter, не переключаемся на другую модель.
-                    # Просто логируем и пробрасываем выше для общего retry или завершения.
-                    logger.error(f"[PRE-FILTER] Non-provider error in loop: {type(e).__name__}: {error_str}")
-                    raise
-            
+            response = await call_llm_with_tools(
+                model=current_model,
+                messages=messages,
+                tools=available_tools,
+                temperature=0,
+                max_tokens=10000,
+                preferred_provider=preferred_provider,
+            )
+
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
-            
+
             if not tool_calls:
                 if not content.strip() and retry_count == 0:
                     logger.warning(f"[PRE-FILTER] Empty response. Retrying...")
                     retry_count += 1
                     continue
-                elif not content.strip() and retry_count > 0 and current_model != fallback_model:
-                    logger.warning(f"[PRE-FILTER] Empty response again. Falling back to {fallback_model}.")
-                    print(f"\n⚠️  [PRE-FILTER] Пустой ответ. Переключение на запасную модель {fallback_model}...")
-                    current_model = fallback_model
-                    retry_count = 0
-                    continue
                 elif not content.strip():
-                    # Even fallback failed
-                    return "Plan generation failed due to empty response from fallback model.", tool_calls_count, current_model
-                
-                return content, tool_calls_count, current_model
-            
+                    return ("Plan generation failed due to empty response.", tool_calls_count, current_model)
+
+                return (content, tool_calls_count, current_model)
+
             assistant_tool_calls = []
             tool_results = []
-            
+
             for tc in tool_calls:
                 if tool_calls_count >= max_tool_calls:
                     break
-                
+
                 func_name, func_args, tc_id = parse_tool_call(tc)
-                
+
                 try:
                     result = _execute_prefilter_tool(tool_executor, func_name, func_args)
                     tool_calls_count += 1
@@ -683,27 +657,27 @@ async def run_planning_loop(
                     result = f"Tool execution failed: {str(e)}"
                     tool_calls_count += 1
                     success = False
-                
+
                 # [STREAMING] Вызов коллбэка для визуализации в реальном времени
                 if on_tool_call:
                     try:
                         on_tool_call(func_name, func_args, result, success)
                     except Exception as e:
                         logger.warning(f"Error in pre-filter streaming callback: {e}")
-                
+
                 assistant_tool_calls.append(tc)
                 tool_results.append({
                     "tool_call_id": tc_id,
                     "name": func_name,
                     "content": result,
                 })
-            
+
             messages.append({
                 "role": "assistant",
                 "content": content,
                 "tool_calls": assistant_tool_calls,
             })
-            
+
             for tr in tool_results:
                 messages.append({
                     "role": "tool",
@@ -711,36 +685,21 @@ async def run_planning_loop(
                     "name": tr["name"],
                     "content": tr["content"],
                 })
-            
+
         messages.append({
             "role": "user",
             "content": "Please provide your final implementation plan now based on the gathered information. Enclose it within ###Plan##### markers.",
         })
-        
-        try:
-            final_response = await call_llm(
-                model=current_model,
-                messages=messages,
-                temperature=0,
-                max_tokens=15000,
-            )
-        except Exception as e:
-            error_str = str(e)
-            if is_openrouter_error(error_str):
-                logger.warning(f"[PRE-FILTER] OpenRouter provider error on final call. Falling back to {fallback_model}. Error: {error_str}")
-                print(f"\n⚠️  [PRE-FILTER] Сбой провайдера на финальном вызове. Переключение на {fallback_model}...")
-                current_model = fallback_model
-                final_response = await call_llm(
-                    model=current_model,
-                    messages=messages,
-                    temperature=0,
-                    max_tokens=15000,
-                )
-            else:
-                logger.error(f"[PRE-FILTER] Non-provider error on final call: {type(e).__name__}: {error_str}")
-                raise
-            
-        return final_response, tool_calls_count, current_model
+
+        final_response = await call_llm(
+            model=current_model,
+            messages=messages,
+            temperature=0,
+            max_tokens=10000,
+            preferred_provider=preferred_provider,
+        )
+
+        return (final_response, tool_calls_count, current_model)
 
     except Exception as e:
         error_type = type(e).__name__
@@ -748,7 +707,8 @@ async def run_planning_loop(
         # GRACEFUL DEGRADATION: Не выбрасываем исключение, просто логируем и продолжаем без плана
         logger.error(f"[PRE-FILTER] Planning loop failed: {error_type}: {error_msg}. Proceeding WITHOUT PLAN.")
         print(f"\n⚠️  [PRE-FILTER] Не удалось сформировать план (ошибка: {error_msg}). Работа продолжается в обычном режиме.")
-        return "", tool_calls_count, current_model
+        return ("", tool_calls_count, current_model)
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -788,7 +748,11 @@ async def pre_filter_chunks(
     index: Dict[str, Any],
     project_dir: str,
     # [NEW] Добавляем параметр для определения модели оркестратора
-    orchestrator_model: str = None
+    orchestrator_model: str = None,
+    # [NEW] Per-role provider chosen together with the pre-filter model.
+    # Forwarded to _call_prefilter_llm → get_orchestrator_model_for_agent.
+    # None falls back to cfg.get_selected_agent_provider() (background default).
+    preferred_provider: Optional[str] = None,
 ) -> PreFilterResult:
     """
     Selects top N most relevant AST chunks from project index.
@@ -812,6 +776,9 @@ async def pre_filter_chunks(
         index: Full or compressed project index
         project_dir: Path to project root
         orchestrator_model: Target model (affects token limits)
+        preferred_provider: Per-role provider for the pre-filter LLM. When the
+            model is selected dynamically (orchestrator_model=None), this provider
+            is preferred; None falls back to cfg.get_selected_agent_provider().
         
     Returns:
         PreFilterResult with selected chunks (including code)
@@ -845,10 +812,7 @@ async def pre_filter_chunks(
     # =========================================================================
     
     # Модели с УЖЕСТОЧЁННЫМИ лимитами (маленький контекст или дорогие)
-    STRICT_LIMIT_MODELS = {
-        cfg.MODEL_OPUS_4_5,           # Дорогой + консервативная токенизация Claude
-        cfg.MODEL_DEEPSEEK_REASONER,  # Всего 64k контекст!
-    }
+    # Comparison is prefix-agnostic via cfg.is_model()
     
     # Helper function для более надёжного сравнения моделей
     def _is_strict_limit_model(model: str) -> bool:
@@ -856,8 +820,8 @@ async def pre_filter_chunks(
         if not model:
             return False
         
-        # Точное совпадение
-        if model in STRICT_LIMIT_MODELS:
+        # Точное совпадение (prefix-agnostic)
+        if cfg.is_model(model, cfg.MODEL_OPUS_4_5, cfg.MODEL_DEEPSEEK_REASONER):
             return True
         
         # Fuzzy matching по подстрокам (на случай разных форматов ID)
@@ -878,8 +842,8 @@ async def pre_filter_chunks(
         if not model:
             return False
         
-        # Точное совпадение
-        if model == cfg.MODEL_GEMINI_3_PRO:
+        # Точное совпадение (prefix-agnostic)
+        if cfg.is_model(model, cfg.MODEL_GEMINI_3_PRO):
             return True
         
         # Fuzzy matching
@@ -987,6 +951,7 @@ async def pre_filter_chunks(
         chunks_with_code=chunks_for_llm,
         project_map_str=project_map_str,
         max_chunks=max_chunks,
+        preferred_provider=preferred_provider,
     )
     
     # STEP 5: If LLM selection failed, use fallback
@@ -1326,6 +1291,9 @@ async def _call_prefilter_llm(
     chunks_with_code: List[SelectedChunk],
     project_map_str: str,
     max_chunks: int,
+    # [NEW] Per-role provider chosen together with the pre-filter model.
+    # None falls back to cfg.get_selected_agent_provider() (background default).
+    preferred_provider: Optional[str] = None,
 ) -> List[Dict]:
     """
     Call Pre-filter LLM with actual code.
@@ -1352,7 +1320,11 @@ async def _call_prefilter_llm(
         },
     ]
     
-    model = get_model_for_role("pre_filter")
+    from config.intermediate_agent_models import get_orchestrator_model_for_agent
+    model, _, model_provider = get_orchestrator_model_for_agent(
+        cfg.get_available_providers(),
+        preferred_provider=preferred_provider or cfg.get_selected_agent_provider(),
+    )
     
     try:
         response = await call_llm(
@@ -1360,6 +1332,7 @@ async def _call_prefilter_llm(
             messages=messages,
             temperature=0,
             max_tokens=8000,
+            preferred_provider=model_provider,
         )
         
         if not response or not response.strip():

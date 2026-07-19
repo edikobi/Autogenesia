@@ -85,7 +85,7 @@ async def compress_history_if_needed(
     current_threshold = threshold
     
     # Если явно передана Gemini 3.0 Pro, ставим огромный порог
-    if active_model and active_model == cfg.MODEL_GEMINI_3_PRO:
+    if active_model and cfg.is_model(active_model, cfg.MODEL_GEMINI_3_PRO):
         current_threshold = 200000 
         logger.info(f"Compressor: Using EXTENDED threshold for Gemini 3.0 Pro ({current_threshold} tokens)")
     elif active_model:
@@ -155,7 +155,9 @@ async def compress_history_if_needed(
         compressed_tokens=compressed_tokens,
         messages_before=messages_before,
         messages_after=len(compressed_history),
-        model_used=cfg.AGENT_MODELS.get("history_compressor", "deepseek/deepseek-chat")
+        model_used=(lambda: (
+                        __import__('config.intermediate_agent_models', fromlist=['get_intermediate_model']).get_intermediate_model("compressor", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())[0]
+                    ))()
     )
     return compressed_history, stats
 
@@ -194,14 +196,17 @@ async def _compress_message(msg: Message, content_type: str) -> Message:
         logger.debug(f"Compressing {content_type} message: {original_tokens} tokens -> target {target_tokens}")
         
         # Получаем модель для сжатия
-        model = cfg.AGENT_MODELS.get("history_compressor", "deepseek/deepseek-chat")
+        from config.intermediate_agent_models import get_intermediate_model
+        model, _, model_provider = get_intermediate_model("compressor", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
         
         # Вызываем LLM для сжатия
         compressed = await call_llm(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=min(COMPRESSION_MAX_TOKENS, target_tokens + 200)
+            max_tokens=min(COMPRESSION_MAX_TOKENS, target_tokens + 200),
+            preferred_provider=model_provider,
+            is_intermediate=True,
         )
         
         # Проверяем эффективность сжатия

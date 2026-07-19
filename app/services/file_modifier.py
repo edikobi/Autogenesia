@@ -666,15 +666,19 @@ class FileModifier:
                     )
                     return self._patch_method(existing_content, new_instruction)
                 
-                elif instruction.mode == ModifyMode.ADD_METHOD:
-                    logger.info(f"Auto-correction: '{target_name}' exists as function. Switching to ADD_FUNCTION.")
-                    new_instruction = create_correction(
-                        ModifyMode.ADD_FUNCTION,
-                        target_function=target_name,
-                        target_method=None,
-                        target_class=None
-                    )
-                    return self._add_function(existing_content, new_instruction)
+                elif instruction.mode == ModifyMode.INSERT_INTO_CLASS:
+                    target_class = instruction.target_class
+                    target_method = instruction.target_method
+                    if target_class and target_method:
+                        method_info = parse_result.get_method(target_class, target_method)
+                        if method_info:
+                            logger.info(f"Auto-correction: '{target_method}' is a method. Switching to INSERT_INTO_CLASS.")
+                            new_instruction = create_correction(
+                                ModifyMode.INSERT_INTO_CLASS,
+                                target_class=target_class,
+                                target_method=target_method
+                            )
+                            return self._insert_into_class(existing_content, new_instruction)
             
             # Check if it's a method
             class_name = find_as_method(target_name)
@@ -708,15 +712,15 @@ class FileModifier:
                     )
                     return self._patch_method(existing_content, new_instruction)
                 
-                elif instruction.mode == ModifyMode.ADD_FUNCTION:
-                    logger.info(f"Auto-correction: Target class '{class_name}' found. Switching to ADD_METHOD.")
+                elif instruction.mode == ModifyMode.INSERT_INTO_FILE:
+                    logger.info("Auto-correction: Switching to INSERT_INTO_FILE mode.")
                     new_instruction = create_correction(
-                        ModifyMode.ADD_METHOD,
-                        target_class=class_name,
-                        target_method=target_name,
-                        target_function=None
+                        ModifyMode.INSERT_INTO_FILE,
+                        target_function=None,
+                        target_method=None,
+                        target_class=None
                     )
-                    return self._add_method(existing_content, new_instruction)
+                    return self._insert_into_file(existing_content, new_instruction)
 
         # === SCENARIO 3: REPLACE_IN_CLASS -> REPLACE_METHOD ===
         if instruction.mode == ModifyMode.REPLACE_IN_CLASS:
@@ -776,8 +780,8 @@ class FileModifier:
             if file_ext in non_python_extensions:
                 if result.success and result.new_content:
                     language_map = {
-                        '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
-                        '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+                        '.java': 'java', '.js': 'javascript', '.jsx': 'jsx',
+                        '.ts': 'typescript', '.tsx': 'tsx', '.go': 'go',
                     }
                     language = language_map.get(file_ext)
                     if language:
@@ -904,17 +908,27 @@ class FileModifier:
         # === HANDLE DIFF MODES FOR NON-PYTHON LANGUAGES ===
         if block.mode in self.DIFF_MODES:
             # Route to multi-language diff handler
+            
             try:
                 # Determine language from block or file extension
-                language = block.language
+                # CRITICAL FIX: Для .tsx и .jsx всегда принудительно используем нужный парсер,
+                # игнорируя block.language (ИИ часто шлет LANGUAGE: typescript).
+                _ext = Path(block.file_path).suffix.lower()
+                if _ext == '.tsx':
+                    language = 'tsx'
+                elif _ext == '.jsx':
+                    language = 'jsx'
+                else:
+                    language = block.language
                 if not language:
+                                        
                     # Infer from file extension
                     ext = Path(block.file_path).suffix.lower()
                     ext_to_lang = {
                         '.js': 'javascript',
-                        '.jsx': 'javascript',
+                        '.jsx': 'jsx',
                         '.ts': 'typescript',
-                        '.tsx': 'typescript',
+                        '.tsx': 'tsx',
                         '.go': 'go',
                         '.java': 'java',
                     }
@@ -1029,14 +1043,22 @@ class FileModifier:
             existing_content = vfs.read_file(block.file_path) or ""
 
             if block.mode in self.DIFF_MODES:
-                language = block.language
-                if not language:
+                # CRITICAL FIX: Для .tsx и .jsx всегда принудительно используем нужный парсер.
+                _ext = Path(block.file_path).suffix.lower()
+                if _ext == '.tsx':
+                    language = 'tsx'
+                elif _ext == '.jsx':
+                    language = 'jsx'
+                else:
+                    language = block.language
+                if not language:                    
+                    
                     ext = Path(block.file_path).suffix.lower()
                     ext_to_lang = {
                         '.js': 'javascript',
-                        '.jsx': 'javascript',
+                        '.jsx': 'jsx',
                         '.ts': 'typescript',
-                        '.tsx': 'typescript',
+                        '.tsx': 'tsx',
                         '.go': 'go',
                         '.java': 'java',
                     }
@@ -1103,8 +1125,8 @@ class FileModifier:
 
             # Determine language for AI fixer
             language_map = {
-                '.java': 'java', '.js': 'javascript', '.jsx': 'javascript',
-                '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go',
+                '.java': 'java', '.js': 'javascript', '.jsx': 'jsx',
+                '.ts': 'typescript', '.tsx': 'tsx', '.go': 'go',
                 '.py': 'python',
             }
             file_language = block.language or language_map.get(file_ext, 'python')
@@ -1486,8 +1508,8 @@ class FileModifier:
         
         try:
             # === VALIDATION: Language support (Only for code files) ===
-            supported_langs = ['javascript', 'typescript', 'go', 'java']
-            if is_code_file and instruction.language not in supported_langs:
+            supported_langs = ['javascript', 'typescript', 'go', 'java', 'tsx', 'jsx']
+            if is_code_file and instruction.language not in supported_langs:                
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
@@ -3185,107 +3207,100 @@ class FileModifier:
         # Получаем строки метода
         method_lines = lines[method_start:method_end]
 
-        # === IDEMPOTENCY CHECK: Try to find and replace matching lines ===
-        code_lines = [l.strip() for l in code.strip().splitlines() if l.strip()]
-        method_lines_stripped = [l.strip() for l in method_lines]
-        
-        if code_lines:
-            first_code_line = code_lines[0]
-            match_start_offset = None
-            for i, method_line in enumerate(method_lines_stripped):
-                if first_code_line == method_line:
-                    # Found potential match - verify consecutive lines match
-                    match_count = 0
-                    for j, code_line in enumerate(code_lines):
-                        if i + j < len(method_lines_stripped):
-                            if code_line == method_lines_stripped[i + j]:
-                                match_count += 1
+        # === IDEMPOTENCY CHECK: Only for blind inserts (no anchor specified) ===
+        if not insert_after and not insert_before:
+            code_lines = [l.strip() for l in code.strip().splitlines() if l.strip()]
+            method_lines_stripped = [l.strip() for l in method_lines]
+            
+            if code_lines:
+                first_code_line = code_lines[0]
+                match_start_offset = None
+                for i, method_line in enumerate(method_lines_stripped):
+                    if first_code_line == method_line:
+                        # Found potential match - verify consecutive lines match
+                        match_count = 0
+                        for j, code_line in enumerate(code_lines):
+                            if i + j < len(method_lines_stripped):
+                                if code_line == method_lines_stripped[i + j]:
+                                    match_count += 1
+                                else:
+                                    break
                             else:
                                 break
-                        else:
+                        
+                        if match_count == len(code_lines):
+                            match_start_offset = i
                             break
-                    
-                    if match_count == len(code_lines):
-                        match_start_offset = i
-                        break
-            
-            if match_start_offset is not None:
-                replace_start = method_start + match_start_offset
-                replace_end = replace_start + len(code_lines)
+                
+                if match_start_offset is not None:
+                    replace_start = method_start + match_start_offset
+                    replace_end = replace_start + len(code_lines)
 
-                # Expand compound block if the matched block is a compound statement
-                replace_start, replace_end = self._expand_compound_block_python(
-                    lines, replace_start, replace_end, method_end
-                )
-
-                matched_line = lines[replace_start]
-                _matched_expanded = matched_line.expandtabs(4)
-                body_indent = len(_matched_expanded) - len(_matched_expanded.lstrip(' '))
-
-                # Проверяем: является ли matched_line block-header (if/for/while/def/...).
-                # Если да И code НЕ начинается с block-header (LLM прислал только тело),
-                # нужно добавить +4 — тело блока должно быть глубже заголовка.
-                # Это та же логика, что _code_omits_header в _replace_in_method.
-                _BLOCK_HEADER_PREFIXES_IDEM = (
-                    'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
-                    'async def ', 'async for ', 'async with ', 'match ',
-                )
-                _matched_stripped = matched_line.strip()
-                _matched_is_block_header = (
-                    _matched_stripped.endswith(':') and
-                    any(
-                        _matched_stripped == kw or _matched_stripped.startswith(kw)
-                        for kw in _BLOCK_HEADER_PREFIXES_IDEM
-                    )
-                )
-                _idem_code_first_stripped = next(
-                    (ln.strip() for ln in code.splitlines() if ln.strip()), ''
-                )
-                _idem_code_first_is_block_header = (
-                    _idem_code_first_stripped.endswith(':') and
-                    any(
-                        _idem_code_first_stripped == kw or _idem_code_first_stripped.startswith(kw)
-                        for kw in _BLOCK_HEADER_PREFIXES_IDEM
-                    )
-                )
-                # Idempotency match охватывает ровно len(code_lines) строк до expand.
-                # После _expand_compound_block_python match мог расшириться.
-                # Применяем +4 только если matched одну строку (только header).
-                _idem_match_is_single_line = (replace_end - replace_start) <= 1
-                if (
-                    _matched_is_block_header and
-                    _idem_match_is_single_line and
-                    not _idem_code_first_is_block_header
-                ):
-                    body_indent += 4
-                    logger.debug(
-                        f"_patch_method idempotency: matched_line is block-header, "
-                        f"code omits header → body_indent+4={body_indent}"
+                    # Expand compound block if the matched block is a compound statement
+                    replace_start, replace_end = self._expand_compound_block_python(
+                        lines, replace_start, replace_end, method_end
                     )
 
-                _method_text_for_idem = ''.join(lines[method_start:method_end])
-                formatted_code = self._normalize_block_for_insertion(
-                    code, body_indent, mode='replace', method_text=_method_text_for_idem
-                )
-                _idem_syntax_ok = self._validate_full_content(
-                    ''.join(lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:])
-                )
-                if not _idem_syntax_ok:
-                    formatted_code = code
+                    matched_line = lines[replace_start]
+                    _matched_expanded = matched_line.expandtabs(4)
+                    body_indent = len(_matched_expanded) - len(_matched_expanded.lstrip(' '))
 
-                new_lines = lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:]
-                new_content = ''.join(new_lines)
+                    _BLOCK_HEADER_PREFIXES_IDEM = (
+                        'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
+                        'async def ', 'async for ', 'async with ', 'match ',
+                    )
+                    _matched_stripped = matched_line.strip()
+                    _matched_is_block_header = (
+                        _matched_stripped.endswith(':') and
+                        any(
+                            _matched_stripped == kw or _matched_stripped.startswith(kw)
+                            for kw in _BLOCK_HEADER_PREFIXES_IDEM
+                        )
+                    )
+                    _idem_code_first_stripped = next(
+                        (ln.strip() for ln in code.splitlines() if ln.strip()), ''
+                    )
+                    _idem_code_first_is_block_header = (
+                        _idem_code_first_stripped.endswith(':') and
+                        any(
+                            _idem_code_first_stripped == kw or _idem_code_first_stripped.startswith(kw)
+                            for kw in _BLOCK_HEADER_PREFIXES_IDEM
+                        )
+                    )
+                    _idem_match_is_single_line = (replace_end - replace_start) <= 1
+                    if (
+                        _matched_is_block_header and
+                        _idem_match_is_single_line and
+                        not _idem_code_first_is_block_header
+                    ):
+                        body_indent += 4
+                        logger.debug(
+                            f"_patch_method idempotency: matched_line is block-header, "
+                            f"code omits header → body_indent+4={body_indent}"
+                        )
 
-                target_name = f"{target_class}.{target_method}" if target_class else target_method
+                    _method_text_for_idem = ''.join(lines[method_start:method_end])
+                    formatted_code = self._normalize_block_for_insertion(
+                        code, body_indent, mode='replace', method_text=_method_text_for_idem
+                    )
+                    _idem_syntax_ok = self._validate_full_content(
+                        ''.join(lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:])
+                    )
+                    if not _idem_syntax_ok:
+                        formatted_code = code
 
-                return ModifyResult(
-                    success=True,
-                    new_content=new_content,
-                    message=f"Replaced {replace_end - replace_start} lines in method '{target_name}'",
-                    changes_made=[f"Replaced lines {replace_start + 1}-{replace_end} in {target_name}"],
-                )
-        # === END IDEMPOTENCY CHECK ===
-        
+                    new_lines = lines[:replace_start] + [formatted_code + '\n'] + lines[replace_end:]
+                    new_content = ''.join(new_lines)
+
+                    target_name = f"{target_class}.{target_method}" if target_class else target_method
+
+                    return ModifyResult(
+                        success=True,
+                        new_content=new_content,
+                        message=f"Replaced {replace_end - replace_start} lines in method '{target_name}'",
+                        changes_made=[f"Replaced lines {replace_start + 1}-{replace_end} in {target_name}"],
+                    )
+        # === END IDEMPOTENCY CHECK ===        
         # Get method body indent using Tree-sitter when possible
         # body_base_indent removal as per Plan V14
         
@@ -4886,119 +4901,145 @@ class FileModifier:
         )
     
     def _replace_in_class(
-        self,
-        existing_content: str,
-        instruction: ModifyInstruction
-    ) -> ModifyResult:
-        """
-        Заменяет атрибут в теле класса.
-        
-        Args:
-            instruction:
-                - target_class: Имя класса
-                - replace_pattern: Старая строка атрибута (полностью или частично)
-                - code: Новая строка атрибута
-        """
-        target_class = instruction.target_class
-        replace_pattern = instruction.replace_pattern
-        target_attribute = instruction.target_attribute
-        code = instruction.code.strip()
-        
-        if not target_class or (not replace_pattern and not target_attribute):
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message="target_class and (replace_pattern or target_attribute) required for REPLACE_IN_CLASS",
-            )
-        
-        lines = existing_content.splitlines(keepends=True)
-        
-        ts_parser = _get_tree_sitter_parser()
-        if ts_parser is None:
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message="Tree-sitter parser not available",
-            )
-        
-        parse_result = ts_parser.parse(existing_content)
-        class_info = parse_result.get_class(target_class)
-        
-        if class_info is None:
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message=f"Class '{target_class}' not found",
-            )
-        
-        # Получаем отступ класса
-        class_indent = class_info.indent
-        body_indent = class_indent + self.default_indent
-        
-        # Ищем заменяемую строку в теле класса
-        class_start = class_info.span.start_line - 1
-        class_end = class_info.span.end_line - 1
-        
-        target_line_idx = -1
-        for i in range(class_start, class_end):
-            line = lines[i]
-            line_stripped = line.strip()
-            line_indent = len(line) - len(line.lstrip())
+            self,
+            existing_content: str,
+            instruction: ModifyInstruction
+        ) -> ModifyResult:
+            """
+            Заменяет атрибут в теле класса.
 
-            # Проверяем что строка на правильном уровне отступа и содержит паттерн
-            if line_indent == body_indent:
-                # Если указано имя атрибута, ищем строку с определением этого атрибута
-                if target_attribute and (line_stripped.startswith(f"{target_attribute} = ") or
-                                         line_stripped.startswith(f"{target_attribute}:")):
-                    target_line_idx = i
-                    break
-                # Если указан паттерн, ищем по содержанию
-                elif replace_pattern and replace_pattern in line_stripped:
-                    target_line_idx = i
-                    break
-        
-        if target_line_idx == -1:
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message=f"Pattern '{replace_pattern}' not found in class '{target_class}'",
-            )
-        
-        # CRITICAL FIX: Skip normalization for "replace in class" mode
-        # Insert code AS-IS to prevent indentation corruption
-        formatted_code = code.expandtabs(4).rstrip()
-        # Add proper indentation only if code has no leading whitespace
-        if formatted_code and not formatted_code[0].isspace():
-            formatted_code = ' ' * body_indent + formatted_code
-        
-        if not formatted_code.endswith('\n'):
-            formatted_code += '\n'
-        
-        old_lines_count = 1
-        if '\n' in formatted_code.rstrip('\n'):
-            # Многострочная замена
-            lines.pop(target_line_idx)
-            for i, line in enumerate(formatted_code.splitlines(keepends=True)):
-                lines.insert(target_line_idx + i, line)
-            new_lines_count = len(formatted_code.splitlines())
+            Args:
+                instruction:
+                    - target_class: Имя класса
+                    - replace_pattern: Старая строка атрибута (полностью или частично)
+                    - code: Новая строка атрибута
+            """
+            target_class = instruction.target_class
+            replace_pattern = instruction.replace_pattern
+            target_attribute = instruction.target_attribute
+            code = instruction.code.strip()
+
+            if not target_class or (not replace_pattern and not target_attribute):
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="target_class and (replace_pattern or target_attribute) required for REPLACE_IN_CLASS",
+                )
+
+            lines = existing_content.splitlines(keepends=True)
+
+            ts_parser = _get_tree_sitter_parser()
+            if ts_parser is None:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="Tree-sitter parser not available",
+                )
+
+            parse_result = ts_parser.parse(existing_content)
+            class_info = parse_result.get_class(target_class)
+
+            if class_info is None:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Class '{target_class}' not found",
+                )
+
+            # Получаем отступ класса
+            class_indent = class_info.indent
+            body_indent = class_indent + self.default_indent
+
+            # Ищем заменяемую строку в теле класса
+            class_start = class_info.span.start_line - 1
+            class_end = class_info.span.end_line
+
+    # New multi-line/fallback search logic
+            target_line_idx = -1
+            target_match_end = -1
+            if target_attribute:
+                # Single-line attribute search (preserved logic)
+                for i in range(class_start, class_end):
+                    line = lines[i]
+                    line_stripped = line.strip()
+                    line_indent = len(line) - len(line.lstrip())
+                    if line_indent == body_indent and (line_stripped.startswith(f"{target_attribute} = ") or line_stripped.startswith(f"{target_attribute}:")):
+                        target_line_idx = i
+                        target_match_end = i + 1
+                        break
+            elif replace_pattern:
+                # Phase 1: multi-line match
+                ml_start, ml_end = self._find_multiline_match(lines, replace_pattern, class_start, class_end)
+                if ml_start is not None and ml_end is not None:
+                    # Expand the match to cover full expression and compound blocks
+                    try:
+                        ml_start_exp, ml_end_exp = self._expand_multiline_block(lines, ml_start, ml_end, class_end)
+                        ml_start, ml_end = ml_start_exp, ml_end_exp
+                    except Exception:
+                        pass
+                    try:
+                        ml_start_comp, ml_end_comp = self._expand_compound_block_python(lines, ml_start, ml_end, class_end)
+                        ml_start, ml_end = ml_start_comp, ml_end_comp
+                    except Exception:
+                        pass
+                    target_line_idx = ml_start
+                    target_match_end = ml_end
+                else:
+                    # Phase 2: fallback single-line search
+                    for i in range(class_start, class_end):
+                        line = lines[i]
+                        line_stripped = line.strip()
+                        line_indent = len(line) - len(line.lstrip())
+                        if line_indent == body_indent and replace_pattern in line_stripped:
+                            target_line_idx = i
+                            target_match_end = i + 1
+                            break
+
+            # Early return if not found (with improved error message)
+            if target_line_idx == -1:
+                pattern_desc = replace_pattern if replace_pattern else f"attribute '{target_attribute}'"
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Pattern or attribute '{pattern_desc}' not found in class '{target_class}'",
+                )
+
+            # CRITICAL FIX: Skip normalization for "replace in class" mode
+
+    # New range-based replacement (replaces the old single-line logic)
+            formatted_code = code.expandtabs(4).rstrip()
+            # Add proper indentation only if code has no leading whitespace
+            if formatted_code and not formatted_code[0].isspace():
+                formatted_code = ' ' * body_indent + formatted_code
+
+            if not formatted_code.endswith('\n'):
+                formatted_code += '\n'
+
+            old_lines_count = target_match_end - target_line_idx
+            if old_lines_count <= 0:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Invalid match range: target_line_idx={target_line_idx}, target_match_end={target_match_end}",
+                )
+
+            # Replace the matched range with the new code using slice assignment
+            replacement_lines = formatted_code.splitlines(keepends=True)
+            lines[target_line_idx:target_match_end] = replacement_lines
+            new_content = ''.join(lines)
+
+            new_lines_count = len(replacement_lines)
             lines_added = max(0, new_lines_count - old_lines_count)
             lines_removed = max(0, old_lines_count - new_lines_count)
-        else:
-            # Однострочная замена
-            lines[target_line_idx] = formatted_code
-            lines_added = 1
-            lines_removed = 1
-        
-        new_content = ''.join(lines)
-        
-        return ModifyResult(
-            success=True,
-            new_content=new_content,
-            message=f"Replaced attribute in class '{target_class}'",
-            changes_made=[f"Replaced line {target_line_idx + 1} in {target_class}"],
-            lines_added=1,
-            lines_removed=1,
-        )
+
+            return ModifyResult(
+                success=True,
+                new_content=new_content,
+                message=f"Replaced attribute in class '{target_class}'",
+                changes_made=[f"Replaced lines {target_line_idx + 1}-{target_match_end} in {target_class}"],
+                lines_added=lines_added,
+                lines_removed=lines_removed,
+            )
     
     def _find_multiline_match(self, source_lines: List[str], pattern: str, start_idx: int, end_idx: int) -> Tuple[Optional[int], Optional[int]]:
         """
@@ -5450,17 +5491,60 @@ class FileModifier:
             print(f"⚠️ [DIAG-REPLACE] Diagnostic failed: {_diag_err}")
     # ═══════════════════════════════════════════════════════════════════        
         
-        # Используем _find_multiline_match для поиска паттерна
-        match_start, match_end = self._find_multiline_match(lines, replace_pattern, method_start, method_end)
+        # === ОГРАНИЧЕНИЕ ОБЛАСТИ ПОИСКА ЧЕРЕЗ insert_after / insert_before ===
+        search_start = method_start
+        search_end = method_end
+        
+        target_name = f"{target_class}.{target_method}" if target_class else target_method
+
+        if instruction.insert_after:
+            anchor_res = self._find_unique_anchor(lines, instruction.insert_after, search_start, search_end)
+            if not anchor_res['found'] or not anchor_res['unique']:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Anchor for insert_after '{instruction.insert_after}' not found or ambiguous in '{target_name}'",
+                )
+            # Сдвигаем начало поиска строго ПОСЛЕ якоря
+            search_start = max(search_start, anchor_res['match_end'])
+            if search_start >= search_end:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Invalid scope: insert_after '{instruction.insert_after}' leaves no room for replace_pattern in '{target_name}'",
+                )
+
+        if instruction.insert_before:
+            anchor_res = self._find_unique_anchor(lines, instruction.insert_before, search_start, search_end)
+            if not anchor_res['found'] or not anchor_res['unique']:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Anchor for insert_before '{instruction.insert_before}' not found or ambiguous in '{target_name}'",
+                )
+            # Сдвигаем конец поиска строго ДО якоря
+            search_end = min(search_end, anchor_res['line_number'])
+            if search_start >= search_end:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Invalid scope: insert_before '{instruction.insert_before}' leaves no room for replace_pattern in '{target_name}'",
+                )
+
+        # Используем _find_multiline_match для поиска паттерна в ограниченном диапазоне
+        match_start, match_end = self._find_multiline_match(lines, replace_pattern, search_start, search_end)
         
         # Expand single-line match to cover full multi-line expression
+        # ВАЖНО: передаем search_end вместо method_end, чтобы расширение блоков
+        # не вышло за пределы разрешенной области (не "съело" якорь INSERT_BEFORE)
         if match_start is not None and match_end is not None:
             match_start, match_end = self._expand_multiline_block(
-                lines, match_start, match_end, method_end
+                lines, match_start, match_end, search_end
             )
             match_start, match_end = self._expand_compound_block_python(
-                lines, match_start, match_end, method_end
-            )
+                lines, match_start, match_end, search_end
+            )       
+       
         
         # Fallback: search for comment pattern with exact unique match
         if match_start is None and replace_pattern.strip().startswith('#'):
@@ -5722,6 +5806,8 @@ class FileModifier:
             target_method=target_function,  # ВАЖНО: маппим сюда!
             target_class=None,              # Класса нет
             replace_pattern=instruction.replace_pattern,
+            insert_after=instruction.insert_after,
+            insert_before=instruction.insert_before,
             preserve_imports=instruction.preserve_imports,
             auto_format=instruction.auto_format,
             skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
@@ -5745,6 +5831,15 @@ class FileModifier:
         """
         code = instruction.code.strip()
         insert_after = instruction.insert_after
+        
+        # ⭐ НОВОЕ: гибкая проверка вместо жёсткого startswith
+        if not self._code_starts_with_function_def(code):
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Code must be a function definition starting with 'def' or 'async def' "
+                        "(optionally preceded by decorators or comments)",
+            )
         
         if not code.startswith(('def ', 'async def ')):
             return ModifyResult(
@@ -6558,6 +6653,156 @@ class FileModifier:
         
         return False
 
+def _code_starts_with_function_def(self, code: str) -> bool:
+    """
+    Проверяет, что код представляет собой определение функции,
+    допускает наличие декораторов и комментариев перед `def`.
+    
+    Пропускаемые префиксы:
+      - пустые строки
+      - комментарии (# ...)
+      - декораторы (@decorator, возможно многострочные через (...) или \\)
+    
+    После пропускания префикса первая значимая строка должна начинаться
+    с 'def ' или 'async def '.
+    
+    Args:
+        code: Строка с кодом (рекомендуется .strip() перед вызовом)
+    
+    Returns:
+        True если код — определение функции (возможно, декорированной)
+    """
+    if not code or not code.strip():
+        return False
+    
+    lines = code.expandtabs(4).splitlines()
+    i = 0
+    paren_balance = 0  # баланс () [] {} для многострочных декораторов
+    
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        
+        # Пустая строка в префиксе — допускается
+        if not stripped:
+            i += 1
+            continue
+        
+        # Комментарий — допускается в префиксе
+        if stripped.startswith('#'):
+            i += 1
+            continue
+        
+        # Если мы внутри скобок многострочного декоратора — пропускаем,
+        # обновляя баланс
+        if paren_balance > 0:
+            paren_balance += self._count_brace_delta(stripped)
+            i += 1
+            continue
+        
+        # Декоратор: начинается с '@'
+        if stripped.startswith('@'):
+            paren_balance += self._count_brace_delta(stripped)
+            # Backslash-продолжение строки
+            if stripped.endswith('\\'):
+                i += 1
+                # Продолжаем собирать строку, пока встречается '\'
+                while i < len(lines):
+                    nxt = lines[i].strip()
+                    if not nxt:
+                        i += 1
+                        continue
+                    paren_balance += self._count_brace_delta(nxt)
+                    if nxt.endswith('\\') and paren_balance <= 0:
+                        i += 1
+                        continue
+                    if paren_balance > 0:
+                        i += 1
+                        continue
+                    i += 1
+                    break
+                continue
+            i += 1
+            continue
+        
+        # Первая значимая строка без декоратора/комментария —
+        # должна быть определением функции
+        return stripped.startswith(('def ', 'async def '))
+    
+    # Дошли до конца, не встретив def — это только декораторы без функции
+    return False
+
+
+def _count_brace_delta(self, text: str) -> int:
+    """
+    Считает баланс скобок () [] {} в строке, игнорируя строки и комментарии.
+    Возвращает положительное число для незакрытых открывающих скобок,
+    отрицательное — для лишних закрывающих.
+    """
+    delta = 0
+    i = 0
+    n = len(text)
+    in_single = False
+    in_double = False
+    in_triple_single = False
+    in_triple_double = False
+    
+    while i < n:
+        c = text[i]
+        
+        # Пропуск строковых литералов
+        if not in_single and not in_double and not in_triple_single and not in_triple_double:
+            if text[i:i+3] == "'''":
+                in_triple_single = not in_triple_single
+                i += 3
+                continue
+            if text[i:i+3] == '"""':
+                in_triple_double = not in_triple_double
+                i += 3
+                continue
+            if c == "'":
+                in_single = True
+                i += 1
+                continue
+            if c == '"':
+                in_double = True
+                i += 1
+                continue
+            if c == '#':
+                break  # комментарий до конца строки
+        else:
+            if in_triple_single:
+                if text[i:i+3] == "'''":
+                    in_triple_single = False
+                    i += 3
+                    continue
+            elif in_triple_double:
+                if text[i:i+3] == '"""':
+                    in_triple_double = False
+                    i += 3
+                    continue
+            elif in_single:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == "'":
+                    in_single = False
+            elif in_double:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == '"':
+                    in_double = False
+        
+        if not in_single and not in_double and not in_triple_single and not in_triple_double:
+            if c in '([{':
+                delta += 1
+            elif c in ')]}':
+                delta -= 1
+        
+        i += 1
+    
+    return delta
 
     def _analyze_code_indents(
         self, 

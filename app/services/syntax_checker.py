@@ -422,127 +422,358 @@ class SyntaxChecker:
             return SyntaxCheckResult(is_valid=True, original_content=code)
 
     def check_javascript(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
-        """
-        Validates JavaScript source code syntax using tree-sitter.
+            """
+            Validates JavaScript source code syntax using tree-sitter and attempts auto-fix if errors are found.
 
-        Args:
-            code: JavaScript source code string
-            auto_fix: Accepted for interface compatibility but not implemented for JS
+            Args:
+                code: JavaScript source code string
+                auto_fix: Whether to attempt auto-fixes on validation errors
 
-        Returns:
-            SyntaxCheckResult with validation results
-        """
-        try:
-            from app.services.tree_sitter_parser import MultiLanguageParser
-            ts_parser = MultiLanguageParser()
-            
-            is_valid, errors = ts_parser.validate_syntax(code, 'javascript')
-            
-            if is_valid:
+            Returns:
+                SyntaxCheckResult with validation results and optional fixes
+            """
+            try:
+                from app.services.tree_sitter_parser import MultiLanguageParser
+
+                ts_parser = MultiLanguageParser()
+
+                is_valid, errors = ts_parser.validate_syntax(code, 'javascript')
+
+                if is_valid:
+                    return SyntaxCheckResult(is_valid=True, original_content=code)
+
+                if not auto_fix:
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    return result
+
+                fixed_code, was_fixed = ts_parser.auto_fix_syntax(code, 'javascript')
+
+                if was_fixed:
+                    is_valid_fixed, fixed_errors = ts_parser.validate_syntax(fixed_code, 'javascript')
+                    if is_valid_fixed:
+                        return SyntaxCheckResult(
+                            is_valid=True,
+                            original_content=code,
+                            fixed_content=fixed_code,
+                            was_auto_fixed=True,
+                            applied_fixes=["Tree-sitter auto-fix (JavaScript)"]
+                        )
+                    else:
+                        logger.warning(
+                            f"[JS SYNTAX] Auto-correction failed and was rolled back. "
+                            f"Errors in '<unknown>': {fixed_errors}"
+                        )
+                        result = SyntaxCheckResult(is_valid=False, original_content=code)
+                        for error_msg in fixed_errors:
+                            line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            issue = SyntaxIssue(
+                                issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                                message=error_msg,
+                                line=line_num,
+                                is_critical=True,
+                            )
+                            result.issues.append(issue)
+                        result.was_auto_fixed = False
+                        return result
+                else:
+                    logger.warning(
+                        f"[JS SYNTAX] Auto-correction failed and was rolled back. "
+                        f"Errors in '<unknown>': {errors}"
+                    )
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    result.was_auto_fixed = False
+                    return result
+
+            except Exception as e:
+                logger.warning(f"Tree-sitter validation failed for JavaScript: {e}")
                 return SyntaxCheckResult(is_valid=True, original_content=code)
-            
-            result = SyntaxCheckResult(is_valid=False, original_content=code)
-            for error_msg in errors:
-                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
-                line_num = int(line_match.group(1)) if line_match else None
-                
-                issue = SyntaxIssue(
-                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
-                    message=error_msg,
-                    line=line_num,
-                    is_critical=True,
-                )
-                result.issues.append(issue)
-            return result
-
-        except (ImportError, ValueError) as e:
-            logger.warning(f"Tree-sitter not available for JavaScript: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
-        except Exception as e:
-            logger.warning(f"Unexpected error during JavaScript syntax check: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
 
     def check_typescript(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
-        """
-        Validates TypeScript source code syntax using tree-sitter.
+            """
+            Validates TypeScript source code syntax using tree-sitter and attempts auto-fix if errors are found.
 
-        Args:
-            code: TypeScript source code string
-            auto_fix: Accepted for interface compatibility but not implemented for TS
+            Args:
+                code: TypeScript source code string
+                auto_fix: Whether to attempt auto-fixes on validation errors
 
-        Returns:
-            SyntaxCheckResult with validation results
-        """
-        try:
-            from app.services.tree_sitter_parser import MultiLanguageParser
-            ts_parser = MultiLanguageParser()
-            
-            is_valid, errors = ts_parser.validate_syntax(code, 'typescript')
-            
-            if is_valid:
+            Returns:
+                SyntaxCheckResult with validation results and optional fixes
+            """
+            try:
+                from app.services.tree_sitter_parser import MultiLanguageParser
+
+                ts_parser = MultiLanguageParser()
+
+                is_valid, errors = ts_parser.validate_syntax(code, 'typescript')
+
+                if is_valid:
+                    return SyntaxCheckResult(is_valid=True, original_content=code)
+
+                if not auto_fix:
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    return result
+
+                fixed_code, was_fixed = ts_parser.auto_fix_syntax(code, 'typescript')
+
+                if was_fixed:
+                    is_valid_fixed, fixed_errors = ts_parser.validate_syntax(fixed_code, 'typescript')
+                    if is_valid_fixed:
+                        return SyntaxCheckResult(
+                            is_valid=True,
+                            original_content=code,
+                            fixed_content=fixed_code,
+                            was_auto_fixed=True,
+                            applied_fixes=["Tree-sitter auto-fix (TypeScript)"]
+                        )
+                    else:
+                        logger.warning(
+                            f"[TS SYNTAX] Auto-correction failed and was rolled back. "
+                            f"Errors in '<unknown>': {fixed_errors}"
+                        )
+                        result = SyntaxCheckResult(is_valid=False, original_content=code)
+                        for error_msg in fixed_errors:
+                            line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            issue = SyntaxIssue(
+                                issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                                message=error_msg,
+                                line=line_num,
+                                is_critical=True,
+                            )
+                            result.issues.append(issue)
+                        result.was_auto_fixed = False
+                        return result
+                else:
+                    logger.warning(
+                        f"[TS SYNTAX] Auto-correction failed and was rolled back. "
+                        f"Errors in '<unknown>': {errors}"
+                    )
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    result.was_auto_fixed = False
+                    return result
+
+            except Exception as e:
+                logger.warning(f"Tree-sitter validation failed for TypeScript: {e}")
                 return SyntaxCheckResult(is_valid=True, original_content=code)
-            
-            result = SyntaxCheckResult(is_valid=False, original_content=code)
-            for error_msg in errors:
-                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
-                line_num = int(line_match.group(1)) if line_match else None
-                
-                issue = SyntaxIssue(
-                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
-                    message=error_msg,
-                    line=line_num,
-                    is_critical=True,
-                )
-                result.issues.append(issue)
-            return result
 
-        except (ImportError, ValueError) as e:
-            logger.warning(f"Tree-sitter not available for TypeScript: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
-        except Exception as e:
-            logger.warning(f"Unexpected error during TypeScript syntax check: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
+    def check_tsx(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
+            """
+            Validates TSX source code syntax using tree-sitter and attempts auto-fix if errors are found.
+
+            Performs full static analysis with auto-correction retry/rollback and clear error logging.
+
+            Args:
+                code: TSX source code string
+                auto_fix: Whether to attempt auto-fixes on validation errors
+
+            Returns:
+                SyntaxCheckResult with validation results and optional fixes
+            """
+            try:
+                from app.services.tree_sitter_parser import MultiLanguageParser
+
+                ts_parser = MultiLanguageParser()
+
+                is_valid, errors = ts_parser.validate_syntax(code, 'tsx')
+
+                if is_valid:
+                    return SyntaxCheckResult(is_valid=True, original_content=code)
+
+                if not auto_fix:
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    return result
+
+                fixed_code, was_fixed = ts_parser.auto_fix_syntax(code, 'tsx')
+
+                if was_fixed:
+                    is_valid_fixed, fixed_errors = ts_parser.validate_syntax(fixed_code, 'tsx')
+                    if is_valid_fixed:
+                        return SyntaxCheckResult(
+                            is_valid=True,
+                            original_content=code,
+                            fixed_content=fixed_code,
+                            was_auto_fixed=True,
+                            applied_fixes=["Tree-sitter auto-fix (TSX)"]
+                        )
+                    else:
+                        logger.warning(
+                            f"[TSX SYNTAX] Auto-correction failed and was rolled back. "
+                            f"Errors in '<unknown>': {fixed_errors}"
+                        )
+                        result = SyntaxCheckResult(is_valid=False, original_content=code)
+                        for error_msg in fixed_errors:
+                            line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            issue = SyntaxIssue(
+                                issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                                message=error_msg,
+                                line=line_num,
+                                is_critical=True,
+                            )
+                            result.issues.append(issue)
+                        result.was_auto_fixed = False
+                        return result
+                else:
+                    logger.warning(
+                        f"[TSX SYNTAX] Auto-correction failed and was rolled back. "
+                        f"Errors in '<unknown>': {errors}"
+                    )
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    result.was_auto_fixed = False
+                    return result
+
+            except Exception as e:
+                logger.warning(f"Tree-sitter validation failed for TSX: {e}")
+                return SyntaxCheckResult(is_valid=True, original_content=code)
 
     def check_go(self, code: str, auto_fix: bool = False) -> SyntaxCheckResult:
-        """
-        Validates Go source code syntax using tree-sitter.
+            """
+            Validates Go source code syntax using tree-sitter and attempts auto-fix if errors are found.
 
-        Args:
-            code: Go source code string
-            auto_fix: Accepted for interface compatibility but not implemented for Go
+            Args:
+                code: Go source code string
+                auto_fix: Whether to attempt auto-fixes on validation errors
 
-        Returns:
-            SyntaxCheckResult with validation results
-        """
-        try:
-            from app.services.tree_sitter_parser import MultiLanguageParser
-            ts_parser = MultiLanguageParser()
-            
-            is_valid, errors = ts_parser.validate_syntax(code, 'go')
-            
-            if is_valid:
+            Returns:
+                SyntaxCheckResult with validation results and optional fixes
+            """
+            try:
+                from app.services.tree_sitter_parser import MultiLanguageParser
+
+                ts_parser = MultiLanguageParser()
+
+                is_valid, errors = ts_parser.validate_syntax(code, 'go')
+
+                if is_valid:
+                    return SyntaxCheckResult(is_valid=True, original_content=code)
+
+                if not auto_fix:
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    return result
+
+                fixed_code, was_fixed = ts_parser.auto_fix_syntax(code, 'go')
+
+                if was_fixed:
+                    is_valid_fixed, fixed_errors = ts_parser.validate_syntax(fixed_code, 'go')
+                    if is_valid_fixed:
+                        return SyntaxCheckResult(
+                            is_valid=True,
+                            original_content=code,
+                            fixed_content=fixed_code,
+                            was_auto_fixed=True,
+                            applied_fixes=["Tree-sitter auto-fix (Go)"]
+                        )
+                    else:
+                        logger.warning(
+                            f"[GO SYNTAX] Auto-correction failed and was rolled back. "
+                            f"Errors in '<unknown>': {fixed_errors}"
+                        )
+                        result = SyntaxCheckResult(is_valid=False, original_content=code)
+                        for error_msg in fixed_errors:
+                            line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                            line_num = int(line_match.group(1)) if line_match else None
+                            issue = SyntaxIssue(
+                                issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                                message=error_msg,
+                                line=line_num,
+                                is_critical=True,
+                            )
+                            result.issues.append(issue)
+                        result.was_auto_fixed = False
+                        return result
+                else:
+                    logger.warning(
+                        f"[GO SYNTAX] Auto-correction failed and was rolled back. "
+                        f"Errors in '<unknown>': {errors}"
+                    )
+                    result = SyntaxCheckResult(is_valid=False, original_content=code)
+                    for error_msg in errors:
+                        line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
+                        line_num = int(line_match.group(1)) if line_match else None
+                        issue = SyntaxIssue(
+                            issue_type=SyntaxIssueType.SYNTAX_ERROR,
+                            message=error_msg,
+                            line=line_num,
+                            is_critical=True,
+                        )
+                        result.issues.append(issue)
+                    result.was_auto_fixed = False
+                    return result
+
+            except Exception as e:
+                logger.warning(f"Tree-sitter validation failed for Go: {e}")
                 return SyntaxCheckResult(is_valid=True, original_content=code)
-            
-            result = SyntaxCheckResult(is_valid=False, original_content=code)
-            for error_msg in errors:
-                line_match = re.search(r'[Ll]ine\s+(\d+)', error_msg)
-                line_num = int(line_match.group(1)) if line_match else None
-                
-                issue = SyntaxIssue(
-                    issue_type=SyntaxIssueType.SYNTAX_ERROR,
-                    message=error_msg,
-                    line=line_num,
-                    is_critical=True,
-                )
-                result.issues.append(issue)
-            return result
-
-        except (ImportError, ValueError) as e:
-            logger.warning(f"Tree-sitter not available for Go: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
-        except Exception as e:
-            logger.warning(f"Unexpected error during Go syntax check: {e}")
-            return SyntaxCheckResult(is_valid=True, original_content=code)
 
     
     def check_by_extension(self, content: str, file_path: str, 
@@ -566,15 +797,16 @@ class SyntaxChecker:
             return self.check_java(content, auto_fix=auto_fix)
         elif ext in ('.js', '.jsx', '.mjs'):
             return self.check_javascript(content, auto_fix=auto_fix)
-        elif ext in ('.ts', '.tsx'):
+        elif ext == '.ts':
             return self.check_typescript(content, auto_fix=auto_fix)
+        elif ext == '.tsx':
+            return self.check_tsx(content, auto_fix=auto_fix)
+
         elif ext == '.go':
             return self.check_go(content, auto_fix=auto_fix)
-            return self.check_go(content, auto_fix=auto_fix)
-            return self.check_java(content, auto_fix=auto_fix)
         else:
-            # Для неизвестных типов — просто возвращаем "валидно"
             return SyntaxCheckResult(is_valid=True, original_content=content)
+
     
     def validate_and_fix(self, code: str) -> Tuple[bool, str, List[str]]:
         """

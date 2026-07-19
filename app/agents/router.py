@@ -43,6 +43,7 @@ class RouteResult:
     confidence: float
     risk_level: str  # "low", "medium", "high", "critical"
     router_used: bool  # True if automatic router was used
+    orchestrator_provider: Optional[str] = None  # provider for orchestrator_model (dynamic)
 
 
 # ============================================================================
@@ -363,7 +364,7 @@ async def route_request(
         
         # Map to actual model names from config (THREE-LEVEL)
         complexity = result.get("complexity_level", "simple")
-        orchestrator_model = _get_model_for_complexity(complexity)
+        orchestrator_model, orchestrator_provider = _get_model_for_complexity(complexity)
         
         logger.info(
             f"Router decision: {complexity} → {cfg.get_model_display_name(orchestrator_model)} "
@@ -377,6 +378,7 @@ async def route_request(
             confidence=result.get("confidence", 0.8),
             risk_level=result.get("risk_level", "medium"),
             router_used=True,
+            orchestrator_provider=orchestrator_provider,
         )
         
     except Exception as e:
@@ -388,26 +390,32 @@ async def route_request(
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _get_model_for_complexity(complexity: str) -> str:
-    """Map complexity level to model from config"""
+def _get_model_for_complexity(complexity: str) -> tuple:
+    """Map complexity level to (model, provider) from dynamic config.
+
+    Returns:
+        Tuple of (model_name, provider_name) where provider_name may be None.
+    """
     config = cfg.get_orchestrator_model_config()
-    models = config.get("orchestrator_models", {})
-    
+    models = config.get("orchestrator_models", {}) or {}
+    provider = config.get("orchestrator_provider")
+
     if complexity == "complex":
-        return models.get("complex", cfg.ORCHESTRATOR_COMPLEX_MODEL)
+        return models.get("complex", cfg.ORCHESTRATOR_COMPLEX_MODEL), provider
     elif complexity == "medium":
-        return models.get("medium", cfg.ORCHESTRATOR_MEDIUM_MODEL)
+        return models.get("medium", cfg.ORCHESTRATOR_MEDIUM_MODEL), provider
     else:
-        return models.get("simple", cfg.ORCHESTRATOR_SIMPLE_MODEL)
+        return models.get("simple", cfg.ORCHESTRATOR_SIMPLE_MODEL), provider
 
 
 def _handle_router_disabled() -> RouteResult:
     """Handle case when router is disabled in config"""
     config = cfg.get_orchestrator_model_config()
     fixed_model = config["fixed_model"]
-    
+    provider = config.get("orchestrator_provider")
+
     logger.info(f"Router disabled, using fixed model: {cfg.get_model_display_name(fixed_model)}")
-    
+
     return RouteResult(
         orchestrator_model=fixed_model,
         complexity_level="fixed",
@@ -415,13 +423,14 @@ def _handle_router_disabled() -> RouteResult:
         confidence=1.0,
         risk_level="medium",
         router_used=False,
+        orchestrator_provider=provider,
     )
 
 
 def _create_fallback_result(reason: str, complexity: str = "simple") -> RouteResult:
     """Create fallback result with specified complexity level"""
-    model = _get_model_for_complexity(complexity)
-    
+    model, provider = _get_model_for_complexity(complexity)
+
     return RouteResult(
         orchestrator_model=model,
         complexity_level=complexity,
@@ -429,6 +438,7 @@ def _create_fallback_result(reason: str, complexity: str = "simple") -> RouteRes
         confidence=0.5,
         risk_level="medium",
         router_used=True,
+        orchestrator_provider=provider,
     )
 
 
@@ -448,11 +458,16 @@ async def _call_router_llm(user_query: str, project_context: str) -> str:
         {"role": "user", "content": user_prompt},
     ]
     
+    from config.intermediate_agent_models import get_intermediate_model
+    router_model, _, router_provider = get_intermediate_model("router", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
     response = await call_llm(
-        model=cfg.ROUTER_MODEL,
+        model=router_model,
         messages=messages,
         temperature=0,
         max_tokens=400,
+        preferred_provider=router_provider,
+        is_intermediate=True,
     )
     
     return response

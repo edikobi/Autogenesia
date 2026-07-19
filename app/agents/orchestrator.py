@@ -141,6 +141,8 @@ async def orchestrate(
     project_map: str = "",
     tool_executor: Optional[Callable] = None,
     prefilter_advice: str = "",
+    preferred_provider: Optional[str] = None,
+    virtual_fs: Optional[Any] = None,
 ) -> OrchestratorResult:
     """
     Analyzes code and generates instructions for Code Generator.
@@ -169,6 +171,7 @@ async def orchestrate(
         index: Full project index (for search_code tool)
         project_map: Project map string with file descriptions
         tool_executor: Optional custom tool executor function
+        virtual_fs: Optional VirtualFileSystem instance for tool executor
         
     Returns:
         OrchestratorResult with analysis and instruction
@@ -223,7 +226,7 @@ async def orchestrate(
     all_tool_calls: List[ToolCall] = []
     
     # Setup tool executor
-    executor_instance = ToolExecutor(project_dir=project_dir, index=index)
+    executor_instance = ToolExecutor(project_dir=project_dir, index=index, virtual_fs=virtual_fs)
     if tool_executor is None:
         tool_executor = lambda name, args: executor_instance.execute(name, args)
     
@@ -240,7 +243,7 @@ async def orchestrate(
             available_tools = _get_available_tools(tool_usage)
             
             # Cache optimization for Claude models
-            is_claude_model_check = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
+            is_claude_model_check = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             if is_claude_model_check:
                  _optimize_cache_by_size(messages, limit=3)
 
@@ -251,6 +254,7 @@ async def orchestrate(
                 temperature=0,
                 max_tokens=4000,
                 tool_choice="auto",
+                preferred_provider=preferred_provider,
             )
             
             content = response.get("content", "")
@@ -276,7 +280,7 @@ async def orchestrate(
             logger.info(f"Orchestrator: executing {len(tool_calls)} tool call(s)")
             
             # Check if Claude model for caching
-            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
+            is_claude_model = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             
             # Capture thinking content before tool calls
             # [UPDATED] Use reasoning_content if available (for DeepSeek), otherwise fallback to content
@@ -453,6 +457,7 @@ async def orchestrate(
                 messages=messages,
                 temperature=0,
                 max_tokens=4000,
+                preferred_provider=preferred_provider,
             )
             content = final_content
             logger.info("Orchestrator: Received forced final response")
@@ -472,6 +477,7 @@ async def orchestrate(
         raw_response=content,
         tool_usage=tool_usage,
     )
+
 
 
 def _format_test_run_limit_error(tool_usage: ToolUsageStats) -> str:
@@ -673,12 +679,7 @@ def _should_use_batch_limit(model: str) -> bool:
     - Claude Opus 4.5 (smaller effective context due to cost/latency)
     - DeepSeek Reasoner (64k context window)
     """
-    LIMITED_CONTEXT_MODELS = {
-        cfg.MODEL_OPUS_4_5,
-        cfg.MODEL_DEEPSEEK_REASONER,
-        cfg.MODEL_QWEN_3_7_MAX,
-    }
-    return model in LIMITED_CONTEXT_MODELS
+    return cfg.is_model(model, cfg.MODEL_OPUS_4_5, cfg.MODEL_DEEPSEEK_REASONER, cfg.MODEL_QWEN_3_7_MAX)
 
 
 async def orchestrate_new_project(
@@ -686,6 +687,8 @@ async def orchestrate_new_project(
     history: List[Dict[str, str]],
     orchestrator_model: str,
     project_dir: str = "",
+    preferred_provider: Optional[str] = None,
+    virtual_fs: Optional[Any] = None,
 ) -> OrchestratorResult:
     """
     Orchestration for new projects (no existing code/index).
@@ -728,7 +731,7 @@ async def orchestrate_new_project(
     content = ""
     
     # Tool executor for web_search only
-    executor_instance = ToolExecutor(project_dir=project_dir or ".", index={})
+    executor_instance = ToolExecutor(project_dir=project_dir or ".", index={}, virtual_fs=virtual_fs)
     
     for iteration in range(MAX_TOOL_ITERATIONS):
         try:
@@ -746,6 +749,7 @@ async def orchestrate_new_project(
                     temperature=0,
                     max_tokens=20000,
                     tool_choice="auto",
+                    preferred_provider=preferred_provider,
                 )
             else:
                 # No tools available, just call without tools
@@ -754,6 +758,7 @@ async def orchestrate_new_project(
                     messages=messages,
                     temperature=0,
                     max_tokens=20000,
+                    preferred_provider=preferred_provider,
                 )
                 response = {"content": response_content, "tool_calls": []}
             
@@ -850,6 +855,7 @@ async def orchestrate_new_project(
                 messages=messages,
                 temperature=0,
                 max_tokens=20000,
+                preferred_provider=preferred_provider,
             )
             content = final_content
             logger.info("Orchestrator (new project): Received forced final response")
@@ -866,6 +872,7 @@ async def orchestrate_new_project(
         raw_response=content,
         tool_usage=tool_usage,
     )
+
 
 
 # ============================================================================
@@ -1438,7 +1445,7 @@ class GeneralChatOrchestrator:
                 available_tools = self._get_general_tools(tool_usage)
                 
                 # Оптимизация кэша для Claude (если используется)
-                is_claude = self.model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
+                is_claude = cfg.is_model(self.model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
                 if is_claude:
                     _optimize_cache_by_size(messages, limit=3)
                 
@@ -1640,6 +1647,8 @@ async def orchestrate_agent(
     tool_executor: Optional[Callable] = None,
     is_new_project: bool = False,
     prefilter_advice: str = "",
+    preferred_provider: Optional[str] = None,
+    virtual_fs: Optional[Any] = None,
 ) -> OrchestratorResult:
     """
     Agent Mode orchestration with automatic context compression.
@@ -1665,6 +1674,7 @@ async def orchestrate_agent(
         project_map: Project map string with file descriptions
         tool_executor: Optional custom tool executor function
         is_new_project: Whether this is a new project (no existing code)
+        virtual_fs: Optional VirtualFileSystem instance for tool executor
         
     Returns:
         OrchestratorResult with analysis, instruction, and tool calls
@@ -1724,7 +1734,7 @@ async def orchestrate_agent(
     all_tool_calls: List[ToolCall] = []
     
     # Setup tool executor
-    executor_instance = ToolExecutor(project_dir=project_dir, index=index)
+    executor_instance = ToolExecutor(project_dir=project_dir, index=index, virtual_fs=virtual_fs)
     if tool_executor is None:
         tool_executor = lambda name, args: executor_instance.execute(name, args)
     
@@ -1743,7 +1753,7 @@ async def orchestrate_agent(
             available_tools = _get_available_tools(tool_usage)
             
             # Claude cache optimization
-            is_claude_model = orchestrator_model in [cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8]
+            is_claude_model = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             if is_claude_model:
                 _optimize_cache_by_size(messages, limit=3)
             
@@ -1764,6 +1774,7 @@ async def orchestrate_agent(
                     temperature=0,
                     max_tokens=20000,
                     tool_choice="auto",
+                    preferred_provider=preferred_provider,
                 )
             except Exception as e:
                 # Check for context overflow (reactive compression for all models)
@@ -1780,6 +1791,7 @@ async def orchestrate_agent(
                         temperature=0,
                         max_tokens=20000,
                         tool_choice="auto",
+                        preferred_provider=preferred_provider,
                     )
                 else:
                     raise
@@ -1974,6 +1986,7 @@ async def orchestrate_agent(
                 messages=messages,
                 temperature=0,
                 max_tokens=20000,
+                preferred_provider=preferred_provider,
             )
             content = final_content
             logger.info("Agent Mode: Received final response")
@@ -1985,6 +1998,7 @@ async def orchestrate_agent(
                     messages=messages,
                     temperature=0,
                     max_tokens=20000,
+                    preferred_provider=preferred_provider,
                 )
                 content = final_content
             else:
@@ -2001,3 +2015,4 @@ async def orchestrate_agent(
         raw_response=content,
         tool_usage=tool_usage,
     )
+

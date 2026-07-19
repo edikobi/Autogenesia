@@ -15,6 +15,8 @@ Change Validator для Agent Mode.
 """
 
 from __future__ import annotations
+import threading
+import asyncio
 
 import ast
 import sys
@@ -100,7 +102,6 @@ class ValidationErrorCode(Enum):
 
 
 def get_error_code_for_language(language: str, error_type: str) -> str:
-    """Returns the appropriate error code for a language and error type combination."""
     code_map = {
         ("python", "syntax"): ValidationErrorCode.PYTHON_SYNTAX_ERROR.value,
         ("python", "import"): ValidationErrorCode.PYTHON_IMPORT_ERROR.value,
@@ -113,6 +114,10 @@ def get_error_code_for_language(language: str, error_type: str) -> str:
         ("typescript", "syntax"): ValidationErrorCode.TS_SYNTAX_ERROR.value,
         ("typescript", "compile"): ValidationErrorCode.TS_COMPILE_ERROR.value,
         ("typescript", "type"): ValidationErrorCode.TS_TYPE_ERROR.value,
+        # [TSX FIX] TSX reuses TS error codes but has separate language identifier
+        ("tsx", "syntax"): ValidationErrorCode.TS_SYNTAX_ERROR.value,
+        ("tsx", "compile"): ValidationErrorCode.TS_COMPILE_ERROR.value,
+        ("tsx", "type"): ValidationErrorCode.TS_TYPE_ERROR.value,
         ("go", "syntax"): ValidationErrorCode.GO_SYNTAX_ERROR.value,
         ("go", "compile"): ValidationErrorCode.GO_COMPILE_ERROR.value,
         ("go", "lint"): ValidationErrorCode.GO_LINT_ERROR.value,
@@ -122,7 +127,6 @@ def get_error_code_for_language(language: str, error_type: str) -> str:
         ("java", "lint"): ValidationErrorCode.JAVA_LINT_ERROR.value,
         ("java", "missing"): ValidationErrorCode.JAVA_MISSING_PACKAGE.value,
     }
-    
     return code_map.get((language.lower(), error_type.lower()), ValidationErrorCode.UNKNOWN_ERROR.value)
 
 @dataclass
@@ -625,6 +629,13 @@ class ChangeValidator:
             except Exception as e:
                 logger.warning(f"[SYNTAX] Failed to pre-install dependencies from config files: {e}")
 
+# Launch silent dependency installation in background thread
+            try:
+                thread = threading.Thread(target=self._silent_dependency_install, args=(files,), daemon=True)
+                thread.start()
+            except Exception:
+                pass
+
             # Collect non-Python files that have adapters
             non_py_files = [f for f in files if not f.endswith('.py') and adapter_manager.is_supported(f)]
 
@@ -695,31 +706,55 @@ class ChangeValidator:
     
                 logger.info(f"[SYNTAX] Batch compiling {len(language_files)} {language} files together")
 
-# Handle JS/TS/Go using tree-sitter syntax checks
-                if language in ('javascript', 'js', 'typescript', 'ts', 'go'):
+                # Handle JS/TS/Go using tree-sitter syntax checks
+                if language in ('javascript', 'js', 'typescript', 'ts', 'tsx', 'go'):
                     for code, file_path in language_files:
                         if language in ('javascript', 'js'):
-                            check_result = self.syntax_checker.check_javascript(code, auto_fix=False)
+                            check_result = self.syntax_checker.check_javascript(code, auto_fix=True)
                         elif language in ('typescript', 'ts'):
-                            check_result = self.syntax_checker.check_typescript(code, auto_fix=False)
+                            # [TSX FIX] .tsx files must use TSX-specific check
+                            # even if adapter returned 'typescript' as language
+                            if file_path.endswith('.tsx'):
+                                check_result = self.syntax_checker.check_tsx(code, auto_fix=True)
+                            else:
+                                check_result = self.syntax_checker.check_typescript(code, auto_fix=True)
+                        elif language == 'tsx':
+                            check_result = self.syntax_checker.check_tsx(code, auto_fix=True)
                         elif language == 'go':
-                            check_result = self.syntax_checker.check_go(code, auto_fix=False)
-                        
+                            check_result = self.syntax_checker.check_go(code, auto_fix=True)
+
+                        # Process tree-sitter check results for JS/TS/Go/TSX
                         if not check_result.is_valid:
                             for issue in check_result.issues:
                                 issues.append(ValidationIssue(
                                     level=ValidationLevel.SYNTAX,
                                     severity=IssueSeverity.ERROR,
                                     file_path=file_path,
-                                    message=issue.message,
+                                    message=f"[{language.upper()} Syntax Error] {file_path}: {issue.message}",
                                     line=issue.line,
+                                    column=issue.column,
+                                    code=f"{language}_syntax_error",
                                     language=language,
-                                    code=f"{language}_syntax_error"
+                                    suggestion=issue.suggestion,
                                 ))
-                        else:
-                            logger.info(f"[SYNTAX] {language.capitalize()} file valid: {file_path}")
-                    
-                    continue
+                            if result is not None:
+                                result.auto_format_stats["stats"]["with_errors"] += 1
+                                result.auto_format_stats["stats"]["failed"] += 1
+                                result.auto_format_stats["failed_files"].append({
+                                    "file": file_path,
+                                    "errors": [i.message for i in check_result.issues[:2]]
+                                })
+                        elif check_result.was_auto_fixed and check_result.fixed_content and check_result.is_valid:
+                            self.vfs.stage_change(file_path, check_result.fixed_content)
+                            if result is not None:
+                                result.auto_format_stats["stats"]["fixed"] += 1
+                                result.auto_format_stats["fixed_files"].append({
+                                    "file": file_path,
+                                    "fixes": check_result.applied_fixes
+                                })
+
+                continue  # Skip compile_check_with_deps for JS/TS/Go/TSX (handled by tree-sitter above)
+               
                 if language == 'java':
                     for code, file_path in language_files:
                         # PHASE 2A: Check for syntax errors WITHOUT auto-fixing
@@ -958,6 +993,74 @@ class ChangeValidator:
                             })
 
             return issues
+
+    def _silent_dependency_install(self, files: List[str]) -> None:
+            """
+            Perform non-blocking background installation of dependencies for given files.
+
+            This method must NEVER raise exceptions and NEVER block the pipeline.
+            All errors are caught and logged at DEBUG level.
+
+            Args:
+                files: List of file paths to analyze for dependencies.
+            """
+            try:
+                from app.tools.dependency_manager import DependencyManager, BulkInstallResult
+
+                # Group files by language
+                lang_groups: Dict[str, List[str]] = {}
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext == '.py':
+                        lang = 'python'
+                    elif ext in ('.js', '.jsx', '.mjs'):
+                        lang = 'javascript'
+                    elif ext in ('.ts', '.tsx'):
+                        lang = 'typescript'
+                    elif ext == '.go':
+                        lang = 'go'
+                    elif ext == '.java':
+                        lang = 'java'
+                    else:
+                        continue
+                    lang_groups.setdefault(lang, []).append(f)
+
+                dependency_manager = DependencyManager(project_root=self.vfs.project_root, vfs=self.vfs)
+
+                for lang, lang_files in lang_groups.items():
+                    # First try config-based install
+                    try:
+                        config_results = dependency_manager.install_all_dependencies_from_config(vfs=self.vfs)
+                        if config_results.get(lang) is not None and config_results[lang].successful > 0:
+                            logger.debug(f"Silent dependency install: {lang} installed via config")
+                            continue
+                    except Exception:
+                        pass
+
+                    # Fallback: language-specific scan
+                    try:
+                        if lang == 'python':
+                            dependency_manager.scan_and_install_all_dependencies()
+                        elif lang in ('javascript', 'typescript'):
+                            # Try to install from package.json if exists
+                            pkg_json = dependency_manager._materialize_config_file("package.json") or \
+                                       (self.vfs.project_root / "package.json").exists()
+                            if pkg_json:
+                                dependency_manager.install_dependencies_from_package_json()
+                        elif lang == 'go':
+                            go_mod = dependency_manager._materialize_config_file("go.mod") or \
+                                     (self.vfs.project_root / "go.mod").exists()
+                            if go_mod:
+                                dependency_manager.install_dependencies_from_go_mod()
+                        elif lang == 'java':
+                            pom = dependency_manager._materialize_config_file("pom.xml") or \
+                                  (self.vfs.project_root / "pom.xml").exists()
+                            if pom:
+                                dependency_manager.install_dependencies_from_pom_xml()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     
     # ========================================================================
     # LEVEL 2: IMPORTS
@@ -2337,7 +2440,7 @@ exclude =
                             # This allows files to see each other's dependencies
                             compile_result = adapter_manager.compile_check_with_deps(
                                 [(code, fp, language) for code, fp in language_files],
-                                project_root=Path(temp_dir)
+                                project_root=self.vfs.project_root  # [TSX FIX] Use original project root to reuse node_modules
                             )
                         
                             if compile_result.get('success', False):
@@ -2380,7 +2483,7 @@ exclude =
                                         logger.info(f"[RUNTIME] Re-running batch compile check for {language} after dependency installation")
                                         compile_result = adapter_manager.compile_check_with_deps(
                                             [(code, fp, language) for code, fp in language_files],
-                                            project_root=Path(temp_dir)
+                                            project_root=self.vfs.project_root  # [TSX FIX] Use original project root to reuse node_modules
                                         )
                                     
                                         if compile_result.get('success', False):

@@ -110,7 +110,11 @@ async def translate_to_russian(
         from config.settings import cfg
         from app.llm.api_client import call_llm
         
-        # Проверяем что модель доступна
+# Проверяем что провайдеры доступны
+        if not cfg.get_available_providers():
+            logger.warning("No providers available, translation disabled")
+            _translation_disabled = True
+            return text
         if not hasattr(cfg, 'MODEL_GEMINI_2_FLASH'):
             logger.warning("MODEL_GEMINI_2_FLASH not configured, translation disabled")
             _translation_disabled = True
@@ -138,11 +142,16 @@ RUSSIAN TRANSLATION:"""
         
         logger.debug(f"Calling Gemini Flash for translation, text length: {len(text)}")
         
+        from config.intermediate_agent_models import get_intermediate_model
+        translator_model, _, translator_provider = get_intermediate_model("translator", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
         result = await call_llm(
-            model=cfg.MODEL_GEMINI_2_FLASH,
+            model=translator_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,  # Низкая температура для консистентности
             max_tokens=min(len(text) * 2, 2500),  # Русский текст обычно короче
+            preferred_provider=translator_provider,
+            is_intermediate=True,
         )
         
         if result and result.strip():
@@ -415,7 +424,10 @@ def check_translation_available() -> bool:
         from config.settings import cfg
         from app.llm.api_client import call_llm
         
-        # Проверяем наличие модели
+# Проверяем наличие провайдеров
+        if not cfg.get_available_providers():
+            logger.warning("No providers available for translation")
+            return False
         if not hasattr(cfg, 'MODEL_GEMINI_2_FLASH'):
             logger.warning("MODEL_GEMINI_2_FLASH not in config")
             return False

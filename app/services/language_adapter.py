@@ -142,7 +142,7 @@ class AdapterManager:
         '.jsx': 'javascript',
         '.mjs': 'javascript',
         '.ts': 'typescript',
-        '.tsx': 'typescript',
+    '.tsx': 'tsx',
         '.go': 'go',
         '.java': 'java',
     }
@@ -192,10 +192,17 @@ class AdapterManager:
         # JavaScript/TypeScript - CRITICAL: Pass VFS for staged file access during compilation
         try:
             from app.services.js_ts_adapter import JsTsAdapter
-            adapter = JsTsAdapter(project_root=self.project_root, vfs=self.vfs)
+            node_modules_bin = self.project_root / 'node_modules' / '.bin' if self.project_root else None
+            adapter = JsTsAdapter(
+                project_root=self.project_root,
+                vfs=self.vfs,
+                node_modules_bin_dir=node_modules_bin,
+            )
             if adapter.is_available():
                 self._adapters['javascript'] = adapter
                 self._adapters['typescript'] = adapter
+
+                self._adapters['tsx'] = adapter
                 logger.info(f"JsTsAdapter registered for javascript/typescript (vfs={'yes' if self.vfs else 'no'})")
         except ImportError as e:
             logger.debug(f"JsTsAdapter not available: {e}")
@@ -243,9 +250,11 @@ class AdapterManager:
         return None
     
     def get_language_for_file(self, file_path: str) -> Optional[str]:
-        """Get language name for a file based on its extension."""
-        extension = Path(file_path).suffix.lower()
-        return self.EXTENSION_TO_LANGUAGE.get(extension)
+            """Get language name for a file based on its extension."""
+            extension = Path(file_path).suffix.lower()
+            if extension == '.tsx':
+                return 'tsx'
+            return self.EXTENSION_TO_LANGUAGE.get(extension)
     
     def get_supported_extensions(self) -> List[str]:
         """Get list of supported file extensions that have registered adapters."""

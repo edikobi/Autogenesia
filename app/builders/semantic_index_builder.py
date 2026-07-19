@@ -30,6 +30,8 @@ import aiofiles
 import multiprocessing
 import httpx
 from app.services.tree_sitter_parser import MultiLanguageParser, MultiLanguageChunk
+from app.llm.api_client import call_llm
+from config.intermediate_agent_models import get_intermediate_model
 
 # Правильные импорты относительно структуры проекта
 from app.utils.token_counter import TokenCounter
@@ -54,6 +56,11 @@ INDEX_VERSION = "1.2"
 REQUEST_TIMEOUT = 120.0
 MAX_RETRIES = 3
 CONCURRENT_REQUESTS = 5
+
+THINKING_DISABLED_MODELS = {
+    "deepseek-v4-flash", "deepseek/deepseek-v4-flash",
+    "glm-5-turbo", "z-ai/glm-5-turbo",
+}
 
 IGNORE_DIRS: Set[str] = {
     ".git", ".venv", "venv", "__pycache__", "node_modules",
@@ -371,6 +378,16 @@ class AIClient:
         self.stats = IndexStats()
         self._semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
         self.parser = ResponseParser()
+
+    def _get_extra_params_for_model(self, model: str) -> dict:
+            """Return extra_params_override for models that need thinking disabled.
+
+            Returns {"reasoning_effort": "disabled"} for models in THINKING_DISABLED_MODELS.
+            api_client._make_request() converts "disabled" to extra_body={"thinking": {"type": "disabled"}}.
+            """
+            if model in THINKING_DISABLED_MODELS:
+                return {"reasoning_effort": "disabled"}
+            return {}
     
     async def analyze_class(self, code: str, context: str, tokens: int) -> Tuple[str, str]:
         if tokens >= QWEN_TOKEN_THRESHOLD:
@@ -439,130 +456,103 @@ class AIClient:
         return await self._call_deepseek(prompt)
     
     async def _call_qwen(self, prompt: str) -> Optional[str]:
-        async with self._semaphore:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        response = await client.post(
-                            f"{cfg.OPENROUTER_BASE_URL}/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {cfg.OPENROUTER_API_KEY}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": cfg.MODEL_QWEN,
-                                "messages": [
-                                    {"role": "system", "content": QWEN_SYSTEM_PROMPT},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                "temperature": 0.1,
-                                "max_tokens": 200,
-                                "top_p": 0.9,
-                            }
-                        )
-                        
-                        self.stats.qwen_calls += 1
-                        self.stats.total_analysis_tokens += self.token_counter.count(prompt)
-                        
-                        if response.status_code != 200:
-                            error_msg = f"Qwen HTTP {response.status_code}: {response.text[:100]}"
-                            logger.warning(error_msg)
-                            self.stats.errors.append(error_msg)
-                            
-                            if response.status_code in (429, 500, 502, 503):
-                                await asyncio.sleep(2 ** attempt)
-                                continue
-                            return None
-                        
-                        data = response.json()
-                        raw_content = data["choices"][0]["message"]["content"]
-                        
-                        parsed = self.parser.parse(raw_content, self.stats)
-                        
-                        if self.parser.is_valid_description(parsed):
-                            self.stats.qwen_successes += 1
-                            return parsed
-                        
-                        logger.warning(f"Qwen invalid response (attempt {attempt + 1}): {parsed[:50]}")
-                        
-                    except httpx.TimeoutException:
-                        logger.warning(f"Qwen timeout (attempt {attempt + 1})")
-                        self.stats.errors.append("qwen_timeout")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Qwen JSON error: {e}")
-                        self.stats.errors.append(f"qwen_json_error: {str(e)[:50]}")
-                    except Exception as e:
-                        logger.error(f"Qwen unexpected error: {e}")
-                        self.stats.errors.append(f"qwen_error: {str(e)[:50]}")
-                    
-                    if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(2 ** attempt)
-        
-        return None
+            """Call Qwen model via call_llm with provider-aware model selection."""
+            async with self._semaphore:
+                try:
+                    model, reasoning_effort, model_provider = get_intermediate_model(
+                        "index_builder_qwen",
+                        cfg.get_available_providers(),
+                        preferred_provider=cfg.get_selected_agent_provider()
+                    )
+                    if reasoning_effort == "disabled" or model in THINKING_DISABLED_MODELS:
+                        extra_params = {"reasoning_effort": "disabled"}
+                    elif reasoning_effort:
+                        extra_params = {"reasoning_effort": reasoning_effort}
+                    else:
+                        extra_params = {}
+
+                    messages = [
+                        {"role": "system", "content": QWEN_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ]
+
+                    self.stats.qwen_calls += 1
+                    self.stats.total_analysis_tokens += self.token_counter.count(prompt)
+
+                    result = await call_llm(
+                        model=model,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=200,
+                        top_p=0.9,
+                        extra_params_override=extra_params,
+                        preferred_provider=model_provider,
+                        is_intermediate=True,
+                    )
+
+                    parsed = self.parser.parse(result, self.stats)
+
+                    if self.parser.is_valid_description(parsed):
+                        self.stats.qwen_successes += 1
+                        return parsed
+
+                    logger.warning(f"Qwen invalid response: {parsed[:50]}")
+                    return None
+
+                except Exception as e:
+                    logger.warning(f"Qwen error: {e}")
+                    self.stats.qwen_failures += 1
+                    self.stats.errors.append(f"qwen_error: {str(e)[:50]}")
+                    return None
     
     async def _call_deepseek(self, prompt: str) -> str:
-        async with self._semaphore:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        response = await client.post(
-                            f"{cfg.DEEPSEEK_BASE_URL}/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {cfg.DEEPSEEK_API_KEY}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": cfg.MODEL_NORMAL,
-                                "messages": [
-                                    {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                "temperature": 0.1,
-                                "max_tokens": 300,
-                            }
-                        )
-                        
-                        self.stats.deepseek_calls += 1
-                        self.stats.total_analysis_tokens += self.token_counter.count(prompt)
-                        
-                        if response.status_code != 200:
-                            error_msg = f"DeepSeek HTTP {response.status_code}"
-                            logger.warning(error_msg)
-                            self.stats.errors.append(error_msg)
-                            
-                            if response.status_code in (429, 500, 502, 503):
-                                await asyncio.sleep(2 ** attempt)
-                                continue
-                            
-                            self.stats.deepseek_failures += 1
-                            return "[DeepSeek API error]"
-                        
-                        data = response.json()
-                        raw_content = data["choices"][0]["message"]["content"]
-                        
-                        parsed = self.parser.parse(raw_content, self.stats)
-                        
-                        if self.parser.is_valid_description(parsed):
-                            self.stats.deepseek_successes += 1
-                            return parsed
-                        
-                        logger.warning(f"DeepSeek invalid response: {parsed[:50]}")
-                        
-                    except httpx.TimeoutException:
-                        logger.warning(f"DeepSeek timeout (attempt {attempt + 1})")
-                        self.stats.errors.append("deepseek_timeout")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"DeepSeek JSON error: {e}")
-                        self.stats.errors.append(f"deepseek_json_error: {str(e)[:50]}")
-                    except Exception as e:
-                        logger.error(f"DeepSeek unexpected error: {e}")
-                        self.stats.errors.append(f"deepseek_error: {str(e)[:50]}")
-                    
-                    if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(2 ** attempt)
-        
-        self.stats.deepseek_failures += 1
-        return "[Analysis failed after retries]"
+            """Call DeepSeek model via call_llm with provider-aware model selection."""
+            async with self._semaphore:
+                try:
+                    model, reasoning_effort, model_provider = get_intermediate_model(
+                        "index_builder_deepseek",
+                        cfg.get_available_providers(),
+                        preferred_provider=cfg.get_selected_agent_provider()
+                    )
+                    if reasoning_effort == "disabled" or model in THINKING_DISABLED_MODELS:
+                        extra_params = {"reasoning_effort": "disabled"}
+                    elif reasoning_effort:
+                        extra_params = {"reasoning_effort": reasoning_effort}
+                    else:
+                        extra_params = {}
+
+                    messages = [
+                        {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ]
+
+                    self.stats.deepseek_calls += 1
+                    self.stats.total_analysis_tokens += self.token_counter.count(prompt)
+
+                    result = await call_llm(
+                        model=model,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=300,
+                        extra_params_override=extra_params,
+                        preferred_provider=model_provider,
+                        is_intermediate=True,
+                    )
+
+                    parsed = self.parser.parse(result, self.stats)
+
+                    if self.parser.is_valid_description(parsed):
+                        self.stats.deepseek_successes += 1
+                        return parsed
+
+                    logger.warning(f"DeepSeek invalid response: {parsed[:50]}")
+
+                except Exception as e:
+                    logger.error(f"DeepSeek error: {e}")
+                    self.stats.errors.append(f"deepseek_error: {str(e)[:50]}")
+
+            self.stats.deepseek_failures += 1
+            return "[Analysis failed after retries]"
 
 
 # ============== REFERENCE EXTRACTOR ==============
@@ -866,7 +856,7 @@ class SemanticIndexer:
             ".js": "javascript",
             ".jsx": "javascript",
             ".ts": "typescript",
-            ".tsx": "typescript",
+            ".tsx": "tsx",
             ".go": "go",
             ".java": "java"
         }
@@ -1911,7 +1901,7 @@ class SemanticIndexer:
             ".js": "javascript",
             ".jsx": "javascript",
             ".ts": "typescript",
-            ".tsx": "typescript",
+            ".tsx": "tsx",
             ".go": "go",
             ".java": "java"
         }
@@ -2075,7 +2065,7 @@ class SemanticIndexer:
             ".js": "javascript",
             ".jsx": "javascript",
             ".ts": "typescript",
-            ".tsx": "typescript",
+            ".tsx": "tsx",
             ".go": "go",
             ".java": "java"
         }
@@ -2296,7 +2286,7 @@ class IndexFileWatcher:
             ".js": "javascript",
             ".jsx": "javascript",
             ".ts": "typescript",
-            ".tsx": "typescript",
+            ".tsx": "tsx",
             ".go": "go",
             ".java": "java"
         }

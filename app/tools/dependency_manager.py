@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 from enum import Enum
 from importlib.metadata import packages_distributions
 from app.services.language_adapter import AdapterManager
+from app.utils.executable_resolver import resolve_executable
 
 
 logger = logging.getLogger(__name__)
@@ -225,10 +226,11 @@ class InstallationResult:
 @dataclass
 class BulkInstallResult:
     """Результат массовой установки"""
-    total: int
-    successful: int
-    failed: int
-    skipped: int
+    total: int = 0
+    successful: int = 0
+    failed: int = 0
+    skipped: int = 0
+    message: str = ""
     results: List[InstallationResult] = field(default_factory=list)
     
     @property
@@ -244,6 +246,7 @@ class BulkInstallResult:
             "all_success": self.all_success,
             "results": [r.to_dict() for r in self.results],
         }
+
 
 
 # ============================================================================
@@ -816,7 +819,7 @@ class DependencyManager:
         try:
             logger.info(f"Initializing npm environment at {self.project_root}")
             result = subprocess.run(
-                ['npm', 'init', '-y'],
+                [resolve_executable('npm'), 'init', '-y'],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -1291,7 +1294,7 @@ class DependencyManager:
             if not package_json_path.exists():
                 logger.info(f"No package.json found, initializing npm project at {self.project_root}")
                 init_result = subprocess.run(
-                    ['npm', 'init', '-y'],
+                    [resolve_executable('npm'), 'init', '-y'],
                     capture_output=True,
                     text=True,
                     encoding='utf-8',
@@ -1308,7 +1311,7 @@ class DependencyManager:
                     )
             
             # Build command
-            cmd = ['npm', 'install']
+            cmd = [resolve_executable('npm'), 'install']
             
             if dev:
                 cmd.append('--save-dev')
@@ -1490,10 +1493,10 @@ class DependencyManager:
             # Build Maven command to add dependency
             # Using dependency:get to download the dependency to local repository
             cmd = [
-                'mvn', 'dependency:get',
-                f'-DgroupId={group_id}',
-                f'-DartifactId={artifact_id}',
-            ]
+                            resolve_executable('mvn'), 'dependency:get',
+                            f'-DgroupId={group_id}',
+                            f'-DartifactId={artifact_id}',
+                        ]
             
             if version:
                 cmd.append(f'-Dversion={version}')
@@ -1541,374 +1544,353 @@ class DependencyManager:
             )
             
     def install_dependencies_from_pom_xml(self, pom_content: Optional[str] = None, pom_path: Optional[Path] = None) -> BulkInstallResult:
-        """Parses pom.xml content or file and installs all dependencies using Maven. 
-        Supports reading from VFS (pom_content) or disk (pom_path).
-        
-        IMPORTANT: If pom_content is provided, it is written to pom.xml and KEPT on disk
-        for Maven to use. This is intentional - Maven needs the file to resolve dependencies.
-        """
-        try:
-            # Determine which pom.xml to use
-            if pom_content is not None:
-                # Write VFS content to pom.xml - this file MUST remain for Maven
-                pom_file = self.project_root / "pom.xml"
-                pom_file.write_text(pom_content, encoding='utf-8')
-                logger.info(f"[DEPS] Wrote pom.xml from VFS content ({len(pom_content)} chars)")
-            elif pom_path is not None and pom_path.exists():
-                pom_file = pom_path
-            elif (self.project_root / "pom.xml").exists():
-                pom_file = self.project_root / "pom.xml"
-            else:
-                return BulkInstallResult(
-                    total=0,
-                    successful=0,
-                    failed=0,
-                    skipped=0,
-                    results=[],
-                    all_success=False,
-                    message="No pom.xml found"
-                )
-            
-            # Parse pom.xml to extract dependencies
+            """Parses pom.xml content or file and installs all dependencies using Maven. 
+            Supports reading from VFS (pom_content) or disk (pom_path).
+
+            IMPORTANT: If pom_content is provided, it is written to pom.xml and KEPT on disk
+            for Maven to use. This is intentional - Maven needs the file to resolve dependencies.
+            """
             try:
-                tree = ET.parse(pom_file)
-                root = tree.getroot()
-            except ET.ParseError as e:
-                logger.error(f"Failed to parse pom.xml: {e}")
-                return BulkInstallResult(
-                    total=0,
-                    successful=0,
-                    failed=0,
-                    skipped=0,
-                    results=[],
-                    all_success=False,
-                    message=f"Parse error: {e}"
-                )
-            
-            # Extract namespace if present
-            namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
-            
-            # Find dependencies
-            dependencies = []
-            deps_elem = root.find('.//m:dependencies', namespace)
-            if deps_elem is None:
-                deps_elem = root.find('.//dependencies')
-            
-            if deps_elem is not None:
-                for dep in deps_elem.findall('m:dependency', namespace) or deps_elem.findall('dependency'):
-                    group_id_elem = dep.find('m:groupId', namespace) or dep.find('groupId')
-                    artifact_id_elem = dep.find('m:artifactId', namespace) or dep.find('artifactId')
-                    version_elem = dep.find('m:version', namespace) or dep.find('version')
-                    
-                    if group_id_elem is not None and artifact_id_elem is not None:
-                        group_id = group_id_elem.text
-                        artifact_id = artifact_id_elem.text
-                        version = version_elem.text if version_elem is not None else None
-                        
-                        if group_id and artifact_id:
-                            dependencies.append((group_id, artifact_id, version))
-            
-            if not dependencies:
-                logger.info("No dependencies found in pom.xml")
-                return BulkInstallResult(
-                    total=0,
-                    successful=0,
-                    failed=0,
-                    skipped=0,
-                    results=[],
-                    all_success=True,
-                    message="No dependencies to install"
-                )
-            
-            logger.info(f"Found {len(dependencies)} dependencies in pom.xml")
-            
-            # Try to run mvn dependency:resolve for all dependencies at once
-            try:
-                cmd = ['mvn', 'dependency:resolve', '-q']
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=600,
-                    cwd=str(self.project_root)
-                )
-                
-                if result.returncode == 0:
-                    logger.info(f"Successfully resolved all {len(dependencies)} Maven dependencies")
+                # Determine which pom.xml to use
+                if pom_content is not None:
+                    # Write VFS content to pom.xml - this file MUST remain for Maven
+                    pom_file = self.project_root / "pom.xml"
+                    pom_file.write_text(pom_content, encoding='utf-8')
+                    logger.info(f"[DEPS] Wrote pom.xml from VFS content ({len(pom_content)} chars)")
+                elif pom_path is not None and pom_path.exists():
+                    pom_file = pom_path
+                elif (self.project_root / "pom.xml").exists():
+                    pom_file = self.project_root / "pom.xml"
+                else:
                     return BulkInstallResult(
-                        total=len(dependencies),
-                        successful=len(dependencies),
+                        total=0,
+                        successful=0,
                         failed=0,
                         skipped=0,
                         results=[],
-                        all_success=True,
-                        message=f"Installed {len(dependencies)} dependencies"
+                        message="No pom.xml found"
                     )
-                else:
-                    logger.warning(f"mvn dependency:resolve failed, falling back to individual installation")
+
+                # Parse pom.xml to extract dependencies
+                try:
+                    tree = ET.parse(pom_file)
+                    root = tree.getroot()
+                except ET.ParseError as e:
+                    logger.error(f"Failed to parse pom.xml: {e}")
+                    return BulkInstallResult(
+                        total=0,
+                        successful=0,
+                        failed=0,
+                        skipped=0,
+                        results=[],
+                        message=f"Parse error: {e}"
+                    )
+
+                # Extract namespace if present
+                namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
+
+                # Find dependencies
+                dependencies = []
+                deps_elem = root.find('.//m:dependencies', namespace)
+                if deps_elem is None:
+                    deps_elem = root.find('.//dependencies')
+
+                if deps_elem is not None:
+                    for dep in deps_elem.findall('m:dependency', namespace) or deps_elem.findall('dependency'):
+                        group_id_elem = dep.find('m:groupId', namespace) or dep.find('groupId')
+                        artifact_id_elem = dep.find('m:artifactId', namespace) or dep.find('artifactId')
+                        version_elem = dep.find('m:version', namespace) or dep.find('version')
+
+                        if group_id_elem is not None and artifact_id_elem is not None:
+                            group_id = group_id_elem.text
+                            artifact_id = artifact_id_elem.text
+                            version = version_elem.text if version_elem is not None else None
+
+                            if group_id and artifact_id:
+                                dependencies.append((group_id, artifact_id, version))
+
+                if not dependencies:
+                    logger.info("No dependencies found in pom.xml")
+                    return BulkInstallResult(
+                        total=0,
+                        successful=0,
+                        failed=0,
+                        skipped=0,
+                        results=[],
+                        message="No dependencies to install"
+                    )
+
+                logger.info(f"Found {len(dependencies)} dependencies in pom.xml")
+
+                # Try to run mvn dependency:resolve for all dependencies at once
+                try:
+                    cmd = [resolve_executable('mvn'), 'dependency:resolve', '-q']
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=600,
+                        cwd=str(self.project_root)
+                    )
+
+                    if result.returncode == 0:
+                        logger.info(f"Successfully resolved all {len(dependencies)} Maven dependencies")
+                        return BulkInstallResult(
+                            total=len(dependencies),
+                            successful=len(dependencies),
+                            failed=0,
+                            skipped=0,
+                            results=[],
+                            message=f"Installed {len(dependencies)} dependencies"
+                        )
+                    else:
+                        logger.warning(f"mvn dependency:resolve failed, falling back to individual installation")
+                except subprocess.TimeoutExpired:
+                    logger.warning("mvn dependency:resolve timed out, falling back to individual installation")
+                except Exception as e:
+                    logger.warning(f"mvn dependency:resolve failed: {e}, falling back to individual installation")
+
+                # Fallback: install each dependency individually
+                successful = 0
+                failed = 0
+                results = []
+
+                for group_id, artifact_id, version in dependencies:
+                    result = self.install_maven_dependency(group_id, artifact_id, version)
+                    results.append(result)
+                    if result.status == InstallResult.SUCCESS:
+                        successful += 1
+                    else:
+                        failed += 1
+
+                return BulkInstallResult(
+                    total=len(dependencies),
+                    successful=successful,
+                    failed=failed,
+                    skipped=0,
+                    results=results,
+                    message=f"Installed {successful}/{len(dependencies)} dependencies"
+                )
+
             except subprocess.TimeoutExpired:
-                logger.warning("mvn dependency:resolve timed out, falling back to individual installation")
+                logger.error("Maven dependency installation timed out")
+                return BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[],
+                    message="Timeout during Maven dependency installation"
+                )
             except Exception as e:
-                logger.warning(f"mvn dependency:resolve failed: {e}, falling back to individual installation")
-            
-            # Fallback: install each dependency individually
-            successful = 0
-            failed = 0
-            results = []
-            
-            for group_id, artifact_id, version in dependencies:
-                result = self.install_maven_dependency(group_id, artifact_id, version)
-                results.append(result)
-                if result.status == InstallResult.SUCCESS:
-                    successful += 1
-                else:
-                    failed += 1
-            
-            return BulkInstallResult(
-                total=len(dependencies),
-                successful=successful,
-                failed=failed,
-                skipped=0,
-                results=results,
-                all_success=failed == 0,
-                message=f"Installed {successful}/{len(dependencies)} dependencies"
-            )
-        
-        except subprocess.TimeoutExpired:
-            logger.error("Maven dependency installation timed out")
-            return BulkInstallResult(
-                total=0,
-                successful=0,
-                failed=0,
-                skipped=0,
-                results=[],
-                all_success=False,
-                message="Timeout during Maven dependency installation"
-            )
-        except Exception as e:
-            logger.error(f"Error installing Maven dependencies: {e}")
-            return BulkInstallResult(
-                total=0,
-                successful=0,
-                failed=0,
-                skipped=0,
-                results=[],
-                all_success=False,
-                message=f"Error: {e}"
-            )
+                logger.error(f"Error installing Maven dependencies: {e}")
+                return BulkInstallResult(
+                    total=0,
+                    successful=0,
+                    failed=0,
+                    skipped=0,
+                    results=[],
+                    message=f"Error: {e}"
+                )
             
             
     def install_dependencies_from_package_json(self, package_json_content: Optional[str] = None, package_json_path: Optional[Path] = None) -> BulkInstallResult:
-        """Parses package.json content or file and installs all dependencies using npm. Supports reading from VFS (package_json_content) or disk (package_json_path)."""
-        try:
-            # Determine which package.json to use
-            if package_json_content is not None:
-                # Write VFS content to package.json
-                package_json_file = self.project_root / "package.json"
-                package_json_file.write_text(package_json_content, encoding='utf-8')
-            elif package_json_path is not None and package_json_path.exists():
-                package_json_file = package_json_path
-            elif (self.project_root / "package.json").exists():
-                package_json_file = self.project_root / "package.json"
-            else:
-                return BulkInstallResult(
-                    successful=0,
-                    failed=0,
-                    all_success=False,
-                    message="No package.json found"
-                )
-            
-            # Parse package.json to count dependencies
+            """Parses package.json content or file and installs all dependencies using npm. Supports reading from VFS (package_json_content) or disk (package_json_path)."""
             try:
-                with open(package_json_file, 'r', encoding='utf-8') as f:
-                    package_data = json.load(f)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse package.json: {e}")
-                return BulkInstallResult(
-                    successful=0,
-                    failed=0,
-                    all_success=False,
-                    message=f"Parse error: {e}"
-                )
-            
-            # Count dependencies
-            dependencies = package_data.get('dependencies', {})
-            dev_dependencies = package_data.get('devDependencies', {})
-            total_deps = len(dependencies) + len(dev_dependencies)
-            
-            if total_deps == 0:
-                logger.info("No dependencies found in package.json")
-                return BulkInstallResult(
-                    successful=0,
-                    failed=0,
-                    all_success=True,
-                    message="No dependencies to install"
-                )
-            
-            logger.info(f"Found {total_deps} dependencies in package.json")
-            
-            # Run npm install
-            try:
-                cmd = ['npm', 'install']
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=600,
-                    cwd=str(self.project_root)
-                )
-                
-                if result.returncode == 0:
-                    logger.info(f"Successfully installed all {total_deps} npm dependencies")
-                    return BulkInstallResult(
-                        successful=total_deps,
-                        failed=0,
-                        all_success=True,
-                        message=f"Installed {total_deps} dependencies"
-                    )
+                # Determine which package.json to use
+                if package_json_content is not None:
+                    # Write VFS content to package.json
+                    package_json_file = self.project_root / "package.json"
+                    package_json_file.write_text(package_json_content, encoding='utf-8')
+                elif package_json_path is not None and package_json_path.exists():
+                    package_json_file = package_json_path
+                elif (self.project_root / "package.json").exists():
+                    package_json_file = self.project_root / "package.json"
                 else:
-                    logger.warning(f"npm install failed: {result.stderr}")
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=0,
+                        message="No package.json found"
+                    )
+
+                # Parse package.json to count dependencies
+                try:
+                    with open(package_json_file, 'r', encoding='utf-8') as f:
+                        package_data = json.load(f)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse package.json: {e}")
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=0,
+                        message=f"Parse error: {e}"
+                    )
+
+                # Count dependencies
+                dependencies = package_data.get('dependencies', {})
+                dev_dependencies = package_data.get('devDependencies', {})
+                total_deps = len(dependencies) + len(dev_dependencies)
+
+                if total_deps == 0:
+                    logger.info("No dependencies found in package.json")
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=0,
+                        message="No dependencies to install"
+                    )
+
+                logger.info(f"Found {total_deps} dependencies in package.json")
+
+                # Run npm install
+                try:
+                    cmd = [resolve_executable('npm'), 'install']
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=600,
+                        cwd=str(self.project_root)
+                    )
+
+                    if result.returncode == 0:
+                        logger.info(f"Successfully installed all {total_deps} npm dependencies")
+                        return BulkInstallResult(
+                            successful=total_deps,
+                            failed=0,
+                            message=f"Installed {total_deps} dependencies"
+                        )
+                    else:
+                        logger.warning(f"npm install failed: {result.stderr}")
+                        return BulkInstallResult(
+                            successful=0,
+                            failed=total_deps,
+                            message=f"npm install failed: {result.stderr[:200]}"
+                        )
+
+                except subprocess.TimeoutExpired:
+                    logger.error("npm install timed out")
                     return BulkInstallResult(
                         successful=0,
                         failed=total_deps,
-                        all_success=False,
-                        message=f"npm install failed: {result.stderr[:200]}"
+                        message="Timeout during npm install"
                     )
-            
-            except subprocess.TimeoutExpired:
-                logger.error("npm install timed out")
-                return BulkInstallResult(
-                    successful=0,
-                    failed=total_deps,
-                    all_success=False,
-                    message="Timeout during npm install"
-                )
-        
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parse error: {e}")
-            return BulkInstallResult(
-                successful=0,
-                failed=0,
-                all_success=False,
-                message=f"JSON parse error: {e}"
-            )
-        except Exception as e:
-            logger.error(f"Error installing npm dependencies: {e}")
-            return BulkInstallResult(
-                successful=0,
-                failed=0,
-                all_success=False,
-                message=f"Error: {e}"
-        )
-            
-    def install_dependencies_from_go_mod(self, go_mod_content: Optional[str] = None, go_mod_path: Optional[Path] = None) -> BulkInstallResult:
-        """Parses go.mod content or file and installs all dependencies using go mod download. Supports reading from VFS (go_mod_content) or disk (go_mod_path)."""
-        try:
-            # Determine which go.mod to use
-            if go_mod_content is not None:
-                # Write VFS content to go.mod
-                go_mod_file = self.project_root / "go.mod"
-                go_mod_file.write_text(go_mod_content, encoding='utf-8')
-            elif go_mod_path is not None and go_mod_path.exists():
-                go_mod_file = go_mod_path
-            elif (self.project_root / "go.mod").exists():
-                go_mod_file = self.project_root / "go.mod"
-            else:
+
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parse error: {e}")
                 return BulkInstallResult(
                     successful=0,
                     failed=0,
-                    all_success=False,
-                    message="No go.mod found"
+                    message=f"JSON parse error: {e}"
                 )
+            except Exception as e:
+                logger.error(f"Error installing npm dependencies: {e}")
+                return BulkInstallResult(
+                    successful=0,
+                    failed=0,
+                    message=f"Error: {e}"
+            )
             
-            # Try to run go mod download
+    def install_dependencies_from_go_mod(self, go_mod_content: Optional[str] = None, go_mod_path: Optional[Path] = None) -> BulkInstallResult:
+            """Parses go.mod content or file and installs all dependencies using go mod download. Supports reading from VFS (go_mod_content) or disk (go_mod_path)."""
             try:
-                cmd = ['go', 'mod', 'download']
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=600,
-                    cwd=str(self.project_root)
-                )
-                
-                if result.returncode == 0:
-                    logger.info("Successfully downloaded all Go dependencies")
-                    return BulkInstallResult(
-                        successful=1,
-                        failed=0,
-                        all_success=True,
-                        message="Downloaded all Go dependencies"
-                    )
+                # Determine which go.mod to use
+                if go_mod_content is not None:
+                    # Write VFS content to go.mod
+                    go_mod_file = self.project_root / "go.mod"
+                    go_mod_file.write_text(go_mod_content, encoding='utf-8')
+                elif go_mod_path is not None and go_mod_path.exists():
+                    go_mod_file = go_mod_path
+                elif (self.project_root / "go.mod").exists():
+                    go_mod_file = self.project_root / "go.mod"
                 else:
-                    logger.warning(f"go mod download failed, trying go mod tidy")
-                    
-                    # Try go mod tidy
-                    try:
-                        tidy_result = subprocess.run(
-                            ['go', 'mod', 'tidy'],
-                            capture_output=True,
-                            text=True,
-                            encoding='utf-8',
-                            errors='replace',
-                            timeout=300,
-                            cwd=str(self.project_root)
+                    return BulkInstallResult(
+                        successful=0,
+                        failed=0,
+                        message="No go.mod found"
+                    )
+
+                # Try to run go mod download
+                try:
+                    cmd = ['go', 'mod', 'download']
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=600,
+                        cwd=str(self.project_root)
+                    )
+
+                    if result.returncode == 0:
+                        logger.info("Successfully downloaded all Go dependencies")
+                        return BulkInstallResult(
+                            successful=1,
+                            failed=0,
+                            message="Downloaded all Go dependencies"
                         )
-                        
-                        if tidy_result.returncode == 0:
-                            # Retry download after tidy
-                            retry_result = subprocess.run(
-                                cmd,
+                    else:
+                        logger.warning(f"go mod download failed, trying go mod tidy")
+
+                        # Try go mod tidy
+                        try:
+                            tidy_result = subprocess.run(
+                                ['go', 'mod', 'tidy'],
                                 capture_output=True,
                                 text=True,
                                 encoding='utf-8',
                                 errors='replace',
-                                timeout=600,
+                                timeout=300,
                                 cwd=str(self.project_root)
                             )
-                            
-                            if retry_result.returncode == 0:
-                                logger.info("Successfully downloaded Go dependencies after tidy")
-                                return BulkInstallResult(
-                                    successful=1,
-                                    failed=0,
-                                    all_success=True,
-                                    message="Downloaded Go dependencies after tidy"
+
+                            if tidy_result.returncode == 0:
+                                # Retry download after tidy
+                                retry_result = subprocess.run(
+                                    cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    timeout=600,
+                                    cwd=str(self.project_root)
                                 )
-                        
-                    except Exception as e:
-                        logger.warning(f"go mod tidy failed: {e}")
-                    
+
+                                if retry_result.returncode == 0:
+                                    logger.info("Successfully downloaded Go dependencies after tidy")
+                                    return BulkInstallResult(
+                                        successful=1,
+                                        failed=0,
+                                        message="Downloaded Go dependencies after tidy"
+                                    )
+
+                        except Exception as e:
+                            logger.warning(f"go mod tidy failed: {e}")
+
+                        return BulkInstallResult(
+                            successful=0,
+                            failed=1,
+                            message=f"go mod download failed: {result.stderr[:200]}"
+                        )
+
+                except subprocess.TimeoutExpired:
+                    logger.error("go mod download timed out")
                     return BulkInstallResult(
                         successful=0,
                         failed=1,
-                        all_success=False,
-                        message=f"go mod download failed: {result.stderr[:200]}"
+                        message="Timeout during go mod download"
                     )
-            
-            except subprocess.TimeoutExpired:
-                logger.error("go mod download timed out")
+
+            except Exception as e:
+                logger.error(f"Error installing Go dependencies: {e}")
                 return BulkInstallResult(
                     successful=0,
-                    failed=1,
-                    all_success=False,
-                    message="Timeout during go mod download"
+                    failed=0,
+                    message=f"Error: {e}"
                 )
-        
-        except Exception as e:
-            logger.error(f"Error installing Go dependencies: {e}")
-            return BulkInstallResult(
-                successful=0,
-                failed=0,
-                all_success=False,
-                message=f"Error: {e}"
-            )
     
     def install_all_dependencies_from_config(self, vfs: Optional[Any] = None) -> Dict[str, BulkInstallResult]:
         """Detects and installs dependencies from all configuration files (pom.xml, package.json, go.mod). 
@@ -2048,127 +2030,210 @@ class DependencyManager:
             self.vfs = original_vfs
         
         return results
+
+    def silent_install_for_files(self, files: List[str], vfs: Optional[Any] = None) -> Dict[str, Any]:
+            """
+            Silently install dependencies for a list of files, without raising exceptions.
+
+            This method is designed to be called from a background thread and must never
+            raise exceptions or block the main pipeline. All errors are logged at DEBUG level.
+
+            Args:
+                files: List of file paths to analyze for dependencies.
+                vfs: Optional VirtualFileSystem instance for reading staged config files.
+
+            Returns:
+                Dict mapping language to BulkInstallResult (or empty if no action taken).
+            """
+            results = {}
+            try:
+                # Detect languages from file extensions
+                languages = set()
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext == '.py':
+                        languages.add('python')
+                    elif ext in ('.js', '.jsx', '.mjs'):
+                        languages.add('javascript')
+                    elif ext in ('.ts', '.tsx'):
+                        languages.add('typescript')
+                    elif ext == '.go':
+                        languages.add('go')
+                    elif ext == '.java':
+                        languages.add('java')
+
+                if not languages:
+                    return results
+
+                effective_vfs = vfs or self.vfs
+
+                for lang in languages:
+                    try:
+                        # First try config-based install via the existing method
+                        # This checks for package.json, go.mod, pom.xml, etc.
+                        config_results = self.install_all_dependencies_from_config(vfs=effective_vfs)
+                        if config_results.get(lang) is not None and config_results[lang].successful > 0:
+                            results[lang] = config_results[lang]
+                            logger.debug(f"Silent install via config succeeded for {lang}")
+                            continue
+                    except Exception:
+                        pass
+
+                    # Fallback: language-specific install
+                    try:
+                        if lang == 'python':
+                            result = self.scan_and_install_all_dependencies()
+                            if result and result.successful > 0:
+                                results[lang] = result
+                        elif lang in ('javascript', 'typescript'):
+                            # Check if package.json exists via VFS or disk
+                            has_pkg = self._materialize_config_file("package.json") or \
+                                      (self.project_root / "package.json").exists()
+                            if has_pkg:
+                                result = self.install_dependencies_from_package_json()
+                                if result and result.successful > 0:
+                                    results[lang] = result
+                        elif lang == 'go':
+                            has_mod = self._materialize_config_file("go.mod") or \
+                                      (self.project_root / "go.mod").exists()
+                            if has_mod:
+                                result = self.install_dependencies_from_go_mod()
+                                if result and result.successful > 0:
+                                    results[lang] = result
+                        elif lang == 'java':
+                            has_pom = self._materialize_config_file("pom.xml") or \
+                                      (self.project_root / "pom.xml").exists()
+                            if has_pom:
+                                result = self.install_dependencies_from_pom_xml()
+                                if result and result.successful > 0:
+                                    results[lang] = result
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            return results
     
     def install_dependency_for_language(self, package_name: str, language: Optional[str] = None, version: Optional[str] = None) -> InstallationResult:
-        """
-        Install a dependency for a specific language.
-        
-        If language is None, tries all supported package managers in order:
-        Python (pip) → JavaScript (npm) → Go (go get) → Java (Maven)
-        
-        For Java, attempts to parse Maven coordinates from package_name
-        (format: 'groupId:artifactId' or 'groupId:artifactId:version').
-        
-        CRITICAL: Materializes config files from VFS to disk before installation.
-        
-        Args:
-            package_name: Package name or Maven coordinates for Java
-            language: Target language (python, javascript, typescript, go, java)
-            version: Optional version specifier
-            
-        Returns:
-            InstallationResult with status and message
-        """
-        try:
-            # ========================================================================
-            # PHASE 1: Materialize relevant config files based on language
-            # ========================================================================
-            if language is not None:
-                language_lower = language.lower()
-                
-                # Materialize config files for the target language
-                if language_lower == "java":
-                    self._materialize_config_file("pom.xml")
-                    self._materialize_config_file("build.gradle")
-                    self._materialize_config_file("build.gradle.kts")
-                
-                elif language_lower in ("javascript", "typescript"):
-                    self._materialize_config_file("package.json")
-                    self._materialize_config_file("package-lock.json")
-                
-                elif language_lower == "go":
-                    self._materialize_config_file("go.mod")
-                    self._materialize_config_file("go.sum")
-            
-            # ========================================================================
-            # PHASE 2: Install dependency for the specified language
-            # ========================================================================
-            if language is not None:
-                language_lower = language.lower()
-                
-                if language_lower == "python":
-                    return self.install_from_import(package_name)
-                
-                elif language_lower in ("javascript", "typescript"):
-                    return self.install_npm_package(package_name, version)
-                
-                elif language_lower == "go":
-                    return self.install_go_module(package_name)
-                
-                elif language_lower == "java":
-                    # Parse Maven coordinates from package_name
-                    # Expected format: 'groupId:artifactId' or 'groupId:artifactId:version'
-                    parts = package_name.split(':')
-                    if len(parts) >= 2:
-                        group_id = parts[0]
-                        artifact_id = parts[1]
-                        maven_version = parts[2] if len(parts) > 2 else version
-                        return self.install_maven_dependency(group_id, artifact_id, maven_version)
+            """
+            Install a dependency for a specific language.
+
+            If language is None, tries all supported package managers in order:
+            Python (pip) → JavaScript (npm) → Go (go get) → Java (Maven)
+
+            For Java, attempts to parse Maven coordinates from package_name
+            (format: 'groupId:artifactId' or 'groupId:artifactId:version').
+
+            CRITICAL: Materializes config files from VFS to disk before installation.
+
+            Args:
+                package_name: Package name or Maven coordinates for Java
+                language: Target language (python, javascript, typescript, go, java)
+                version: Optional version specifier
+
+            Returns:
+                InstallationResult with status and message
+            """
+            try:
+                # ========================================================================
+                # PHASE 1: Materialize relevant config files based on language
+                # ========================================================================
+                if language is not None:
+                    language_lower = language.lower()
+
+                    # Materialize config files for the target language
+                    if language_lower == "java":
+                        self._materialize_config_file("pom.xml")
+                        self._materialize_config_file("build.gradle")
+                        self._materialize_config_file("build.gradle.kts")
+
+                    elif language_lower in ("javascript", "typescript", "tsx"):
+                        self._materialize_config_file("package.json")
+                        self._materialize_config_file("package-lock.json")
+
+                    elif language_lower == "go":
+                        self._materialize_config_file("go.mod")
+                        self._materialize_config_file("go.sum")
+
+                # ========================================================================
+                # PHASE 2: Install dependency for the specified language
+                # ========================================================================
+                if language is not None:
+                    language_lower = language.lower()
+
+                    if language_lower == "python":
+                        return self.install_from_import(package_name)
+
+                    elif language_lower in ("javascript", "typescript", "tsx"):
+                        return self.install_npm_package(package_name, version)
+
+                    elif language_lower == "go":
+                        return self.install_go_module(package_name)
+
+                    elif language_lower == "java":
+                        # Parse Maven coordinates from package_name
+                        # Expected format: 'groupId:artifactId' or 'groupId:artifactId:version'
+                        parts = package_name.split(':')
+                        if len(parts) >= 2:
+                            group_id = parts[0]
+                            artifact_id = parts[1]
+                            maven_version = parts[2] if len(parts) > 2 else version
+                            return self.install_maven_dependency(group_id, artifact_id, maven_version)
+                        else:
+                            # Cannot parse as Maven coordinates
+                            return InstallationResult(
+                                package=package_name,
+                                status=InstallResult.FAILED,
+                                message=(
+                                    f"Invalid Java dependency format: '{package_name}'. "
+                                    "Use Maven coordinates format: 'groupId:artifactId' or 'groupId:artifactId:version'"
+                                )
+                            )
+
                     else:
-                        # Cannot parse as Maven coordinates
                         return InstallationResult(
                             package=package_name,
                             status=InstallResult.FAILED,
-                            message=(
-                                f"Invalid Java dependency format: '{package_name}'. "
-                                "Use Maven coordinates format: 'groupId:artifactId' or 'groupId:artifactId:version'"
-                            )
+                            message=f"Unsupported language: {language}"
                         )
-                
+
                 else:
-                    return InstallationResult(
-                        package=package_name,
-                        status=InstallResult.FAILED,
-                        message=f"Unsupported language: {language}"
-                    )
-            
-            else:
-                # Auto-detection: try all supported package managers in order
-                # Python first (most common)
-                result = self.install_from_import(package_name)
-                if result.status == InstallResult.SUCCESS:
+                    # Auto-detection: try all supported package managers in order
+                    # Python first (most common)
+                    result = self.install_from_import(package_name)
+                    if result.status == InstallResult.SUCCESS:
+                        return result
+
+                    # Try npm (JavaScript/TypeScript)
+                    result = self.install_npm_package(package_name, version)
+                    if result.status == InstallResult.SUCCESS:
+                        return result
+
+                    # Try go
+                    result = self.install_go_module(package_name)
+                    if result.status == InstallResult.SUCCESS:
+                        return result
+
+                    # Try Java: check if package_name looks like Maven coordinates
+                    if ':' in package_name:
+                        parts = package_name.split(':')
+                        if len(parts) >= 2:
+                            group_id = parts[0]
+                            artifact_id = parts[1]
+                            maven_version = parts[2] if len(parts) > 2 else version
+                            result = self.install_maven_dependency(group_id, artifact_id, maven_version)
+                            if result.status == InstallResult.SUCCESS:
+                                return result
+
+                    # Return last result (go) if all failed
                     return result
-                
-                # Try npm (JavaScript/TypeScript)
-                result = self.install_npm_package(package_name, version)
-                if result.status == InstallResult.SUCCESS:
-                    return result
-                
-                # Try go
-                result = self.install_go_module(package_name)
-                if result.status == InstallResult.SUCCESS:
-                    return result
-                
-                # Try Java: check if package_name looks like Maven coordinates
-                if ':' in package_name:
-                    parts = package_name.split(':')
-                    if len(parts) >= 2:
-                        group_id = parts[0]
-                        artifact_id = parts[1]
-                        maven_version = parts[2] if len(parts) > 2 else version
-                        result = self.install_maven_dependency(group_id, artifact_id, maven_version)
-                        if result.status == InstallResult.SUCCESS:
-                            return result
-                
-                # Return last result (go) if all failed
-                return result
-        
-        except Exception as e:
-            return InstallationResult(
-                package=package_name,
-                status=InstallResult.FAILED,
-                message=str(e)
-            )
+
+            except Exception as e:
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message=str(e)
+                )
     
     
     def detect_missing_dependencies_from_errors(self, error_message: str, language: str) -> List[str]:
@@ -2624,7 +2689,7 @@ def list_installed_packages_tool(
             else:
                 try:
                     result = subprocess.run(
-                        ['npm', 'list', '--json', '--depth=0'],
+                        [resolve_executable('npm'), 'list', '--json', '--depth=0'],
                         capture_output=True,
                         text=True,
                         encoding='utf-8',

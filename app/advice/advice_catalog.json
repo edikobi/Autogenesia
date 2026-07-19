@@ -114,6 +114,21 @@
     },    
     
     {
+      "id": "ADV-G13",
+      "name": "API Contract Bridge Protocol (Zero-Overlap Rule)",
+      "category": "general",
+      "description": "Framework for integrating backend and frontend by defining a strict API contract first, then implementing each side sequentially to avoid analysis paralysis and expensive token waste.",
+      "when_to_use": "When a task requires simultaneous changes to both backend (database/logic) and frontend (UI), causing the agent to overthink without producing artifacts."
+    },
+    {
+      "id": "ADV-G14",
+      "name": "Atomic Slicing Imperative (Vertical Chunks Only)",
+      "category": "general",
+      "description": "Methodology for breaking down large, overwhelming tasks into small, executable vertical slices to avoid context overload and excessive token consumption.",
+      "when_to_use": "When a task involves modifying more than 3 files or adding >50 lines of logic, and the agent falls into endless reasoning without producing output."
+    },
+
+    {
       "id": "ADV-E01",
       "name": "Caching Strategy Design",
       "category": "existing_project",

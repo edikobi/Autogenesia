@@ -337,10 +337,12 @@ def _detect_language(file_path: str) -> Optional[str]:
     ext = Path(file_path).suffix.lower()
     if ext == '.py': return 'python'
     if ext in ('.js', '.jsx'): return 'javascript'
-    if ext in ('.ts', '.tsx'): return 'typescript'
+    if ext == '.ts': return 'typescript'
+    if ext == '.tsx': return 'tsx'
     if ext == '.go': return 'go'
     if ext == '.java': return 'java'
     return None
+
 
 
 def _get_possible_import_names(file_path: str, lang: str, virtual_fs: Any) -> List[str]:
@@ -357,7 +359,7 @@ def _get_possible_import_names(file_path: str, lang: str, virtual_fs: Any) -> Li
         if len(path_obj.parts) > 1:
             names.append(stem)
             
-    elif lang in ('javascript', 'typescript'):
+    elif lang in ('javascript', 'typescript', 'tsx'):
         # JS/TS: usually relative. Search for path suffix (smart suffix).
         # src/components/Button.tsx -> look for "components/Button"
         parts = list(path_obj.parent.parts) + [stem]

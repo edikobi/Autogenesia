@@ -76,11 +76,16 @@ async def _translate_with_gemini_flash_lite(text: str) -> str:
 
     messages = [{"role": "user", "content": prompt}]
 
+    from config.intermediate_agent_models import get_intermediate_model
+    translator_model, _, translator_provider = get_intermediate_model("tester_translator", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
     result = await call_llm(
-        model=cfg.MODEL_GEMINI_FLASH_LITE,
+        model=translator_model,
         messages=messages,
         temperature=0.2,
         max_tokens=min(len(text) * 2, 8000),
+        preferred_provider=translator_provider,
+        is_intermediate=True,
     )
 
     if result and result.strip():

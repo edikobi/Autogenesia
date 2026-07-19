@@ -83,12 +83,15 @@ from rich.text import Text
 from rich.syntax import Syntax
 from rich.layout import Layout
 from rich import box
+from config.provider_models import PROVIDER_MODELS
 
 # Импорты проекта
 from config.settings import cfg
 from app.history.manager import HistoryManager
 from app.history.storage import Thread, Message
 from app.utils.token_counter import TokenCounter
+from app.utils.tester_translator import translate_tester_report
+from app.agents.tester import TesterReport
 
 
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
@@ -356,190 +359,90 @@ COLORS = {
 
 # Доступные модели оркестратора для выбора С ПОДРОБНЫМИ ОПИСАНИЯМИ
 # Формат: (key, model_id, short_name, description)
-AVAILABLE_ORCHESTRATOR_MODELS = [
-    (
-        "1",
-        cfg.MODEL_GPT_5_2_Codex,
-        "GPT-5.2 Codex",
-        "Новая модель от OpenAI, отзывы очень хорошие."
-    ),
-    (
-        "2",
-        cfg.MODEL_SONNET_4_5,
-        "Claude Sonnet 4.6",
-        "Рабочая лошадка. Хорошо работает с инструментами, неплохо анализирует."
-    ),
-    (
-        "3",
-        cfg.MODEL_SONNET_4_6,
-        "Claude Sonnet 5",
-        "Новая рабочая лошадка, говорят, лучше прошлой."
-    ),
-    (
-        "4",
-        cfg.MODEL_OPUS_4_5,
-        "Claude Opus 4.5",
-        "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Также контекстное окно всего 200к токенов"
-    ),
-    (
-        "5",
-        cfg.MODEL_OPUS_4_8,
-        "Claude Opus 4.8",
-        "Гигант мысли! Только для ОЧЕНЬ серьёзных задач. Очень дорогой! Контекстное окно  1 млн. токенов"
-    ),
-    (
-        "6",
-        cfg.MODEL_GEMINI_3_PRO,
-        "✨ Gemini 3.1 Pro",
-        "Сложная модель, но исполнительная. Огромное окно 1 млн токенов. Не особо любит пользоваться инструментами. Относительно дешёвая."
-    ),
-    (
-        "7",
-        cfg.MODEL_DEEPSEEK_REASONER,
-        "DeepSeek V4 PRO",
-        "Неплохо думает, но маленькое контекстное окно и слегка 'туповат' для сложных задач. В новых проектах может быть хорош. ОЧЕНЬ дешёвый!"
-    ),
-    (
-        "8",
-        cfg.MODEL_Kimi_K_2_7_Code,
-        "Kimi K 2.7 Code",
-        "Очень неплохой китайский ИИ, но Маленький контекст (200к)"
-    ),
-    (
-        "9",
-        cfg.MODEL_QWEN_3_7_Plus,
-        "Qwen3.7 Plus",
-        "ИИ от китайцев, дешевый с неплохим знанием кода"
-    ),
-    (
-        "10",
-        cfg.MODEL_Xiaomi_MiMo_V2_5_PRO,
-        "Xiaomi: MiMo-V2.5-Pro",
-        "Нахваливают эту модель, но должна быть хотя бы топ за свои деньги"
-    ),
-    
-    (
-        "11",
-        cfg.MODEL_GLM_5_2,
-        "GLM 5.2",
-        "Говорят, что передовая модель"
-    ),
-    (
-        "12",
-        cfg.MODEL_QWEN_3_7_MAX,
-        "Qwen 3.7 Max",
-        "Это флагманская модель в серии Qwen3.7 от Alibaba"
-    ),
-    
-    (
-        "13",
-        cfg.MODEL_MiniMax_M3,
-        "MiniMAX M3",
-        "Бьют рейтинги в тестах, как все китайцы"
-    ),
-    (
-        "14",
-        cfg.MODEL_Grok_4_3,
-        "Grok 4.3",
-        "Контекстное окно 1 млн., вроде особо не пиздит."
-    ),
-    
-]
+# [REMOVED] Duplicate shadowing definition of _build_available_models (without role parameter).
+# The correct definition above (with role="orchestrator" parameter) is the sole source of truth.
+# This duplicate caused TypeError: _build_available_models() takes 0 positional arguments but 1 was given
+# def _build_available_models():
+#     """Dynamically builds list of available models based on configured provider keys."""
+#     available = cfg.get_available_providers()
+#     models = []
+#     key_counter = 1
+#     for provider in available:
+#         for model_id, display_name, description in PROVIDER_MODELS.get(provider, []):
+#             models.append((str(key_counter), model_id, display_name, description))
+#             key_counter += 1
+#     # Fallback: if no providers available, return empty list
+#     return models
+#
+#     available = cfg.get_available_providers()
+#     models = []
+#     key_counter = 1
+#     for provider in available:
+#         for model_id, display_name, description in PROVIDER_MODELS.get(provider, []):
+#             models.append((str(key_counter), model_id, display_name, description))
+#             key_counter += 1
+#     # Fallback: if no providers available, return empty list
+#     return models
+
+
+
+
+
+def _build_available_models(role="orchestrator"):
+    """Dynamically builds list of available models filtered by role with provider-aware sorting.
+
+    Uses get_role_models to return only models appropriate for the given
+    role (orchestrator or generator) from each configured provider.
+    Providers are sorted by: selected agent provider first, then manually
+    entered providers in order, then remaining providers.
+
+    Args:
+        role: Either 'orchestrator' or 'generator'
+
+    Returns:
+        List of (key, model_id, tagged_name, description) tuples.
+        Empty list if no providers are available.
+    """
+    from config.provider_models import get_role_models
+    available = cfg.get_available_providers()
+
+    # Sort providers by priority
+    selected = cfg.get_selected_agent_provider()
+    manual = cfg.get_manually_entered_providers()
+
+    sorted_providers = []
+    # First: selected agent provider
+    if selected and selected in available:
+        sorted_providers.append(selected)
+    # Then: manually entered providers in order
+    for p in manual:
+        if p in available and p not in sorted_providers:
+            sorted_providers.append(p)
+    # Then: remaining providers
+    for p in available:
+        if p not in sorted_providers:
+            sorted_providers.append(p)
+
+    models = []
+    key_counter = 1
+    for provider in sorted_providers:
+        for model_id, display_name, description in get_role_models(provider, role):
+            tagged_name = f"[{provider.upper()}] {display_name}"
+            models.append((str(key_counter), model_id, tagged_name, description))
+            key_counter += 1
+    return models
+
+
+
+AVAILABLE_ORCHESTRATOR_MODELS = _build_available_models("orchestrator")
+_available_orchestrator_old = []
 
 # 
 
 # Доступные модели генератора для выбора С ПОДРОБНЫМИ ОПИСАНИЯМИ
 # Формат: (key, model_id, short_name, description)
-AVAILABLE_GENERATOR_MODELS = [
-    (
-        "1",
-        cfg.MODEL_NORMAL,
-        "DeepSeek V4 Flash",
-        "Базовая модель. Быстрая, дешёвая, хорошо справляется с простыми задачами генерации(Маленькое контекстное окно, особенно исходящее)."
-    ),
-    (
-        "2",
-        cfg.MODEL_GLM_5_Turbo,
-        "GLM 5.0 Turbo",
-        "Китайская модель от Zhipu AI."
-    ),
-    (
-        "3",
-        cfg.MODEL_HAIKU_4_5,
-        "Claude Haiku 4.5",
-        "Лёгкая модель от Anthropic. Самая лучшая и испольнительная, но и дороже всех."
-    ),
-
-    (
-        "4",
-        cfg.MODEL_GEMINI_3_FLASH,
-        "Gemini 3.5 flash",
-        "(крайне рекомендуется)Быстрая модель Google через OpenRouter. Хорошо подходит для генерации кода"
-    ),
-
-    (
-        "5",
-        cfg.MODEL_GPT_5_1_Codex_MINI,
-        "GPT-5.1-Codex-Mini",
-        "Младшая модель CODEX от OpenAI, минимально думает"
-    ),
-    
-    (
-        "6",
-        cfg.MODEL_Grok_4_3,
-        "Grok 4.3",
-        "Контекстное окно 1 млн., вроде особо не пиздит."
-    ),
-
-    (
-        "7",
-        cfg. MODEL_Nemotron_3_ULTRA,
-        "Nemotron 3 ULTRA",
-        "Одна из лучших открытых моделей от NVIDIA, НО ВСЕГО 262К, а выходной вообще 16к контекста"
-    ),
-
-    (
-        "8",
-        cfg.MODEL_QWEN_3_7_MAX,
-        "Qwen 3.7 Max",
-        "Это флагманская модель в серии Qwen3.7 от Alibaba"
-    ),
-    
-    (
-        "9",
-        cfg.MODEL_DEEPSEEK_REASONER,
-        "Deepseek V4 Pro",
-        "Уважаемый Дипсик"
-    ),
-    
-    (
-        "10",
-        cfg.MODEL_QWEN_3_7_Plus,
-        "Qwen3.7 Plus",
-        "Один из лучших китайских ИИ"
-    ),
-    (
-        "11",
-        cfg.MODEL_MiniMax_M3,
-        "MiniMAX M3",
-        "Огромные выходные токены (более 500к) контекста"
-    ),
-    
-    (
-        "12",
-        cfg.MODEL_GLM_5_2,
-        "GLM 5.2",
-        "Говорят, что передовая модель"
-    ),
-    
-    (
-        "13",
-        cfg.MODEL_Kimi_K_2_7_Code,
-        "Kimi K 2.7 Code",
-        "Очень неплохой китайский ИИ, но маленький контекст"
-    ),
-    
-]
+AVAILABLE_GENERATOR_MODELS = _build_available_models("generator")
+_available_generator_old = []  # Old static list (kept for syntax compatibility)
 
 
 # ============================================================================
@@ -565,8 +468,16 @@ class AppState:
         self.use_router: bool = cfg.ROUTER_ENABLED  # Использовать роутер или фикс. модель
         self.fixed_orchestrator_model: Optional[str] = None  # Фиксированная модель
         
-        # NEW: Настройки модели генератора
-        self.generator_model: str = cfg.AGENT_MODELS.get("code_generator", cfg.MODEL_NORMAL)
+        # NEW: Настройки модели генератора (dynamic default via provider-aware selection)
+        try:
+            from config.intermediate_agent_models import get_generator_model_for_agent
+            _gen_model_id, _, _ = get_generator_model_for_agent(
+                cfg.get_available_providers(),
+                preferred_provider=cfg.get_selected_agent_provider(),
+            )
+            self.generator_model: str = _gen_model_id
+        except (ValueError, ImportError):
+            self.generator_model: str = cfg.MODEL_NORMAL
         
         # Кэш сообщений сессии в памяти
         self.session_messages: List[Dict[str, str]] = []
@@ -609,7 +520,18 @@ class AppState:
         """Возвращает текущую модель оркестратора (или None если роутер)"""
         if self.use_router:
             return None
-        return self.fixed_orchestrator_model or cfg.ORCHESTRATOR_SIMPLE_MODEL
+        if self.fixed_orchestrator_model:
+            return self.fixed_orchestrator_model
+        # Dynamic fallback from available provider (preferred provider first)
+        try:
+            from config.intermediate_agent_models import get_orchestrator_model_for_agent
+            model, _, _ = get_orchestrator_model_for_agent(
+                cfg.get_available_providers(),
+                preferred_provider=cfg.get_selected_agent_provider(),
+            )
+            return model
+        except (ValueError, ImportError):
+            return cfg.MODEL_NORMAL
     
     def get_current_generator_model(self) -> str:
         """Возвращает текущую модель генератора"""
@@ -631,8 +553,8 @@ def load_user_settings() -> Dict[str, Any]:
     
     default_settings = {
         "prefilter_mode": cfg.PREFILTER_DEFAULT_MODE,
-        "prefilter_model": cfg.AGENT_MODELS.get("pre_filter", cfg.MODEL_NORMAL),
-        "generator_model": cfg.AGENT_MODELS.get("code_generator", cfg.MODEL_NORMAL),
+        "prefilter_model": None,  # Dynamic selection via get_orchestrator_model_for_agent
+        "generator_model": None,  # Dynamic selection via get_generator_model_for_agent
         "use_router": cfg.ROUTER_ENABLED,
         "fixed_orchestrator_model": None,
         "enable_type_checking": False,
@@ -711,7 +633,18 @@ def apply_user_settings(settings: Dict[str, Any]) -> None:
     """
     state.prefilter_mode = settings.get("prefilter_mode", "normal")
     state.prefilter_model = settings.get("prefilter_model")
-    state.generator_model = settings.get("generator_model", cfg.MODEL_NORMAL)
+    state.generator_model = settings.get("generator_model")
+    if not state.generator_model:
+        # Dynamic fallback via provider-aware selection
+        try:
+            from config.intermediate_agent_models import get_generator_model_for_agent
+            model_id, _, _ = get_generator_model_for_agent(
+                cfg.get_available_providers(),
+                preferred_provider=cfg.get_selected_agent_provider(),
+            )
+            state.generator_model = model_id
+        except (ValueError, ImportError):
+            state.generator_model = cfg.MODEL_NORMAL
     state.use_router = settings.get("use_router", True)
     state.fixed_orchestrator_model = settings.get("fixed_orchestrator_model")
     state.enable_type_checking = settings.get("enable_type_checking", False)
@@ -796,7 +729,10 @@ def prompt_with_navigation(
             all_choices.extend(['q', 'quit', 'exit', 'выход', 'в'])
         
         try:
-            result = Prompt.ask(prompt_text, choices=all_choices, default=default, show_choices=False)
+            if default is not None:
+                result = Prompt.ask(prompt_text, choices=all_choices, default=default, show_choices=False)
+            else:
+                result = Prompt.ask(prompt_text, choices=all_choices, show_choices=False)
         except KeyboardInterrupt:
             console.print()  # Новая строка после ^C
             raise QuitException()
@@ -805,7 +741,10 @@ def prompt_with_navigation(
             raise QuitException()
     else:
         try:
-            result = Prompt.ask(prompt_text, default=default)
+            if default is not None:
+                result = Prompt.ask(prompt_text, default=default)
+            else:
+                result = Prompt.ask(prompt_text)
         except KeyboardInterrupt:
             console.print()
             raise QuitException()
@@ -817,7 +756,6 @@ def prompt_with_navigation(
     check_navigation(result)
     
     return result
-
 
 def confirm_with_navigation(prompt_text: str, default: bool = False) -> bool:
     """
@@ -982,6 +920,7 @@ def print_main_menu():
     pf_model_name = cfg.get_model_display_name(state.prefilter_model) if state.prefilter_model else "Авто"
     menu.add_row("[8]", f"🔬 Настройки Pre-filter: [{pf_mode_label} | {pf_model_name}]")
     
+    menu.add_row("[10]", "🔑 Настройки провайдеров API")
     menu.add_row("[9]", "📖 О программе")
     menu.add_row("[0]", "🚪 Выход")
     
@@ -1357,11 +1296,19 @@ async def run_prefilter_analysis(
         # Определяем режим Pre-filter
         prefilter_mode = PreFilterMode.ADVANCED if mode == "advanced" else PreFilterMode.NORMAL
         
-        # Определяем модель: если не указана, берём из конфига
+        # Определяем модель: если не указана, выбираем динамически
         actual_model = model
         if actual_model is None:
-            actual_model = cfg.AGENT_MODELS.get("pre_filter") or cfg.MODEL_NORMAL
-            console.print(f"   [dim]Модель (из конфига AGENT_MODELS['pre_filter']):[/] [bold]{actual_model}[/]")
+            try:
+                from config.intermediate_agent_models import get_orchestrator_model_for_agent
+                actual_model, _, _ = get_orchestrator_model_for_agent(
+                    cfg.get_available_providers(),
+                    preferred_provider=cfg.get_selected_agent_provider(),
+                )
+                console.print(f"   [dim]Модель (dynamic selection):[/] [bold]{actual_model}[/]")
+            except (ValueError, ImportError):
+                actual_model = cfg.MODEL_NORMAL
+                console.print(f"   [dim]Модель (fallback):[/] [bold]{actual_model}[/]")
         
         model_display = cfg.get_model_display_name(actual_model)
         console.print(f"   [dim]Модель (итоговая):[/] [bold]{model_display}[/] ({actual_model})")
@@ -1748,10 +1695,16 @@ def print_code_block(code: str, filepath: str = "", language: str = "python"):
     Отображает блок кода с подсветкой синтаксиса.
     Усекает вывод, если количество строк превышает лимит, сохраняя читаемость терминала.
     """
+    
+    
+    if code is None:
+        console.print(f"[yellow]⚠️ Содержимое файла отсутствует: {filepath}[/]")
+        return
+
     MAX_DISPLAY_LINES = 100
     lines = code.splitlines()
     total_lines = len(lines)
-    
+        
     # Формируем заголовок с общим количеством строк
     if filepath:
         title = f"📄 {filepath} [dim]({total_lines} строк)[/]"
@@ -4362,7 +4315,15 @@ async def handle_ask_mode(query: str):
                 })
         except Exception as e:
             logger.error(f"Ошибка роутера: {e}", exc_info=True)
-            model = cfg.ORCHESTRATOR_SIMPLE_MODEL
+            # Dynamic fallback via provider-aware selection (NOT hardcoded OpenRouter)
+            try:
+                from config.intermediate_agent_models import get_orchestrator_model_for_agent
+                model, _, _ = get_orchestrator_model_for_agent(
+                    cfg.get_available_providers(),
+                    preferred_provider=cfg.get_selected_agent_provider(),
+                )
+            except (ValueError, ImportError):
+                model = cfg.MODEL_NORMAL
             model_name = get_model_short_name(model)
             console.print(f"[yellow]⚠️ Ошибка роутера, используется модель по умолчанию: {model_name}[/]")
             
@@ -5707,7 +5668,69 @@ async def handle_agent_mode(query: str):
             "duration_ms": result.duration_ms,
         })
 
-    # === STAGED CODE BLOCK'и (уже показаны выше через VFS) ===
+    # === STAGED CODE BLOCK'и (показываем через VFS или fallback на code_blocks) ===
+    staged_files_displayed = False
+    try:
+        vfs = getattr(state.pipeline, 'vfs', None)
+        if vfs is not None:
+            staged_files = vfs.get_staged_files()
+            if staged_files:
+                console.print(f"\n[bold]📦 Все staged CODE BLOCK'и ({len(staged_files)} файл(ов)):[/]\n")
+                for file_path in staged_files:
+                    try:
+                        staged_content = vfs.read_file(file_path)
+                        if staged_content is None:
+                            logger.warning(f"VFS: staged content is None for {file_path}")
+                            continue
+                        
+                        original_content = vfs.read_file_original(file_path)
+                        is_new = original_content is None
+                        
+                        if is_new:
+                            status_icon = "🆕 НОВЫЙ"
+                            border_color = "green"
+                            line_count = len(staged_content.splitlines())
+                            title = f"{status_icon} {file_path} ({line_count} строк)"
+                        else:
+                            status_icon = "📝 ИЗМЕНЁН"
+                            border_color = "cyan"
+                            staged_lines = set(staged_content.splitlines())
+                            original_lines = set(original_content.splitlines())
+                            added = len(staged_lines - original_lines)
+                            removed = len(original_lines - staged_lines)
+                            title = f"{status_icon} {file_path} [green]+{added}[/]/[red]-{removed}[/]"
+                        
+                        suffix = Path(file_path).suffix.lower()
+                        if suffix == ".py":
+                            language = "python"
+                        elif suffix in (".js", ".jsx", ".mjs"):
+                            language = "javascript"
+                        elif suffix in (".ts", ".tsx"):
+                            language = "typescript"
+                        elif suffix == ".java":
+                            language = "java"
+                        elif suffix == ".go":
+                            language = "go"
+                        else:
+                            language = "text"
+                        
+                        syntax_obj = Syntax(staged_content, language, theme="monokai", line_numbers=True, word_wrap=False)
+                        console.print(Panel(syntax_obj, title=title, border_style=border_color, padding=(0, 1)))
+                    except Exception as e:
+                        logger.warning(f"Ошибка отображения staged файла {file_path}: {e}")
+                        console.print(f"[yellow]⚠️ Не удалось отобразить {file_path}[/]")
+                        continue
+                staged_files_displayed = True
+    except Exception as e:
+        logger.warning(f"Ошибка доступа к VFS: {e}")
+
+    if not staged_files_displayed and result.code_blocks:
+        console.print(f"\n[bold]📝 Итоговый код ({len(result.code_blocks)} блоков):[/]\n")
+        for block in result.code_blocks:
+            console.print(f"[cyan]Файл:[/] `{block.file_path}` | [cyan]Режим:[/] {block.mode}")
+            print_code_block(block.code, block.file_path)        
+        return
+        
         if staged_files_displayed:
             pass  # VFS уже показал все файлы — ничего не дублируем
         elif result.code_blocks:
@@ -6062,7 +6085,8 @@ async def handle_agent_mode(query: str):
                 console.print("\n[dim]⏳ Запускаем Тестировщика...[/]")
                 report = await state.pipeline.run_tester(
                     user_additional_input=additional_input,
-                    tester_model=tester_model
+                    tester_model=tester_model,
+                        on_tool_call=_tester_streaming_handler,
                 )
                 
                 if report and report.success and report.translated_report:
@@ -6074,6 +6098,197 @@ async def handle_agent_mode(query: str):
                         padding=(1, 2)
                     ))
                     
+                    # Post-report interactive menu
+                    _post_menu_action = None
+                    
+                    try:
+                        import termios as _termios
+                        _termios.tcflush(sys.stdin, _termios.TCIFLUSH)
+                    except (ImportError, AttributeError, OSError):
+                        # Windows fallback
+                        try:
+                            import msvcrt as _msvcrt
+                            while _msvcrt.kbhit():
+                                _msvcrt.getwch()
+                        except ImportError:
+                            pass
+                    
+                    while True:
+                        console.print()
+                        console.print("[bold]Действие после отчёта:[/]")
+                        
+                        console.print("[bold green][1][/] ✅ Применить изменения")
+                        console.print("[bold yellow][2][/] ✏️  Отправить на доработку")
+                        console.print("[bold red][3][/] ❌ Выйти в главное меню")
+                        console.print("[bold blue]\\[/план][/] 📄 Экспорт отчёта в .md")
+                        console.print("[dim]💡 Или введите вопрос Тестировщику[/]")
+                        console.print()
+
+                        try:
+                            user_input = prompt_with_navigation(
+                                "Ваш выбор (1/2/3/план или текст вопроса)",
+                            )
+                        except (BackException, BackToMenuException, QuitException) as nav_exc:
+                            await state.pipeline.discard_pending_changes()
+                            state.pipeline.cleanup_tester()
+                            raise nav_exc
+
+                        # ── FIX: игнор пустого ввода (защита от residual '\n') ──
+                        if not user_input or not user_input.strip():
+                            continue
+
+                        # /план export
+                        if user_input.strip().lower() in ("/план", "/plan"):
+                            
+                            try:
+                                export_content = report.original_report or report.translated_report or ""
+                                if export_content:
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    export_filename = f"tester_report_{timestamp}.md"
+                                    export_path = os.path.abspath(export_filename)
+                                    with open(export_path, "w", encoding="utf-8") as f:
+                                        f.write(export_content)
+                                    print_success(f"Отчёт экспортирован: {export_path}")
+                                else:
+                                    print_warning("Нет содержимого для экспорта")
+                            except Exception as export_err:
+                                print_error(f"Ошибка экспорта: {export_err}")
+                            continue
+
+                        if user_input.strip() == "1":
+                            # Apply changes
+                            console.print("\n[dim]⏳ Применение изменений...[/]")
+                            try:
+                                apply_result = await state.pipeline.apply_pending_changes()
+                                if apply_result.success:
+                                    print_success(f"✅ Изменения применены в {len(apply_result.applied_files)} файл(ах)!")
+                                    if apply_result.applied_files:
+                                        console.print("\n[dim]Изменённые файлы:[/]")
+                                        for f in apply_result.applied_files:
+                                            console.print(f"   [green]✓[/] {f}")
+                                    if apply_result.backup_session_id:
+                                        console.print(f"\n[dim]💾 Бэкап создан: [cyan]{apply_result.backup_session_id}[/][/]")
+                                    if state.is_new_project and state.project_dir:
+                                        if await build_project_indexes(state.project_dir):
+                                            state.project_index = await load_project_index(state.project_dir)
+                                            state.is_new_project = False
+                                    elif state.project_dir:
+                                        await run_incremental_update(state.project_dir)
+                                        state.project_index = await load_project_index(state.project_dir)
+                                        if state.pipeline:
+                                            state.pipeline.project_index = state.project_index
+                                else:
+                                    print_error("Не удалось применить изменения")
+                                    if apply_result.errors:
+                                        for err in apply_result.errors:
+                                            console.print(f"   [red]• {err}[/]")
+                            except Exception as e:
+                                logger.error(f"Error applying changes after tester: {e}", exc_info=True)
+                                print_error(f"Ошибка при применении: {e}")
+                            state.pipeline.cleanup_tester()
+                            _post_menu_action = "break"
+                            break
+
+                        elif user_input.strip() == "2":
+                            # Send for revision
+                            try:
+                                attach_report = Confirm.ask("Прикрепить отчёт Тестировщика к замечанию?", default=True)
+                            except KeyboardInterrupt:
+                                attach_report = False
+
+                            try:
+                                user_feedback = Prompt.ask("[bold cyan]Замечания[/]")
+                            except KeyboardInterrupt:
+                                user_feedback = ""
+
+                            if user_feedback.strip():
+                                console.print("\n[dim]⏳ Запускаем цикл доработки...[/]")
+                                new_result = await state.pipeline.run_feedback_cycle(
+                                    user_feedback=user_feedback,
+                                    history=history,
+                                    tester_report=report.original_report if attach_report else None,
+                                )
+                                if new_result and new_result.success:
+                                    result = new_result
+                                    console.print("\n[bold green]✅ Код исправлен! Проверьте новые изменения.[/]")
+                                    state.pipeline.cleanup_tester()
+                                    _post_menu_action = "continue"
+                                    break
+                                else:
+                                    print_warning("Не удалось исправить код по вашей критике")
+                                    state.pipeline.cleanup_tester()
+                                    _post_menu_action = "continue"
+                                    break
+                            else:
+                                print_warning("Замечание не может быть пустым")
+                                continue
+
+                        elif user_input.strip() == "3":
+                            await state.pipeline.discard_pending_changes()
+                            exit_response = "## 🚫 Запрос отменён\n\n*Пользователь вышел после отчёта Тестировщика.*"
+                            await save_message("assistant", exit_response)
+                            print_info("Изменения отменены")
+                            state.pipeline.cleanup_tester()
+                            raise BackToMenuException()
+
+                        else:
+                            # Follow-up question to Tester
+                            console.print("\n[dim]⏳ Тестировщик отвечает...[/]")
+                            try:
+                                followup_result = await state.pipeline.ask_tester_followup(user_input)
+                            except Exception as fu_err:
+                                logger.error(f"Followup error: {fu_err}", exc_info=True)
+                                print_error(f"Ошибка при обращении к Тестировщику: {fu_err}")
+                                continue
+
+                            if followup_result is None:
+                                print_error("Тестировщик недоступен")
+                                continue
+
+                            fu_response = followup_result.get("response", "")
+                            fu_is_new_report = followup_result.get("is_new_report", False)
+                            fu_new_report = followup_result.get("new_report", None)
+
+                            if not fu_response:
+                                print_warning("Тестировщик не смог ответить")
+                                continue
+
+                            if fu_is_new_report and fu_new_report:
+                                try:
+                                    translated = await translate_tester_report(fu_new_report)
+                                except Exception:
+                                    translated = fu_new_report
+
+                                report = TesterReport(
+                                    original_report=fu_new_report,
+                                    translated_report=translated,
+                                    success=True,
+                                )
+
+                                console.print()
+                                console.print(Panel(
+                                    Markdown(report.translated_report),
+                                    title="🧪 Обновлённый отчёт Тестировщика",
+                                    border_style="blue",
+                                    padding=(1, 2),
+                                ))
+                            else:
+                                console.print()
+                                console.print(Panel(
+                                    Markdown(fu_response),
+                                    title="🧪 Пояснение Тестировщика",
+                                    border_style="cyan",
+                                    padding=(1, 2),
+                                ))
+
+                            continue
+
+                    # Handle post-menu action
+                    if _post_menu_action == "break":
+                        break
+                    elif _post_menu_action == "continue":
+                        continue                    
+                    
                     # Post-report menu (NO option 4 to prevent infinite recursion)
                     console.print()
                     console.print("[bold]Действие после отчёта:[/]")
@@ -6083,23 +6298,8 @@ async def handle_agent_mode(query: str):
                     console.print()
                     
                     post_choice = None
-                    while post_choice is None:
-                        try:
-                            post_choice = prompt_with_navigation(
-                                "Ваш выбор (1/2/3)",
-                                choices=["1", "2", "3"],
-                                default=None
-                            )
-                        except (BackException, BackToMenuException, QuitException) as nav_exc:
-                            await state.pipeline.discard_pending_changes()
-                            raise nav_exc
-                        except Exception:
-                            console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Выйти[/]")
-                            post_choice = None
-                        else:
-                            if post_choice not in ("1", "2", "3"):
-                                console.print("[yellow]Выберите вариант: [bold]1[/] — Применить, [bold]2[/] — Доработать, [bold]3[/] — Выйти[/]")
-                                post_choice = None
+                    while False:  # Old menu disabled — replaced by interactive loop above
+                        pass
                     
                     if post_choice == "1":
                         # Apply changes — same logic as outer choice == "1"
@@ -7290,7 +7490,7 @@ async def main_menu_loop():
         try:
             choice = Prompt.ask(
                 "Выбор",
-                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
                 default="1"
             )
         except KeyboardInterrupt:
@@ -7416,6 +7616,13 @@ async def main_menu_loop():
         elif choice == "9":
             print_about()
 
+# Настройки провайдеров API
+        elif choice == "10":
+            try:
+                await select_provider_settings()
+            except (BackException, BackToMenuException, QuitException):
+                pass
+
 # ============================================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================================
@@ -7480,10 +7687,17 @@ def show_diff_in_pager(diffs: Dict[str, str]) -> None:
         console.print("[dim]Нет изменений для отображения[/]")
         return
 
+    # ФИЛЬТРУЕМ None-значения
+    diffs = {k: v for k, v in diffs.items() if v is not None and k != "__deletions__"}
+    if not diffs:
+        console.print("[dim]Нет изменений для отображения[/]")
+        return
+
     total_lines = 0
     for fp, txt in diffs.items():
         if fp != "__deletions__":
-            total_lines += len(txt.splitlines())
+            total_lines += len(txt.splitlines())    
+    
     DIFF_INLINE_THRESHOLD = 80
     inline_mode = total_lines <= DIFF_INLINE_THRESHOLD
 
@@ -7585,6 +7799,286 @@ def show_diff_in_pager(diffs: Dict[str, str]) -> None:
                 except Exception:
                     pass
 
+async def select_provider_settings() -> None:
+    """Interactive provider API key and reasoning_effort configuration."""
+    console.print("\n[bold]🔑 Настройки провайдеров API[/]\n")
+
+    keys = cfg.get_provider_keys()
+    available = cfg.get_available_providers()
+    all_configured = cfg.get_all_configured_providers()
+
+    # Multi-provider notification
+    if len(available) > 1:
+        console.print(f"[yellow]⚠️ Доступно несколько провайдеров: {', '.join(available)}[/]")
+        try:
+            default_provider = cfg.get_default_provider_for_agent()
+            console.print(f"[yellow]   Для AI-агентов будет использован: {default_provider}[/]")
+        except ValueError:
+            pass
+        console.print("[dim]   Вы можете отключить ненужные провайдеры ниже.[/]\n")
+
+    # Provider status display
+    for provider in ["openrouter", "routerai", "deepseek", "glm", "opencode_go", "qwencloud"]:
+        api_key = keys.get(provider, {}).get("api_key", "")
+        if not api_key:
+            status = "❌ отсутствует"
+        else:
+            masked = (api_key[:6] + "..." + api_key[-4:]) if len(api_key) > 10 else "***"
+            if cfg.is_provider_disabled(provider):
+                status = f"🚫 отключён (ключ: {masked})"
+            else:
+                status = f"✅ активен (ключ: {masked})"
+        console.print(f"  [{provider}] {status}")
+
+    console.print(f"\n  Текущий reasoning_effort: {keys.get('reasoning_effort', 'high')}")
+
+    # Expanded menu
+    console.print("\n[bold]Выберите действие:[/]")
+    console.print("  [1] Настроить API ключ провайдера")
+    console.print("  [2] Изменить reasoning_effort")
+    console.print("  [3] Отключить/включить провайдер")
+    console.print("  [4] Проверить действительность ключей")
+    console.print("  [5] Выбрать провайдер для фоновых ИИ-агентов")
+    console.print("  [0] Назад")
+
+    try:
+        choice = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5"], default="0")
+    except (BackException, BackToMenuException, QuitException):
+        raise
+
+    if choice == "1":
+        # Enter key with cancel
+        providers = ["openrouter", "routerai", "deepseek", "glm", "opencode_go", "qwencloud"]
+        console.print("\n[bold]Выберите провайдер:[/]")
+        for i, p in enumerate(providers, 1):
+            console.print(f"  [{i}] {p}")
+        console.print("  [0] Отмена (вернуться назад)")
+
+        try:
+            provider_input = console.input("\n[bold]Ваш выбор:[/]").strip()
+        except (BackException, BackToMenuException, QuitException):
+            raise
+
+        if provider_input == "0" or provider_input.lower() in ("назад", "back", "отмена", "cancel"):
+            return
+
+        try:
+            provider_idx = int(provider_input) - 1
+            if provider_idx < 0 or provider_idx >= len(providers):
+                print_error("Неверный выбор")
+                return
+            provider = providers[provider_idx]
+        except ValueError:
+            print_error("Неверный ввод")
+            return
+
+        console.print(f"[dim]Введите '0', 'назад', 'back' или 'отмена' для отмены.[/]")
+        try:
+            new_key = Prompt.ask(f"API ключ для {provider}", default="")
+        except (BackException, BackToMenuException, QuitException):
+            raise
+
+        if not new_key or new_key.strip().lower() in ("0", "назад", "back", "отмена", "cancel"):
+            print_info("Ввод ключа отменён")
+            return
+
+        keys[provider]["api_key"] = new_key.strip()
+        cfg.record_provider_entry(provider)
+        cfg.save_provider_keys(keys)
+        print_success(f"API ключ для {provider} сохранён")
+
+        try:
+            check = Confirm.ask("Проверить действительность ключа?", default=False)
+        except KeyboardInterrupt:
+            check = False
+
+        if check:
+            await check_provider_keys([provider])
+
+    elif choice == "2":
+        # Reasoning effort
+        options = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        console.print("\n[bold]Выберите reasoning_effort:[/]")
+        for i, opt in enumerate(options, 1):
+            if opt == "max":
+                console.print(f"  [{i}] {opt}  [dim](максимальное рассуждение; для deepseek-v4-pro и glm-5.2)[/]")
+            elif opt == "xhigh":
+                console.print(f"  [{i}] {opt}  [dim](для deepseek-v4-pro эквивалентен max)[/]")
+            elif opt == "none":
+                console.print(f"  [{i}] {opt}  [dim](рассуждение отключено)[/]")
+            else:
+                console.print(f"  [{i}] {opt}")
+
+        try:
+            effort_choice = Prompt.ask("Выбор", choices=[str(i) for i in range(1, len(options) + 1)])
+        except (BackException, BackToMenuException, QuitException):
+            raise
+
+        keys["reasoning_effort"] = options[int(effort_choice) - 1]
+        cfg.save_provider_keys(keys)
+        print_success(f"reasoning_effort установлен: {keys['reasoning_effort']}")
+
+    elif choice == "3":
+        # Toggle provider
+        all_providers = cfg.get_all_configured_providers()
+        if not all_providers:
+            print_warning("Нет настроенных провайдеров")
+        else:
+            console.print("\n[bold]Провайдеры:[/]")
+            for i, p in enumerate(all_providers, 1):
+                if cfg.is_provider_disabled(p):
+                    status = "🚫 отключён"
+                else:
+                    status = "✅ активен"
+                console.print(f"  [{i}] {p} — {status}")
+            console.print("  [0] Назад")
+
+            try:
+                toggle_input = console.input("\n[bold]Выберите провайдер для переключения:[/]").strip()
+            except (BackException, BackToMenuException, QuitException):
+                raise
+
+            if toggle_input == "0":
+                pass
+            else:
+                try:
+                    toggle_idx = int(toggle_input) - 1
+                    if 0 <= toggle_idx < len(all_providers):
+                        selected_provider = all_providers[toggle_idx]
+                        if cfg.is_provider_disabled(selected_provider):
+                            cfg.enable_provider(selected_provider)
+                            print_success(f"Провайдер {selected_provider} включён")
+                        else:
+                            cfg.disable_provider(selected_provider)
+                            print_success(f"Провайдер {selected_provider} отключён")
+                    else:
+                        print_error("Неверный выбор")
+                except ValueError:
+                    print_error("Неверный ввод")
+
+    elif choice == "4":
+        # Check keys
+        await check_provider_keys()
+
+    elif choice == "5":
+        # Select agent provider
+        avail = cfg.get_available_providers()
+        if len(avail) < 2:
+            console.print("[dim]Доступен только один провайдер — выбор не нужен.[/]")
+        else:
+            current_selected = cfg.get_selected_agent_provider()
+            console.print(f"\n[bold]Выбор провайдера для фоновых ИИ-агентов:[/]")
+            if current_selected:
+                console.print(f"  [dim]Текущий выбор: {current_selected.upper()}[/]")
+            else:
+                console.print(f"  [dim]Текущий выбор: Авто (по порядку ввода ключей)[/]")
+            console.print()
+            console.print("  [0] Авто (по порядку ввода ключей)")
+            for i, p in enumerate(avail, 1):
+                console.print(f"  [{i}] {p.upper()}")
+
+            try:
+                agent_choice = console.input("\n[bold]Ваш выбор:[/]").strip()
+            except (BackException, BackToMenuException, QuitException):
+                raise
+
+            if agent_choice == "0":
+                cfg.set_selected_agent_provider(None)
+                print_success("Провайдер для агентов: Авто")
+            else:
+                try:
+                    agent_idx = int(agent_choice) - 1
+                    if 0 <= agent_idx < len(avail):
+                        selected = avail[agent_idx]
+                        cfg.set_selected_agent_provider(selected)
+                        print_success(f"Провайдер для агентов: {selected.upper()}")
+                    else:
+                        print_error("Неверный выбор")
+                except ValueError:
+                    print_error("Неверный ввод")
+
+    # Rebuild model lists after any change
+    global AVAILABLE_ORCHESTRATOR_MODELS, AVAILABLE_GENERATOR_MODELS
+    AVAILABLE_ORCHESTRATOR_MODELS = _build_available_models("orchestrator")
+    AVAILABLE_GENERATOR_MODELS = _build_available_models("generator")
+
+
+# AVAILABLE_GENERATOR_MODELS = _build_available_models()  # [REMOVED] Stale call without role argument — overwrites correct line above
+
+async def check_provider_keys(providers: list = None) -> None:
+    """Check validity of provider API keys by sending a minimal test request."""
+    from app.llm.api_client import call_llm, LLMAPIError
+
+    if providers is None:
+        providers = cfg.get_all_configured_providers()
+
+    if not providers:
+        print_warning("Нет настроенных провайдеров для проверки")
+        return
+
+    console.print("\n[bold]🔍 Проверка ключей провайдеров...[/]\n")
+
+    for provider in providers:
+        api_key = cfg.get_provider_keys().get(provider, {}).get("api_key", "")
+        masked = (api_key[:6] + "..." + api_key[-4:]) if (api_key and len(api_key) > 10) else ("***" if api_key else "")
+
+        if cfg.is_provider_disabled(provider):
+            console.print(f"  [{provider}] ключ: {masked} 🚫 отключён")
+            continue
+
+        test_model = cfg.get_test_model_for_provider(provider)
+
+        try:
+            await call_llm(
+                model=test_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                temperature=0,
+                preferred_provider=provider,
+            )
+            console.print(f"  [{provider}] ключ: {masked} ✅ действителен (модель: {test_model})")
+        except LLMAPIError as e:
+            console.print(f"  [{provider}] ключ: {masked} ❌ ошибка: {str(e)[:100]}")
+        except Exception as e:
+            console.print(f"  [{provider}] ключ: {masked} ❌ ошибка: {str(e)[:100]}")
+
+
+def _tester_streaming_handler(name: str, args: Dict[str, Any], result_preview: str, success: bool):
+    """Display real-time visualization of Tester tool invocations."""
+    icons = {
+        "run_ruff": "🔍",
+        "check_environment": "🖥️",
+        "compile_code": "⚙️",
+        "run_code": "▶️",
+        "git_diff_vfs_disk": "📝",
+        "write_test_file": "📄",
+        "read_file": "📖",
+        "read_code_chunk": "🧩",
+        "search_code": "🔎",
+        "grep_search": "🔎",
+        "list_files": "📂",
+        "show_file_relations": "🔗",
+        "read_line_context": "📏",
+        "list_installed_packages": "📋",
+        "search_pypi": "📚",
+        "web_search": "🌐",
+        "fetch_webpage": "🌐",
+        "analyze_webpage": "🔍",
+        "check_security": "🔒",
+        "extract_media": "🖼️",
+        "get_advice": "💡",
+    }
+    icon = icons.get(name, "🛠️")
+
+    args_str = str(args)
+    if len(args_str) > 80:
+        args_str = args_str[:77] + "..."
+
+    status = "[green]OK[/]" if success else "[red]FAIL[/]"
+
+    console.print(f"   [cyan]🧪 Tester:[/] {icon} [bold]{name}[/]([dim]{args_str}[/]) -> {status}")
+
+
 
 
 if __name__ == "__main__":
@@ -7596,5 +8090,6 @@ if __name__ == "__main__":
     
     # Запуск
     asyncio.run(main())
+
 
 

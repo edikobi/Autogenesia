@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.utils.executable_resolver import resolve_executable
+import sys
 
 import logging
 import shutil
@@ -26,24 +28,98 @@ logger = logging.getLogger(__name__)
 class JsTsAdapter(LanguageAdapter):
     """Adapter for JavaScript and TypeScript files."""
     
-    def __init__(self, project_root: Optional[Path] = None, vfs: Optional['VirtualFileSystem'] = None):
-        """Initialize JS/TS adapter and check tool availability."""
-        self.project_root = project_root
-        self.vfs = vfs  # VFS reference for reading staged files
-        self._node_available = shutil.which('node') is not None
-        self._npm_available = shutil.which('npm') is not None
-        self._eslint_available = shutil.which('eslint') is not None
-        self._prettier_available = shutil.which('prettier') is not None
-        self._ts_node_available = shutil.which('ts-node') is not None
-        self._tsc_available = shutil.which('tsc') is not None
-        
-        logger.debug(
-            f"JsTsAdapter initialized: "
-            f"node={self._node_available}, npm={self._npm_available}, "
-            f"eslint={self._eslint_available}, prettier={self._prettier_available}, "
-            f"ts-node={self._ts_node_available}, tsc={self._tsc_available}, "
-            f"vfs={'yes' if self.vfs else 'no'}"
-        )
+    def __init__(self, project_root: Optional[Path] = None, vfs: Optional['VirtualFileSystem'] = None, node_modules_bin_dir: Optional[Path] = None):
+            """Initialize JS/TS adapter and check tool availability."""
+            self.project_root = project_root
+            self.vfs = vfs  # VFS reference for reading staged files
+            self._node_available = shutil.which('node') is not None
+            self._npm_available = shutil.which('npm') is not None
+            self._eslint_available = shutil.which('eslint') is not None
+            self._prettier_available = shutil.which('prettier') is not None
+            self._ts_node_available = shutil.which('ts-node') is not None
+            self._tsc_available = shutil.which('tsc') is not None
+
+            # Initialize path attributes
+            self._tsc_path: Optional[str] = None
+            self._eslint_path: Optional[str] = None
+            self._prettier_path: Optional[str] = None
+            self._ts_node_path: Optional[str] = None
+
+            # Determine local node_modules/.bin directory
+            effective_root = node_modules_bin_dir or project_root
+            self._node_modules_bin_dir = node_modules_bin_dir or (project_root / 'node_modules' / '.bin' if project_root else None)
+
+            # Local tool resolution logic
+            tools = [
+                ('tsc', '_tsc_available', '_tsc_path'),
+                ('eslint', '_eslint_available', '_eslint_path'),
+                ('prettier', '_prettier_available', '_prettier_path'),
+                ('ts-node', '_ts_node_available', '_ts_node_path'),
+            ]
+
+            for tool_name, available_attr, path_attr in tools:
+                if getattr(self, available_attr):
+                    # Already found globally — store resolved path
+                    setattr(self, path_attr, resolve_executable(tool_name))
+                else:
+                    # Not found globally — check local node_modules/.bin
+                    local_path = self._resolve_local_tool(tool_name)
+                    if local_path:
+                        setattr(self, available_attr, True)
+                        setattr(self, path_attr, local_path)
+
+            logger.debug(
+                f"JsTsAdapter initialized: "
+                f"node={self._node_available}, npm={self._npm_available}, "
+                f"eslint={self._eslint_available} (path={self._eslint_path}), "
+                f"prettier={self._prettier_available} (path={self._prettier_path}), "
+                f"ts-node={self._ts_node_available} (path={self._ts_node_path}), "
+                f"tsc={self._tsc_available} (path={self._tsc_path}), "
+                f"vfs={'yes' if self.vfs else 'no'}, "
+                f"node_modules_bin={self._node_modules_bin_dir}"
+            )
+
+    def _resolve_local_tool(self, tool_name: str) -> Optional[str]:
+            """Resolve a tool's full path using multi-level fallback strategy.
+
+            Checks local node_modules/.bin first, then falls back to global resolution.
+            On Windows, checks .cmd wrapper before the extensionless binary.
+            """
+            if self._node_modules_bin_dir:
+                if sys.platform == 'win32':
+                    # Windows: check .cmd first to avoid WinError 193
+                    tool_cmd = self._node_modules_bin_dir / f'{tool_name}.cmd'
+                    try:
+                        if tool_cmd.exists():
+                            return str(tool_cmd)
+                    except PermissionError:
+                        pass
+                    tool_path = self._node_modules_bin_dir / tool_name
+                    try:
+                        if tool_path.exists():
+                            return str(tool_path)
+                    except PermissionError:
+                        pass
+                else:
+                    # Non-Windows: check extensionless first, then .cmd
+                    tool_path = self._node_modules_bin_dir / tool_name
+                    try:
+                        if tool_path.exists():
+                            return str(tool_path)
+                    except PermissionError:
+                        pass
+                    tool_cmd = self._node_modules_bin_dir / f'{tool_name}.cmd'
+                    try:
+                        if tool_cmd.exists():
+                            return str(tool_cmd)
+                    except PermissionError:
+                        pass
+
+            # Global fallback
+            global_path = resolve_executable(tool_name)
+            if shutil.which(tool_name):
+                return str(global_path)
+            return None
     
     def _extract_imports_from_code(self, code: str) -> List[str]:
         """
@@ -215,649 +291,920 @@ class JsTsAdapter(LanguageAdapter):
         return self._node_available
     
     def lint(self, code: str, file_path: str, fix: bool = False) -> Tuple[str, List[Dict]]:
-        """
-        Lint code using eslint.
-        
-        Args:
-            code: Source code to lint
-            file_path: Path to the file (for context)
-            fix: Whether to apply auto-fixes
-            
-        Returns:
-            Tuple of (fixed_code, issues_list)
-        """
-        fixed_code = code
-        issues = []
-        
-        # Check if Node.js is available - this is required for JS/TS
-        if not self._node_available:
-            logger.warning("node not available, returning error")
-            issues.append({
-                'line': 1,
-                'column': 1,
-                'message': 'Node.js runtime not available. Please install Node.js to validate JavaScript/TypeScript files.',
-                'severity': 'error',
-            })
-            return code, issues
-        
-        if not self._eslint_available:
-            logger.warning("eslint not available, adding warning")
-            issues.append({
-                'line': None,
-                'column': None,
-                'message': 'ESLint not available. Install eslint for detailed linting. Basic syntax check will be performed with node --check.',
-                'severity': 'warning',
-            })
-            # Continue without eslint - we can still do basic syntax check
-        
-        temp_dir = None
-        try:
-            temp_dir = tempfile.mkdtemp()
-            
-            # Write code to temp file using just the filename
-            temp_file = Path(temp_dir) / Path(file_path).name
-            temp_file.write_text(code, encoding='utf-8')
-            
-            # Apply fixes if requested and eslint is available
-            if fix and self._eslint_available:
-                try:
-                    result = subprocess.run(
-                        ['eslint', '--fix', str(temp_file)],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    # Read back fixed code
-                    fixed_code = temp_file.read_text(encoding='utf-8')
-                except subprocess.TimeoutExpired:
-                    issues.append({
-                        'line': None,
-                        'column': None,
-                        'message': 'eslint --fix timed out',
-                        'severity': 'warning',
-                    })
-                except Exception as e:
-                    logger.warning(f"eslint --fix failed: {e}")
-            
-            # Run eslint to get issues if available
-            if self._eslint_available:
-                try:
-                    result = subprocess.run(
-                        ['eslint', '--format', 'json', str(temp_file)],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    
-                    # Parse JSON output
-                    if result.stdout.strip():
-                        try:
-                            eslint_output = json.loads(result.stdout)
-                            if eslint_output and len(eslint_output) > 0:
-                                file_results = eslint_output[0]
-                                for msg in file_results.get('messages', []):
-                                    issues.append({
-                                        'line': msg.get('line'),
-                                        'column': msg.get('column'),
-                                        'message': msg.get('message', ''),
-                                        'severity': 'error' if msg.get('severity', 2) == 2 else 'warning',
-                                    })
-                        except json.JSONDecodeError:
-                            logger.warning("Failed to parse eslint JSON output")
-                            # Parse stderr for errors
-                            if result.stderr:
-                                for line in result.stderr.split('\n'):
-                                    if line.strip():
-                                        issues.append({
-                                            'line': None,
-                                            'column': None,
-                                            'message': line.strip(),
-                                            'severity': 'error',
-                                        })
-                    
-                    # Check return code
-                    if result.returncode != 0 and not any(i.get('severity') == 'error' for i in issues):
-                        # eslint found issues but we didn't parse them
-                        if result.stderr:
-                            issues.append({
-                                'line': None,
-                                'column': None,
-                                'message': f'eslint error: {result.stderr[:200]}',
-                                'severity': 'error',
-                            })
-                            
-                except subprocess.TimeoutExpired:
-                    issues.append({
-                        'line': None,
-                        'column': None,
-                        'message': 'eslint timed out',
-                        'severity': 'error',
-                    })
-                except Exception as e:
-                    logger.warning(f"eslint check failed: {e}")
-                    issues.append({
-                        'line': None,
-                        'column': None,
-                        'message': f'eslint error: {e}',
-                        'severity': 'warning',
-                    })
-            else:
-                # Fallback to node --check for basic syntax validation (JS only)
-                if not file_path.endswith('.ts') and not file_path.endswith('.tsx'):
-                    try:
-                        result = subprocess.run(
-                            ['node', '--check', str(temp_file)],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                        )
-                        
-                        if result.returncode != 0:
-                            # Parse node --check output for errors
-                            error_output = result.stderr or result.stdout
-                            if error_output:
-                                for line in error_output.split('\n'):
-                                    if line.strip():
-                                        issues.append({
-                                            'line': None,
-                                            'column': None,
-                                            'message': line.strip(),
-                                            'severity': 'error',
-                                        })
-                            else:
-                                issues.append({
-                                    'line': None,
-                                    'column': None,
-                                    'message': f'node --check failed with exit code {result.returncode}',
-                                    'severity': 'error',
-                                })
-                    except subprocess.TimeoutExpired:
-                        issues.append({
-                            'line': None,
-                            'column': None,
-                            'message': 'node --check timed out',
-                            'severity': 'error',
-                        })
-                    except Exception as e:
-                        logger.warning(f"node --check failed: {e}")
-                        issues.append({
-                            'line': None,
-                            'column': None,
-                            'message': f'node --check error: {e}',
-                            'severity': 'error',
-                        })
-                elif self._tsc_available:
-                    # For TypeScript, use tsc for syntax check
-                    try:
-                        result = subprocess.run(
-                            ['tsc', '--noEmit', '--skipLibCheck', str(temp_file)],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                        )
-                        
-                        if result.returncode != 0:
-                            error_output = result.stderr or result.stdout
-                            if error_output:
-                                for line in error_output.split('\n'):
-                                    if line.strip():
-                                        issues.append({
-                                            'line': None,
-                                            'column': None,
-                                            'message': line.strip(),
-                                            'severity': 'error',
-                                        })
-                            else:
-                                issues.append({
-                                    'line': None,
-                                    'column': None,
-                                    'message': f'tsc failed with exit code {result.returncode}',
-                                    'severity': 'error',
-                                })
-                    except subprocess.TimeoutExpired:
-                        issues.append({
-                            'line': None,
-                            'column': None,
-                            'message': 'tsc timed out',
-                            'severity': 'error',
-                        })
-                    except Exception as e:
-                        logger.warning(f"tsc check failed: {e}")
-                        issues.append({
-                            'line': None,
-                            'column': None,
-                            'message': f'tsc error: {e}',
-                            'severity': 'error',
-                        })
-                else:
-                    # TypeScript file but no tsc available
+                """
+                Lint code using eslint.
+
+                Args:
+                    code: Source code to lint
+                    file_path: Path to the file (for context)
+                    fix: Whether to apply auto-fixes
+
+                Returns:
+                    Tuple of (fixed_code, issues_list)
+                """
+                fixed_code = code
+                issues = []
+
+                # Check if Node.js is available - this is required for JS/TS
+                if not self._node_available:
+                    logger.warning("node not available, returning error")
                     issues.append({
                         'line': 1,
                         'column': 1,
-                        'message': 'TypeScript compiler (tsc) not available. Please install TypeScript to validate .ts/.tsx files.',
+                        'message': 'Node.js runtime not available. Please install Node.js to validate JavaScript/TypeScript files.',
                         'severity': 'error',
                     })
-        
-        finally:
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-        
-        return fixed_code, issues
+                    return code, issues
+
+                if not self._eslint_available:
+                    logger.warning("eslint not available, adding warning")
+                    issues.append({
+                        'line': None,
+                        'column': None,
+                        'message': 'ESLint not available. Install eslint for detailed linting. Basic syntax check will be performed with node --check.',
+                        'severity': 'warning',
+                    })
+                    # Continue without eslint - we can still do basic syntax check
+
+                temp_dir = None
+                try:
+                    temp_dir = tempfile.mkdtemp()
+
+                    # Write code to temp file using just the filename
+                    temp_file = Path(temp_dir) / Path(file_path).name
+                    temp_file.write_text(code, encoding='utf-8')
+
+                    # Apply fixes if requested and eslint is available
+                    if fix and self._eslint_available:
+                        try:
+                            result = subprocess.run(
+                                [resolve_executable('eslint'), '--fix', str(temp_file)],
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                            )
+                            # Read back fixed code
+                            fixed_code = temp_file.read_text(encoding='utf-8')
+                        except subprocess.TimeoutExpired:
+                            issues.append({
+                                'line': None,
+                                'column': None,
+                                'message': 'eslint --fix timed out',
+                                'severity': 'warning',
+                            })
+                        except Exception as e:
+                            logger.warning(f"eslint --fix failed: {e}")
+
+                    # Run eslint to get issues if available
+                    if self._eslint_available:
+                        try:
+                            result = subprocess.run(
+                                [resolve_executable('eslint'), '--format', 'json', str(temp_file)],
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                            )
+
+                            # Parse JSON output
+                            if result.stdout.strip():
+                                try:
+                                    eslint_output = json.loads(result.stdout)
+                                    if eslint_output and len(eslint_output) > 0:
+                                        file_results = eslint_output[0]
+                                        for msg in file_results.get('messages', []):
+                                            issues.append({
+                                                'line': msg.get('line'),
+                                                'column': msg.get('column'),
+                                                'message': msg.get('message', ''),
+                                                'severity': 'error' if msg.get('severity', 2) == 2 else 'warning',
+                                            })
+                                except json.JSONDecodeError:
+                                    logger.warning("Failed to parse eslint JSON output")
+                                    # Parse stderr for errors
+                                    if result.stderr:
+                                        for line in result.stderr.split('\n'):
+                                            if line.strip():
+                                                issues.append({
+                                                    'line': None,
+                                                    'column': None,
+                                                    'message': line.strip(),
+                                                    'severity': 'error',
+                                                })
+
+                            # Check return code
+                            if result.returncode != 0 and not any(i.get('severity') == 'error' for i in issues):
+                                # eslint found issues but we didn't parse them
+                                if result.stderr:
+                                    issues.append({
+                                        'line': None,
+                                        'column': None,
+                                        'message': f'eslint error: {result.stderr[:200]}',
+                                        'severity': 'error',
+                                    })
+
+                        except subprocess.TimeoutExpired:
+                            issues.append({
+                                'line': None,
+                                'column': None,
+                                'message': 'eslint timed out',
+                                'severity': 'error',
+                            })
+                        except Exception as e:
+                            logger.warning(f"eslint check failed: {e}")
+                            issues.append({
+                                'line': None,
+                                'column': None,
+                                'message': f'eslint error: {e}',
+                                'severity': 'warning',
+                            })
+                    else:
+                        # Fallback to node --check for basic syntax validation (JS only)
+                        if not file_path.endswith('.ts') and not file_path.endswith('.tsx'):
+                            try:
+                                result = subprocess.run(
+                                    [resolve_executable('node'), '--check', str(temp_file)],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                )
+
+                                if result.returncode != 0:
+                                    # Parse node --check output for errors
+                                    error_output = result.stderr or result.stdout
+                                    if error_output:
+                                        for line in error_output.split('\n'):
+                                            if line.strip():
+                                                issues.append({
+                                                    'line': None,
+                                                    'column': None,
+                                                    'message': line.strip(),
+                                                    'severity': 'error',
+                                                })
+                                    else:
+                                        issues.append({
+                                            'line': None,
+                                            'column': None,
+                                            'message': f'node --check failed with exit code {result.returncode}',
+                                            'severity': 'error',
+                                        })
+                            except subprocess.TimeoutExpired:
+                                issues.append({
+                                    'line': None,
+                                    'column': None,
+                                    'message': 'node --check timed out',
+                                    'severity': 'error',
+                                })
+                            except Exception as e:
+                                logger.warning(f"node --check failed: {e}")
+                                issues.append({
+                                    'line': None,
+                                    'column': None,
+                                    'message': f'node --check error: {e}',
+                                    'severity': 'error',
+                                })
+                        elif self._tsc_available:
+                            try:
+                                tsc_cmd = [self._tsc_path or resolve_executable('tsc'), '--noEmit', '--skipLibCheck']
+                                if file_path.endswith('.tsx'):
+                                    tsc_cmd.extend(['--jsx', 'react'])
+                                tsc_cmd.append(str(temp_file))
+                                result = subprocess.run(
+                                    tsc_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                )
+                                if result.returncode != 0:
+                                    error_output = result.stderr or result.stdout
+                                    if error_output:
+                                        for line in error_output.split('\n'):
+                                            if line.strip():
+                                                issues.append({
+                                                    'line': None,
+                                                    'column': None,
+                                                    'message': line.strip(),
+                                                    'severity': 'error',
+                                                })
+                                    else:
+                                        issues.append({
+                                            'line': None,
+                                            'column': None,
+                                            'message': f'tsc failed with exit code {result.returncode}',
+                                            'severity': 'error',
+                                        })
+                            except subprocess.TimeoutExpired:
+                                issues.append({
+                                    'line': None,
+                                    'column': None,
+                                    'message': 'tsc timed out',
+                                    'severity': 'error',
+                                })
+                            except Exception as e:
+                                logger.warning(f"tsc check failed: {e}")
+                                issues.append({
+                                    'line': None,
+                                    'column': None,
+                                    'message': f'tsc error: {e}',
+                                    'severity': 'error',
+                                })
+
+                        else:
+                            if shutil.which('npx'):
+                                try:
+                                    npx_bin = resolve_executable('npx')
+                                    npx_cmd = [npx_bin, 'tsc', '--noEmit', '--skipLibCheck']
+                                    if file_path.endswith('.tsx'):
+                                        npx_cmd.extend(['--jsx', 'react'])
+                                    npx_cmd.append(str(temp_file))
+                                    result = subprocess.run(
+                                        npx_cmd,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=30,
+                                    )
+                                    if result.returncode != 0:
+                                        error_output = result.stderr or result.stdout
+                                        if error_output:
+                                            for line in error_output.split('\n'):
+                                                if line.strip():
+                                                    issues.append({
+                                                        'line': None,
+                                                        'column': None,
+                                                        'message': line.strip(),
+                                                        'severity': 'error',
+                                                    })
+                                        else:
+                                            issues.append({
+                                                'line': None,
+                                                'column': None,
+                                                'message': f'npx tsc failed with exit code {result.returncode}',
+                                                'severity': 'error',
+                                            })
+                                except subprocess.TimeoutExpired:
+                                    issues.append({
+                                        'line': None,
+                                        'column': None,
+                                        'message': 'npx tsc timed out',
+                                        'severity': 'error',
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"npx tsc check failed: {e}")
+                                    issues.append({
+                                        'line': None,
+                                        'column': None,
+                                        'message': f'npx tsc error: {e}',
+                                        'severity': 'error',
+                                    })
+                            else:
+                                issues.append({
+                                    'line': None,
+                                    'column': None,
+                                    'message': 'TypeScript compiler (tsc) not available. Install TypeScript: npm install -D typescript',
+                                    'severity': 'warning',
+                                })
+
+                finally:
+                    if temp_dir:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+
+                return fixed_code, issues
 
     
     def format_code(self, code: str, file_path: str) -> str:
-        """
-        Format code using prettier.
-        
-        Args:
-            code: Source code to format
-            file_path: Path to the file (for context)
-            
-        Returns:
-            Formatted code
-        """
-        if not self._prettier_available:
-            logger.warning("prettier not available, skipping format")
-            return code
-        
-        try:
-            result = subprocess.run(
-                ['prettier', '--stdin-filepath', file_path],
-                input=code,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            
-            if result.returncode == 0:
-                return result.stdout
-            else:
-                logger.warning(f"prettier failed: {result.stderr}")
-                return code
-        except Exception as e:
-            logger.warning(f"prettier format failed: {e}")
-            return code
-    
-    def compile_check(self, code: str, file_path: str, project_root: Optional[Path] = None) -> Dict:
-        """Check JavaScript/TypeScript code compilation."""
-        effective_root = project_root or self.project_root
-        
-        # Determine if we should use project root
-        use_project_root = False
-        cwd = None
-        
-        if effective_root:
-            effective_root_path = Path(effective_root)
-            package_json = effective_root_path / 'package.json'
-            node_modules = effective_root_path / 'node_modules'
-            
-            if package_json.exists() or node_modules.exists():
-                use_project_root = True
-                cwd = str(effective_root_path)
-        
-        temp_dir = None
-        try:
-            temp_dir = tempfile.mkdtemp(prefix='js_check_')
-            
-            # Determine file extension
-            if file_path.endswith('.ts') or file_path.endswith('.tsx'):
-                ext = '.ts'
-                is_typescript = True
-            else:
-                ext = '.js'
-                is_typescript = False
-            
-            temp_file = Path(temp_dir) / f"temp_check{ext}"
-            temp_file.write_text(code, encoding='utf-8')
-            
-            # Use TypeScript compiler if available and file is TypeScript
-            if is_typescript and self._tsc_available:
-                result = subprocess.run(
-                    ['tsc', '--noEmit', '--skipLibCheck', str(temp_file)],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=30,
-                    cwd=cwd,
-                )
-                
-                return {
-                    'success': result.returncode == 0,
-                    'stderr': result.stderr,
-                    'stdout': result.stdout,
-                    'exit_code': result.returncode,
-                }
-            
-            # Use Node.js for basic syntax check
-            if self._node_available:
-                result = subprocess.run(
-                    ['node', '--check', str(temp_file)],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=30,
-                    cwd=cwd,
-                )
-                
-                return {
-                    'success': result.returncode == 0,
-                    'stderr': result.stderr,
-                    'stdout': result.stdout,
-                    'exit_code': result.returncode,
-                }
-            
-            return {
-                'success': False,
-                'stderr': 'No JavaScript/TypeScript compiler available',
-                'exit_code': -1,
-            }
-        
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'stderr': 'Compilation timed out',
-                'exit_code': -1,
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'stderr': str(e),
-                'exit_code': -1,
-            }
-        finally:
-            if temp_dir and Path(temp_dir).exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                
-    def compile_check_with_deps(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
             """
-            Check JavaScript/TypeScript code compilation for multiple files together.
-            TypeScript files are compiled together with tsc, JavaScript files are checked individually.
-
-            CRITICAL: For JS/TS projects, we must include ALL project source files,
-            not just the changed files. This is because TypeScript/JavaScript modules
-            may import other project files that need to be present during compilation.
+            Format code using prettier.
 
             Args:
-                files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
-                project_root: Optional project root path
-        
-            Returns:
-                Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
-            """
-            if not files:
-                return {
-                    'success': True,
-                    'results': [],
-                    'stderr': '',
-                    'stdout': '',
-                    'exit_code': 0,
-                }
+                code: Source code to format
+                file_path: Path to the file (for context)
 
-            effective_root = project_root or self.project_root
-            temp_dir = None
+            Returns:
+                Formatted code
+            """
+            if not self._prettier_available:
+                logger.warning("prettier not available, skipping format")
+                return code
 
             try:
-                temp_dir = tempfile.mkdtemp(prefix='js_ts_check_deps_')
-        
-                # Build a map of staged files with MULTIPLE path formats for robust lookup
-                staged_files_map: Dict[str, str] = {}
-                staged_paths_normalized: set = set()
-        
-                for code, file_path in files:
-                    staged_files_map[file_path] = code
-                    forward_slash_path = file_path.replace('\\', '/')
-                    staged_files_map[forward_slash_path] = code
-                    back_slash_path = file_path.replace('/', '\\')
-                    staged_files_map[back_slash_path] = code
-                    normalized_path = str(Path(file_path)).replace('\\', '/')
-                    staged_files_map[normalized_path] = code
-                    staged_paths_normalized.add(forward_slash_path)
-                    staged_paths_normalized.add(normalized_path)
-        
-                # Separate TypeScript and JavaScript files from staged files
-                ts_staged_files = []
-                js_staged_files = []
-        
-                for code, file_path in files:
-                    if file_path.endswith('.ts') or file_path.endswith('.tsx'):
-                        ts_staged_files.append((code, file_path))
-                    else:
-                        js_staged_files.append((code, file_path))
-        
-                # ================================================================
-                # STEP 1: Copy ALL JS/TS files from project to temp directory
-                # ================================================================
-                all_ts_files_in_temp = []
-                all_js_files_in_temp = []
-                processed_rel_paths: set = set()
-        
-                if effective_root and Path(effective_root).exists():
-                    for source_file in Path(effective_root).rglob('*'):
-                        if not (source_file.suffix in ('.js', '.jsx', '.ts', '.tsx')):
-                            continue
-                
-                        try:
-                            rel_path = source_file.relative_to(effective_root)
-                            rel_path_str = str(rel_path).replace('\\', '/')
-                    
-                            parts = rel_path.parts
-                            if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
-                                continue
-                    
-                            processed_rel_paths.add(rel_path_str)
-                            content = None
-                    
-                            if rel_path_str in staged_files_map:
-                                content = staged_files_map[rel_path_str]
-                            elif str(rel_path) in staged_files_map:
-                                content = staged_files_map[str(rel_path)]
-                            elif rel_path_str in staged_paths_normalized:
-                                content = staged_files_map.get(rel_path_str)
-                            else:
-                                content = self._read_file_content(source_file, rel_path_str)
-                    
-                            if content is None:
-                                continue
-                    
-                            temp_file = Path(temp_dir) / rel_path
-                            temp_file.parent.mkdir(parents=True, exist_ok=True)
-                            temp_file.write_text(content, encoding='utf-8')
-                    
-                            if source_file.suffix in ('.ts', '.tsx'):
-                                all_ts_files_in_temp.append(str(temp_file))
-                            else:
-                                all_js_files_in_temp.append(str(temp_file))
-                    
-                        except ValueError:
-                            continue
-                        except Exception as e:
-                            logger.warning(f"Error processing {source_file}: {e}")
-                            continue
-            
-                    tsconfig_path = Path(effective_root) / 'tsconfig.json'
-                    if tsconfig_path.exists():
-                        shutil.copy(str(tsconfig_path), str(Path(temp_dir) / 'tsconfig.json'))
-            
-                    package_json_copied = False
-                    package_json_path = Path(effective_root) / 'package.json'
-                    package_json_content = None
-                    if self.vfs is not None:
-                        package_json_content = self.vfs.read_file('package.json')
-            
-                    if package_json_content is not None:
-                        temp_package_json = Path(temp_dir) / 'package.json'
-                        temp_package_json.write_text(package_json_content, encoding='utf-8')
-                        package_json_copied = True
-                    elif package_json_path.exists():
-                        shutil.copy(str(package_json_path), str(Path(temp_dir) / 'package.json'))
-                        package_json_copied = True
-            
-                    package_lock_path = Path(effective_root) / 'package-lock.json'
-                    if package_lock_path.exists():
-                        shutil.copy(str(package_lock_path), str(Path(temp_dir) / 'package-lock.json'))
-            
-                    npm_available = shutil.which('npm') is not None
-                    if package_json_copied and npm_available:
-                        try:
-                            npm_cmd = [shutil.which('npm') or 'npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'] \
-                                if (Path(temp_dir) / 'package-lock.json').exists() \
-                                else [shutil.which('npm') or 'npm', 'install', '--ignore-scripts', '--no-audit', '--no-fund']
-                    
-                            subprocess.run(
-                                npm_cmd,
-                                capture_output=True,
-                                text=True,
-                                encoding='utf-8',
-                                errors='replace',
-                                timeout=120,
-                                cwd=temp_dir,
-                            )
-                        except Exception as e:
-                            logger.warning(f"Error running npm install: {e}")
-        
-                # ================================================================
-                # STEP 1.5: Include VFS-staged JS/TS files that don't exist on disk
-                # ================================================================
-                if self.vfs is not None:
-                    try:
-                        affected_files = self.vfs.get_staged_files()
-                        for vfs_rel_path in affected_files:
-                            if not any(vfs_rel_path.endswith(ext) for ext in ('.js', '.jsx', '.ts', '.tsx')):
-                                continue
-                    
-                            vfs_path_normalized = vfs_rel_path.replace('\\', '/')
-                            if vfs_path_normalized in processed_rel_paths:
-                                continue
-                    
-                            parts = Path(vfs_rel_path).parts
-                            if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
-                                continue
-                    
-                            content = None
-                            if vfs_path_normalized in staged_files_map:
-                                content = staged_files_map[vfs_path_normalized]
-                            else:
-                                content = self.vfs.read_file(vfs_rel_path)
-                    
-                            if content is None:
-                                continue
-                    
-                            temp_file = Path(temp_dir) / vfs_rel_path
-                            temp_file.parent.mkdir(parents=True, exist_ok=True)
-                            temp_file.write_text(content, encoding='utf-8')
-                    
-                            if vfs_rel_path.endswith('.ts') or vfs_rel_path.endswith('.tsx'):
-                                all_ts_files_in_temp.append(str(temp_file))
-                            else:
-                                all_js_files_in_temp.append(str(temp_file))
-                    
-                            processed_rel_paths.add(vfs_path_normalized)
-                    except Exception as e:
-                        logger.warning(f"Error scanning VFS for additional JS/TS files: {e}")
-        
-                # ================================================================
-                # STEP 2: Write any staged files that don't exist in project yet
-                # ================================================================
-                all_paths = [file_path for _, file_path in files]
-                for code, file_path in files:
-                    rel_path = self._normalize_path_for_temp(code, file_path, effective_root, all_paths)
-                    rel_path_str = str(rel_path).replace('\\', '/')
-                    if rel_path_str in processed_rel_paths:
-                        continue
-            
-                    temp_file = Path(temp_dir) / rel_path
-                    if not temp_file.exists():
-                        temp_file.parent.mkdir(parents=True, exist_ok=True)
-                        temp_file.write_text(code, encoding='utf-8')
-                
-                        if file_path.endswith('.ts') or file_path.endswith('.tsx'):
-                            all_ts_files_in_temp.append(str(temp_file))
-                        else:
-                            all_js_files_in_temp.append(str(temp_file))
-                        processed_rel_paths.add(rel_path_str)
-        
-                # ================================================================
-                # STEP 3: Compile TypeScript files if any
-                # ================================================================
-                individual_results = []
-                if all_ts_files_in_temp and self._tsc_available:
+                result = subprocess.run(
+                    [self._prettier_path or resolve_executable('prettier'), '--stdin-filepath', file_path],
+                    input=code,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if result.returncode == 0:
+                    return result.stdout
+                else:
+                    logger.warning(f"prettier failed: {result.stderr}")
+                    return code
+            except Exception as e:
+                logger.warning(f"prettier format failed: {e}")
+                return code
+    
+    def compile_check(self, code: str, file_path: str, project_root: Optional[Path] = None) -> Dict:
+            """Check JavaScript/TypeScript code compilation."""
+            effective_root = project_root or self.project_root
+
+            # Determine if we should use project root
+            use_project_root = False
+            cwd = None
+
+            if effective_root:
+                effective_root_path = Path(effective_root)
+                package_json = effective_root_path / 'package.json'
+                node_modules = effective_root_path / 'node_modules'
+
+                if package_json.exists() or node_modules.exists():
+                    use_project_root = True
+                    cwd = str(effective_root_path)
+
+            temp_dir = None
+            try:
+                temp_dir = tempfile.mkdtemp(prefix='js_check_')
+
+                # Determine file extension
+                if file_path.endswith('.ts'):
+                    ext = '.ts'
+                    is_typescript = True
+                elif file_path.endswith('.tsx'):
+                    ext = '.tsx'
+                    is_typescript = True
+                else:
+                    ext = '.js'
+                    is_typescript = False
+
+                temp_file = Path(temp_dir) / f"temp_check{ext}"
+                temp_file.write_text(code, encoding='utf-8')
+
+                # Use TypeScript compiler if available and file is TypeScript
+                if is_typescript and self._tsc_available:
+                    tsc_bin = self._tsc_path or resolve_executable('tsc')
+                    cmd = [tsc_bin, '--noEmit', '--skipLibCheck']
+                    if file_path.endswith('.tsx'):
+                        cmd.extend(['--jsx', 'react'])
+                    cmd.append(str(temp_file))
                     result = subprocess.run(
-                        [shutil.which('tsc') or 'tsc', '--noEmit', '--skipLibCheck'] + all_ts_files_in_temp,
+                        cmd,
                         capture_output=True,
                         text=True,
                         encoding='utf-8',
                         errors='replace',
-                        timeout=60,
-                        cwd=temp_dir,
+                        timeout=30,
+                        cwd=cwd,
                     )
-                    for code, file_path in ts_staged_files:
-                        individual_results.append({
-                            'file_path': file_path,
-                            'success': result.returncode == 0,
-                            'stderr': result.stderr if result.returncode != 0 else '',
-                            'stdout': result.stdout,
-                            'exit_code': result.returncode,
-                        })
-                elif ts_staged_files and not self._tsc_available:
-                    for code, file_path in ts_staged_files:
-                        individual_results.append({
-                            'file_path': file_path, 'success': False,
-                            'stderr': 'TypeScript compiler (tsc) not available',
-                            'stdout': '', 'exit_code': -1,
-                        })
-        
-                # ================================================================
-                # STEP 4: Check JavaScript files individually
-                # ================================================================
-                if all_js_files_in_temp and self._eslint_available:
-                    for js_file in all_js_files_in_temp:
-                        result = subprocess.run(
-                            [shutil.which('eslint') or 'eslint', '--no-eslintrc', js_file],
-                            capture_output=True, text=True, encoding='utf-8',
-                            errors='replace', timeout=30, cwd=temp_dir,
-                        )
-                        for code, file_path in js_staged_files:
-                            if file_path in js_file or js_file.endswith(Path(file_path).name):
-                                individual_results.append({
-                                    'file_path': file_path,
-                                    'success': result.returncode == 0,
-                                    'stderr': result.stderr if result.returncode != 0 else '',
-                                    'stdout': result.stdout,
-                                    'exit_code': result.returncode,
-                                })
-                                break
-                elif js_staged_files:
-                    for code, file_path in js_staged_files:
-                        individual_results.append({
-                            'file_path': file_path, 'success': True,
-                            'stderr': '', 'stdout': 'No JavaScript linter available', 'exit_code': 0,
-                        })
-        
-                overall_success = all(r['success'] for r in individual_results) if individual_results else True
+                    return {
+                        'success': result.returncode == 0,
+                        'stderr': result.stderr,
+                        'stdout': result.stdout,
+                        'exit_code': result.returncode,
+                    }
+
+# Fallback for TypeScript when tsc is not available: try npx tsc
+                if is_typescript and not self._tsc_available:
+                    if shutil.which('npx'):
+                        npx_bin = resolve_executable('npx')
+                        npx_cmd = [npx_bin, 'tsc', '--noEmit', '--skipLibCheck']
+                        if file_path.endswith('.tsx'):
+                            npx_cmd.extend(['--jsx', 'react'])
+                        npx_cmd.append(str(temp_file))
+                        try:
+                            result = subprocess.run(
+                                npx_cmd,
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='replace',
+                                timeout=30,
+                                cwd=cwd,
+                            )
+                            return {
+                                'success': result.returncode == 0,
+                                'stderr': result.stderr,
+                                'stdout': result.stdout,
+                                'exit_code': result.returncode,
+                            }
+                        except subprocess.TimeoutExpired:
+                            return {
+                                'success': False,
+                                'stderr': 'Compilation timed out',
+                                'exit_code': -1,
+                            }
+                        except Exception as e:
+                            return {
+                                'success': False,
+                                'stderr': str(e),
+                                'exit_code': -1,
+                            }
+                    else:
+                        return {
+                            'success': False,
+                            'stderr': 'TypeScript compiler (tsc) not available. Install TypeScript: npm install -D typescript',
+                            'exit_code': -1,
+                        }
+
+                # Use Node.js for basic syntax check (JavaScript only)
+                if not is_typescript and self._node_available:
+                    result = subprocess.run(
+                        [resolve_executable('node'), '--check', str(temp_file)],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=30,
+                        cwd=cwd,
+                    )
+
+                    return {
+                        'success': result.returncode == 0,
+                        'stderr': result.stderr,
+                        'stdout': result.stdout,
+                        'exit_code': result.returncode,
+                    }
+# if self._node_available:
+                #     result = subprocess.run(
+                #         [resolve_executable('node'), '--check', str(temp_file)],
+                #         capture_output=True,
+                #         text=True,
+                #         encoding='utf-8',
+                #         errors='replace',
+                #         timeout=30,
+                #         cwd=cwd,
+                #     )
+                #
+                #     return {
+                #         'success': result.returncode == 0,
+                #         'stderr': result.stderr,
+                #         'stdout': result.stdout,
+                #         'exit_code': result.returncode,
+                #     }
+
                 return {
-                    'success': overall_success,
-                    'results': individual_results,
-                    'stderr': '',
-                    'stdout': '',
-                    'exit_code': 0 if overall_success else 1,
+                    'success': False,
+                    'stderr': 'No JavaScript/TypeScript compiler available',
+                    'exit_code': -1,
                 }
-    
+
             except subprocess.TimeoutExpired:
                 return {
                     'success': False,
-                    'results': [{'file_path': fp, 'success': False, 'stderr': 'Compilation timed out', 'exit_code': -1} for _, fp in files],
-                    'stderr': 'Compilation timed out', 'stdout': '', 'exit_code': -1,
+                    'stderr': 'Compilation timed out',
+                    'exit_code': -1,
                 }
             except Exception as e:
-                logger.error(f"JS/TS compilation error: {e}", exc_info=True)
                 return {
                     'success': False,
-                    'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
-                    'stderr': str(e), 'stdout': '', 'exit_code': -1,
+                    'stderr': str(e),
+                    'exit_code': -1,
                 }
             finally:
                 if temp_dir and Path(temp_dir).exists():
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 
+    def compile_check_with_deps(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
+                """
+                Check JavaScript/TypeScript code compilation for multiple files together.
+                TypeScript files are compiled together with tsc, JavaScript files are checked individually.
+
+                CRITICAL: For JS/TS projects, we must include ALL project source files,
+                not just the changed files. This is because TypeScript/JavaScript modules
+                may import other project files that need to be present during compilation.
+
+                Args:
+                    files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
+                    project_root: Optional project root path
+
+                Returns:
+                    Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
+                """
+                if not files:
+                    return {
+                        'success': True,
+                        'results': [],
+                        'stderr': '',
+                        'stdout': '',
+                        'exit_code': 0,
+                    }
+
+                effective_root = project_root or self.project_root
+                temp_dir = None
+
+                try:
+                    temp_dir = tempfile.mkdtemp(prefix='js_ts_check_deps_')
+
+                    # Build a map of staged files with MULTIPLE path formats for robust lookup
+                    staged_files_map: Dict[str, str] = {}
+                    staged_paths_normalized: set = set()
+
+                    for code, file_path in files:
+                        staged_files_map[file_path] = code
+                        forward_slash_path = file_path.replace('\\', '/')
+                        staged_files_map[forward_slash_path] = code
+                        back_slash_path = file_path.replace('/', '\\')
+                        staged_files_map[back_slash_path] = code
+                        normalized_path = str(Path(file_path)).replace('\\', '/')
+                        staged_files_map[normalized_path] = code
+                        staged_paths_normalized.add(forward_slash_path)
+                        staged_paths_normalized.add(normalized_path)
+
+                    # Separate TypeScript and JavaScript files from staged files
+                    ts_staged_files = []
+                    js_staged_files = []
+
+                    for code, file_path in files:
+                        if file_path.endswith('.ts') or file_path.endswith('.tsx'):
+                            ts_staged_files.append((code, file_path))
+                        else:
+                            js_staged_files.append((code, file_path))
+
+                    # ================================================================
+                    # STEP 1: Copy ALL JS/TS files from project to temp directory
+                    # ================================================================
+                    all_ts_files_in_temp = []
+                    all_js_files_in_temp = []
+                    processed_rel_paths: set = set()
+
+                    if effective_root and Path(effective_root).exists():
+                        for source_file in Path(effective_root).rglob('*'):
+                            if not (source_file.suffix in ('.js', '.jsx', '.ts', '.tsx')):
+                                continue
+
+                            try:
+                                rel_path = source_file.relative_to(effective_root)
+                                rel_path_str = str(rel_path).replace('\\', '/')
+
+                                parts = rel_path.parts
+                                if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
+                                    continue
+
+                                processed_rel_paths.add(rel_path_str)
+                                content = None
+
+                                if rel_path_str in staged_files_map:
+                                    content = staged_files_map[rel_path_str]
+                                elif str(rel_path) in staged_files_map:
+                                    content = staged_files_map[str(rel_path)]
+                                elif rel_path_str in staged_paths_normalized:
+                                    content = staged_files_map.get(rel_path_str)
+                                else:
+                                    content = self._read_file_content(source_file, rel_path_str)
+
+                                if content is None:
+                                    continue
+
+                                temp_file = Path(temp_dir) / rel_path
+                                temp_file.parent.mkdir(parents=True, exist_ok=True)
+                                temp_file.write_text(content, encoding='utf-8')
+
+                                if source_file.suffix in ('.ts', '.tsx'):
+                                    all_ts_files_in_temp.append(str(temp_file))
+                                else:
+                                    all_js_files_in_temp.append(str(temp_file))
+
+                            except ValueError:
+                                continue
+                            except Exception as e:
+                                logger.warning(f"Error processing {source_file}: {e}")
+                                continue
+
+                        # [TSX FIX] Читаем tsconfig*.json и jsconfig.json из VFS (самые свежие), 
+                        # если их там нет — берем с диска.
+                        cfg_files_to_copy = set()
+                        
+                        # 1. Собираем имена конфигов, которые есть на диске
+                        for cfg_file in Path(effective_root).glob('tsconfig*.json'):
+                            cfg_files_to_copy.add(cfg_file.name)
+                        if (Path(effective_root) / 'jsconfig.json').exists():
+                            cfg_files_to_copy.add('jsconfig.json')
+                            
+                        # 2. Проверяем, нет ли ИИ-созданных или измененных конфигов в VFS
+                        if self.vfs is not None:
+                            for staged_file in self.vfs.get_staged_files():
+                                if staged_file.startswith('tsconfig') and staged_file.endswith('.json'):
+                                    cfg_files_to_copy.add(staged_file)
+                                elif staged_file == 'jsconfig.json':
+                                    cfg_files_to_copy.add(staged_file)
+                                    
+                        # 3. Читаем и записываем во временную папку
+                        for cfg_name in cfg_files_to_copy:
+                            content = None
+                            if self.vfs is not None:
+                                content = self.vfs.read_file(cfg_name)
+                            
+                            if content is not None:
+                                (Path(temp_dir) / cfg_name).write_text(content, encoding='utf-8')
+                            else:
+                                # Фолбэк: если VFS вернул None, пробуем скопировать с диска
+                                disk_path = Path(effective_root) / cfg_name
+                                if disk_path.exists():
+                                    try:
+                                        shutil.copy(str(disk_path), str(Path(temp_dir) / cfg_name))
+                                    except Exception as e:
+                                        logger.warning(f"Could not copy {cfg_name}: {e}")                        
+                        jsconfig_path = Path(effective_root) / 'jsconfig.json'
+                        if jsconfig_path.exists():
+                            try:
+                                shutil.copy(str(jsconfig_path), str(Path(temp_dir) / 'jsconfig.json'))
+                            except Exception as e:
+                                logger.warning(f"Could not copy jsconfig.json: {e}")
+
+                        package_json_copied = False                        
+                        
+                        package_json_path = Path(effective_root) / 'package.json'
+                        package_json_content = None
+                        if self.vfs is not None:
+                            package_json_content = self.vfs.read_file('package.json')
+
+                        if package_json_content is not None:
+                            temp_package_json = Path(temp_dir) / 'package.json'
+                            temp_package_json.write_text(package_json_content, encoding='utf-8')
+                            package_json_copied = True
+                        elif package_json_path.exists():
+                            shutil.copy(str(package_json_path), str(Path(temp_dir) / 'package.json'))
+                            package_json_copied = True
+
+                        package_lock_path = Path(effective_root) / 'package-lock.json'
+                        if package_lock_path.exists():
+                            shutil.copy(str(package_lock_path), str(Path(temp_dir) / 'package-lock.json'))
+
+                        # [TSX FIX] Symlink node_modules to reuse existing dependencies
+                        node_modules_src = Path(effective_root) / 'node_modules'
+                        node_modules_dst = Path(temp_dir) / 'node_modules'
+                        if node_modules_src.exists() and not node_modules_dst.exists():
+                            try:
+                                if sys.platform == 'win32':
+                                    import ctypes
+                                    ctypes.windll.kernel32.CreateSymbolicLinkW(
+                                        str(node_modules_dst), str(node_modules_src), 1
+                                    )
+                                else:
+                                    os.symlink(node_modules_src, node_modules_dst)
+                                logger.debug(f"Symlinked node_modules from {node_modules_src} to {node_modules_dst}")
+                            except Exception as e:
+                                logger.debug(f"Could not symlink node_modules: {e}")
+
+                        npm_available = shutil.which('npm') is not None                        
+                        if package_json_copied and npm_available:
+                            try:
+                                npm_cmd = [resolve_executable('npm'), 'ci', '--ignore-scripts', '--no-audit', '--no-fund'] \
+                                    if (Path(temp_dir) / 'package-lock.json').exists() \
+                                    else [resolve_executable('npm'), 'install', '--ignore-scripts', '--no-audit', '--no-fund']
+
+                                subprocess.run(
+                                    npm_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    timeout=120,
+                                    cwd=temp_dir,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Error running npm install: {e}")
+
+                        # After npm install (regardless of outcome), check for local tsc
+                        if package_json_copied:
+
+                            local_tsc = Path(temp_dir) / 'node_modules' / '.bin' / 'tsc'
+                            local_tsc_cmd = Path(temp_dir) / 'node_modules' / '.bin' / 'tsc.cmd'
+                            if sys.platform == 'win32':
+                                # Windows: check .cmd first to avoid WinError 193
+                                try:
+                                    if local_tsc_cmd.exists():
+                                        self._tsc_available = True
+                                        self._tsc_path = str(local_tsc_cmd)
+                                        logger.debug(f"Found local tsc.cmd in temp directory: {self._tsc_path}")
+                                    elif local_tsc.exists():
+                                        self._tsc_available = True
+                                        self._tsc_path = str(local_tsc)
+                                        logger.debug(f"Found local tsc in temp directory: {self._tsc_path}")
+                                except PermissionError:
+                                    pass
+                            else:
+                                try:
+                                    if local_tsc.exists():
+                                        self._tsc_available = True
+                                        self._tsc_path = str(local_tsc)
+                                        logger.debug(f"Found local tsc in temp directory: {self._tsc_path}")
+                                    elif local_tsc_cmd.exists():
+                                        self._tsc_available = True
+                                        self._tsc_path = str(local_tsc_cmd)
+                                        logger.debug(f"Found local tsc.cmd in temp directory: {self._tsc_path}")
+                                except PermissionError:
+                                    pass
+
+                    # ================================================================
+                    # STEP 1.5: Include VFS-staged JS/TS files that don't exist on disk
+                    # ================================================================
+                    if self.vfs is not None:
+                        try:
+                            affected_files = self.vfs.get_staged_files()
+                            for vfs_rel_path in affected_files:
+                                if not any(vfs_rel_path.endswith(ext) for ext in ('.js', '.jsx', '.ts', '.tsx')):
+                                    continue
+
+                                vfs_path_normalized = vfs_rel_path.replace('\\', '/')
+                                if vfs_path_normalized in processed_rel_paths:
+                                    continue
+
+
+                                parts = Path(vfs_rel_path).parts
+                                if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
+                                    continue
+
+                                content = None
+                                if vfs_path_normalized in staged_files_map:
+                                    content = staged_files_map[vfs_path_normalized]
+                                else:
+                                    content = self.vfs.read_file(vfs_rel_path)
+
+                                if content is None:
+                                    continue
+
+                                temp_file = Path(temp_dir) / vfs_rel_path
+                                temp_file.parent.mkdir(parents=True, exist_ok=True)
+                                temp_file.write_text(content, encoding='utf-8')
+
+                                if vfs_rel_path.endswith('.ts') or vfs_rel_path.endswith('.tsx'):
+                                    all_ts_files_in_temp.append(str(temp_file))
+                                else:
+                                    all_js_files_in_temp.append(str(temp_file))
+
+                                processed_rel_paths.add(vfs_path_normalized)
+                        except Exception as e:
+                            logger.warning(f"Error scanning VFS for additional JS/TS files: {e}")
+
+                    # ================================================================
+                    # STEP 2: Write any staged files that don't exist in project yet
+                    # ================================================================
+                    all_paths = [file_path for _, file_path in files]
+                    for code, file_path in files:
+                        # Строго вычисляем относительный путь, чтобы не сломать baseUrl и path aliases
+                        rel_path = None
+                        if effective_root:
+                            try:
+                                # resolve() критически важен для Windows: он нормализует слэши и регистр
+                                abs_file_path = Path(file_path).resolve()
+                                rel_path = abs_file_path.relative_to(Path(effective_root).resolve())
+                            except (ValueError, RuntimeError, OSError):
+                                pass # Если путь не внутри effective_root, падаем в фолбэк
+                        
+                        if rel_path is None and not Path(file_path).is_absolute():
+                            rel_path = Path(file_path)
+                        
+                        if rel_path is None:
+                            # Фолбэк на старую эвристику, только если ничего не помогло
+                            rel_path = self._normalize_path_for_temp(code, file_path, effective_root, all_paths)
+                        
+                        rel_path_str = str(rel_path).replace('\\', '/')
+                        if rel_path_str in processed_rel_paths:
+                            continue
+                        
+                        temp_file = Path(temp_dir) / rel_path
+                        if not temp_file.exists():
+                            temp_file.parent.mkdir(parents=True, exist_ok=True)
+                            temp_file.write_text(code, encoding='utf-8')
+
+                            if file_path.endswith('.ts') or file_path.endswith('.tsx'):
+                                all_ts_files_in_temp.append(str(temp_file))
+                            else:
+                                all_js_files_in_temp.append(str(temp_file))
+                            processed_rel_paths.add(rel_path_str)
+
+                    # ================================================================
+                    # STEP 3: Compile all JS/TS/JSX/TSX files together using tsc
+                    # Architectural concept: Compile all files together to resolve 
+                    # cross-file imports and ensure they compile successfully.
+                    # ================================================================
+                    individual_results = []
+                    all_js_ts_files = all_ts_files_in_temp + all_js_files_in_temp
+                    all_staged_js_ts = ts_staged_files + js_staged_files
+                    
+                    if all_js_ts_files:
+                        tsc_bin = self._tsc_path or (resolve_executable('tsc') if self._tsc_available else None)
+                        npx_bin = resolve_executable('npx') if shutil.which('npx') else None
+                        
+                        if tsc_bin or npx_bin:
+                            cmd = []
+                            if tsc_bin:
+                                cmd.append(tsc_bin)
+                            else:
+                                cmd.extend([npx_bin, 'tsc'])
+                                
+                            cmd.extend(['--noEmit', '--skipLibCheck'])
+                            
+                            tsconfig_exists = (Path(temp_dir) / 'tsconfig.json').exists()
+                            jsconfig_exists = (Path(temp_dir) / 'jsconfig.json').exists()
+                            
+                            # [TSX FIX] Запускаем tsc строго через -p tsconfig.json.
+                            # Файлы НЕ передаются аргументами, чтобы tsc использовал секцию include
+                            # из tsconfig.json. Это заставляет его построить полный граф проекта
+                            # и корректно разрешить все path aliases (например, @/components).
+                            if tsconfig_exists:
+                                cmd.extend(['-p', 'tsconfig.json'])
+                            elif jsconfig_exists:
+                                cmd.extend(['-p', 'jsconfig.json'])
+                            else:
+                                # Фолбэк, если конфигов вообще нет
+                                if any(f.endswith(('.tsx', '.jsx')) for f in all_js_ts_files):
+                                    cmd.extend(['--jsx', 'react'])
+                                cmd.append('--allowJs')
+                                # Только в фолбэке (без конфига) передаем файлы явно
+                                cmd.extend(all_js_ts_files)                                                        
+                            try:
+                                result = subprocess.run(
+                                    cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',
+                                    errors='replace',
+                                    timeout=60,
+                                    cwd=temp_dir,
+                                )
+                                # tsc outputs compilation errors to stdout
+                                combined_stderr = (result.stderr + "\n" + result.stdout).strip() if result.returncode != 0 else ''
+                                
+                                for code, file_path in all_staged_js_ts:
+                                    individual_results.append({
+                                        'file_path': file_path,
+                                        'success': result.returncode == 0,
+                                        'stderr': combined_stderr,
+                                        'stdout': result.stdout,
+                                        'exit_code': result.returncode,
+                                    })
+                            except subprocess.TimeoutExpired:
+                                for code, file_path in all_staged_js_ts:
+                                    individual_results.append({
+                                        'file_path': file_path,
+                                        'success': False,
+                                        'stderr': 'tsc compilation timed out',
+                                        'stdout': '',
+                                        'exit_code': -1,
+                                    })
+                            except Exception as e:
+                                for code, file_path in all_staged_js_ts:
+                                    individual_results.append({
+                                        'file_path': file_path,
+                                        'success': False,
+                                        'stderr': f'tsc compilation failed: {e}',
+                                        'stdout': '',
+                                        'exit_code': -1,
+                                    })
+                        else:
+                            # Fallback if tsc/npx is not available: use node --check for pure JS
+                            # TS/TSX/JSX cannot be checked without tsc
+                            for code, file_path in all_staged_js_ts:
+                                if file_path.endswith('.js'):
+                                    target_file = next((f for f in all_js_files_in_temp if file_path in f or f.endswith(Path(file_path).name)), None)
+                                    if target_file:
+                                        try:
+                                            res = subprocess.run(
+                                                [resolve_executable('node'), '--check', target_file],
+                                                capture_output=True, text=True, encoding='utf-8',
+                                                errors='replace', timeout=30, cwd=temp_dir,
+                                            )
+                                            individual_results.append({
+                                                'file_path': file_path,
+                                                'success': res.returncode == 0,
+                                                'stderr': res.stderr if res.returncode != 0 else '',
+                                                'stdout': res.stdout,
+                                                'exit_code': res.returncode,
+                                            })
+                                        except Exception as e:
+                                            individual_results.append({
+                                                'file_path': file_path, 'success': False,
+                                                'stderr': f'node --check failed: {e}', 'stdout': '', 'exit_code': -1,
+                                            })
+                                else:
+                                    individual_results.append({
+                                        'file_path': file_path, 'success': False,
+                                        'stderr': 'TypeScript compiler (tsc) not available. Install TypeScript: npm install -D typescript',
+                                        'stdout': '', 'exit_code': -1,
+                                    })
+
+                    overall_success = all(r['success'] for r in individual_results) if individual_results else True
+                    return {
+                        'success': overall_success,
+                        'results': individual_results,
+                        'stderr': '',
+                        'stdout': '',
+                        'exit_code': 0 if overall_success else 1,
+                    }
+
+                except subprocess.TimeoutExpired:
+                    return {
+                        'success': False,
+                        'results': [{'file_path': fp, 'success': False, 'stderr': 'Compilation timed out', 'exit_code': -1} for _, fp in files],
+                        'stderr': 'Compilation timed out', 'stdout': '', 'exit_code': -1,
+                    }
+                except Exception as e:
+                    logger.error(f"JS/TS compilation error: {e}", exc_info=True)
+                    return {
+                        'success': False,
+                        'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
+                        'stderr': str(e), 'stdout': '', 'exit_code': -1,
+                    }
+                finally:
+                    if temp_dir and Path(temp_dir).exists():
+                        shutil.rmtree(temp_dir, ignore_errors=True)

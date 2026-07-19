@@ -526,7 +526,7 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
     """Calls LLM to fix syntax. Supports direct model call or internal A->A->B cascade."""
     try:
         from app.llm.api_client import call_llm
-        from config.settings import Config
+        from config.settings import Config, cfg
     except ImportError:
         logger.error("LLM client or Config not available")
         return None
@@ -548,7 +548,8 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
                 model=target_model,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=45000
+                max_tokens=45000,
+                is_intermediate=True,
             )
         except Exception as e:
             logger.warning(f"Direct call to {target_model} failed: {e}")
@@ -556,8 +557,11 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
 
     # === 2. ВНУТРЕННИЙ КАСКАД A -> A -> B ===
     else:
-        MODEL_A = Config.MODEL_QWEN3_Coder_Next
-        MODEL_B = Config.MODEL_NORMAL
+        from config.intermediate_agent_models import get_intermediate_model
+        MODEL_A, _, model_a_provider = get_intermediate_model("syntax_fixer_a", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+        MODEL_B, _, model_b_provider = get_intermediate_model("syntax_fixer_b", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+# [REMOVED] Hardcoded overwrite deleted — provider-aware selection above is now sole source of truth
+        # MODEL_B = Config.MODEL_NORMAL
 
         # Попытка А
         print(f"🤖 [AI SYNTAX FIXER] Calling primary model ({MODEL_A}) for syntax fix...")
@@ -566,7 +570,9 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
                 model=MODEL_A,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=45000
+                max_tokens=45000,
+                preferred_provider=model_a_provider,
+                is_intermediate=True,
             )
         except Exception as e:
             logger.warning(f"Primary model A failed: {e}. Trying retry...")
@@ -580,7 +586,9 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
                     model=MODEL_A,
                     messages=messages,
                     temperature=0.0,
-                    max_tokens=45000
+                    max_tokens=45000,
+                    preferred_provider=model_a_provider,
+                    is_intermediate=True,
                 )
             except Exception as e:
                 logger.warning(f"Model A retry failed: {e}. Switching to fallback...")
@@ -594,7 +602,9 @@ async def _call_syntax_fixer(code_block: str, language: str, context_info: Dict[
                     model=MODEL_B,
                     messages=messages,
                     temperature=0.0,
-                    max_tokens=8192
+                    max_tokens=8192,
+                    preferred_provider=model_b_provider,
+                    is_intermediate=True,
                 )
             except Exception as fe:
                 logger.error(f"Fallback syntax fix model also failed: {fe}")

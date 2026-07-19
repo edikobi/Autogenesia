@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+THINKING_DISABLED_MODELS = {"deepseek-v4-flash", "deepseek/deepseek-v4-flash", "glm-5-turbo", "z-ai/glm-5-turbo"}
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -99,6 +101,12 @@ class AIValidator:
         self._total_tokens = 0
         self._fallback_count = 0  # счетчик fallback-ов
         self._second_model_count = 0  # счетчик использования второй модели
+
+    def _get_extra_params_for_model(self, model: str) -> dict:
+            """Return extra params dict for models that need thinking disabled."""
+            if model in THINKING_DISABLED_MODELS:
+                return {"reasoning_effort": "disabled"}
+            return {}
     
     
     FALLBACK_ERROR_PATTERNS = [
@@ -163,15 +171,63 @@ class AIValidator:
         
         # Определяем модели
         context_size = self._calculate_context_size(request)
-        primary_model = cfg.get_ai_validator_model(context_size)
-        
-        # Вторая модель — противоположная от основной (small ↔ large)
-        small_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_small"]
-        large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]
+        from config.intermediate_agent_models import get_intermediate_model
+        small_model, _, small_provider = get_intermediate_model("validator_small", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+        large_model, _, large_provider = get_intermediate_model("validator_large", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+
+        # Primary model based on context size
+        threshold = cfg.AGENT_MODE_CONFIG["ai_validator_token_threshold"]
+        if context_size < threshold:
+            primary_model = small_model
+            primary_provider = small_provider
+        else:
+            primary_model = large_model
+            primary_provider = large_provider
+
+        # Second model is the opposite
         second_model = large_model if primary_model == small_model else small_model
+        second_provider = large_provider if primary_model == small_model else small_provider
+
+        # Fallback — always the large model
+        fallback_model = large_model
+        fallback_provider = large_provider
         
-        # Финальный fallback — всегда deepseek-chat
-        fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
+# [REMOVED] Hardcoded overwrite deleted — provider-aware selection above is now sole source of truth
+# [REMOVED] Hardcoded overwrite — nullifies provider-aware selection above
+# [REMOVED] Hardcoded overwrite — nullifies provider-aware selection above
+# [REMOVED] Hardcoded overwrite — provider-aware selection above is sole source of truth
+# [REMOVED] Hardcoded overwrite — provider-aware selection above is sole source of truth
+# [REMOVED] Hardcoded overwrite deleted — provider-aware selection above is now sole source of truth
+        # second_model = large_model if primary_model == small_model else small_model
+        #
+        # # Финальный fallback — всегда deepseek-chat
+        # fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
+        # second_model = large_model if primary_model == small_model else small_model
+        #
+        # # Финальный fallback — всегда deepseek-chat
+# fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
+        # large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]
+        # second_model = large_model if primary_model == small_model else small_model
+        #
+        # # Финальный fallback — всегда deepseek-chat
+        # fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
+        # large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]     # [REMOVED]
+        # second_model = large_model if primary_model == small_model else small_model  # [REMOVED]
+        #
+        # # Финальный fallback — всегда deepseek-chat
+        # fallback_model = cfg.MODEL_NORMAL  # deepseek-chat                           # [REMOVED]
+        # large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]
+        # second_model = large_model if primary_model == small_model else small_model
+        #
+        # # Финальный fallback — всегда deepseek-chat
+        # fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
+# [REMOVED] Hardcoded overwrite — provider-aware selection above is now sole source of truth
+        # small_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_small"]
+        # large_model = cfg.AGENT_MODE_CONFIG["ai_validator_model_large"]
+        # second_model = large_model if primary_model == small_model else small_model
+        #
+        # # Финальный fallback — всегда deepseek-chat
+        # fallback_model = cfg.MODEL_NORMAL  # deepseek-chat
         
         logger.info(
             f"AIValidator: Starting validation (context={context_size} tokens, "
@@ -198,11 +254,15 @@ class AIValidator:
         # ----------------------------------------------------------------
         _skip_second_model = False
         try:
+            extra_params = self._get_extra_params_for_model(primary_model)
             response = await call_llm_full(
                 model=primary_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=2500,
+                extra_params_override=extra_params,
+                preferred_provider=primary_provider,
+                is_intermediate=True,
             )
             
             duration_ms = (time.time() - start_time) * 1000
@@ -280,11 +340,15 @@ class AIValidator:
                 logger.info(
                     f"AIValidator: Trying second model {cfg.get_model_display_name(second_model)}"
                 )
+                extra_params_2 = self._get_extra_params_for_model(second_model)
                 second_response = await call_llm_full(
                     model=second_model,
                     messages=messages,
                     temperature=0,
                     max_tokens=2500,
+                    extra_params_override=extra_params_2,
+                    preferred_provider=second_provider,
+                    is_intermediate=True,
                 )
                 
                 second_duration_ms = (time.time() - start_time) * 1000
@@ -339,11 +403,15 @@ class AIValidator:
                 logger.info(
                     f"AIValidator: Trying fallback {cfg.get_model_display_name(fallback_model)}"
                 )
+                extra_params_fb = self._get_extra_params_for_model(fallback_model)
                 fallback_response = await call_llm_full(
                     model=fallback_model,
                     messages=messages,
                     temperature=0,
                     max_tokens=2500,
+                    extra_params_override=extra_params_fb,
+                    preferred_provider=fallback_provider,
+                    is_intermediate=True,
                 )
                 
                 fallback_duration_ms = (time.time() - start_time) * 1000

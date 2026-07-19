@@ -20,6 +20,8 @@ from app.services.tree_sitter_parser import MultiLanguageParser
 from app.utils.xml_wrapper import XMLWrapper, FileContent
 from app.utils.token_counter import TokenCounter
 from app.utils.file_types import FileTypeDetector
+# ── Добавить импорт в начале файла ────────────────────────────────
+from app.utils.path_security import is_forbidden_path, get_forbidden_reason
 
 logger = logging.getLogger(__name__)
 

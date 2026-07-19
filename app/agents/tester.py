@@ -10,6 +10,8 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from typing import Callable
+import os
 
 from app.llm.api_client import call_llm_with_tools
 from app.tools.tool_executor import parse_tool_call
@@ -47,8 +49,10 @@ class TesterAgent:
         user_request: str,
         orchestrator_plan: str = "",
         tester_model: Optional[str] = None,
+        tester_provider: Optional[str] = None,
         user_additional_input: str = "",
         project_python_path: Optional[str] = None,
+        on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
     ):
         """
         Initialize TesterAgent.
@@ -60,8 +64,12 @@ class TesterAgent:
             user_request: Original user request text.
             orchestrator_plan: Plan from Pre-filter/Orchestrator.
             tester_model: LLM model to use for testing.
+            tester_provider: Per-role provider to route tester LLM calls through
+                (overrides cfg.get_selected_agent_provider() when a model is
+                explicitly selected by the user).
             user_additional_input: Additional testing instructions from user.
             project_python_path: Path to project's Python interpreter.
+            on_tool_call: Optional callback for real-time tool call streaming.
         """
         self._project_dir = project_dir
         self._vfs = vfs
@@ -69,12 +77,31 @@ class TesterAgent:
         self._user_request = user_request
         self._orchestrator_plan = orchestrator_plan
         self._model = tester_model
+
+        # Fallback: if no model specified, select from orchestrator models (provider-aware)
+        if self._model is None:
+            from config.intermediate_agent_models import get_orchestrator_model_for_agent
+            from config.settings import cfg
+            self._model, _, self._model_provider = get_orchestrator_model_for_agent(
+                cfg.get_available_providers(),
+                preferred_provider=cfg.get_selected_agent_provider(),
+            )
+        else:
+            # Per-role provider chosen by the user together with the model.
+            self._model_provider = tester_provider
         self._user_additional_input = user_additional_input
         self._project_python_path = project_python_path
+        self._on_tool_call = on_tool_call
+        self._messages: List[Dict] = []
+        self._cleaned_up: bool = False
         self._test_temp_dir = tempfile.mkdtemp(prefix="tester_")
+
+# Create workspace subdirectory and materialize VFS
+        self._test_workspace_dir = os.path.join(self._test_temp_dir, "workspace")
+        self._vfs.materialize_to_directory(self._test_workspace_dir)
         self._tool_executor = TesterToolExecutor(
-            project_dir, project_index, vfs, self._test_temp_dir, project_python_path
-        )
+                    project_dir, project_index, vfs, self._test_workspace_dir, project_python_path
+                )
         self._max_iterations = 50
 
     async def run(self) -> TesterReport:
@@ -91,6 +118,7 @@ class TesterAgent:
                 {"role": "user", "content": prompts["user"]},
             ]
             report_md = await self._run_tester_loop(messages)
+            self._messages = messages
             translated = await translate_tester_report(report_md)
             return TesterReport(
                 original_report=report_md,
@@ -105,8 +133,6 @@ class TesterAgent:
                 success=False,
                 error=str(e),
             )
-        finally:
-            shutil.rmtree(self._test_temp_dir, ignore_errors=True)
 
     def _build_tester_prompt(self) -> Dict[str, str]:
         """
@@ -116,39 +142,68 @@ class TesterAgent:
             Dict with 'system' and 'user' keys containing prompt text.
         """
         system_prompt = (
-            "You are a testing agent. Your goal: verify that the AI-generated code works correctly "
-            "and matches the user's request.\n\n"
+            "You are an independent Testing Agent. Your mission is to verify that AI-generated code "
+            "correctly implements the user's requirements and works as expected. You have read-only "
+            "access to the project files and can write test files to an isolated temp directory.\n\n"
 
-            "**Core rule**: A test must check the OUTPUT — not just that the code runs without crashing.\n"
-            "Write test files, run them, and assert expected values.\n\n"
+            "**CRITICAL — WHAT 'TESTING' MEANS**:\n"
+            "A test is NOT just \"the code runs without crashing\". A test is a set of assertions that "
+            "verify the code produces the CORRECT OUTPUT for given inputs. A test that only checks "
+            "exit code is INSUFFICIENT and will be considered a FAILED TEST.\n\n"
 
-            "**Test requirements**:\n"
-            "- Test the normal case (happy path).\n"
-            "- Test at least one edge case (empty input, boundary).\n"
-            "- If the user gave examples, test those exactly.\n"
-            "- If the code modifies files or state, verify the change.\n"
-            "- If exceptions are expected, test that they are raised.\n\n"
+            "**MANDATORY — TEST REQUIREMENTS**:\n"
+            "1. For every changed function/method, write at least one test that:\n"
+            "   - Calls the function with known inputs.\n"
+            "   - Compares the actual output with the EXPECTED output (assertion).\n"
+            "   - Covers both the normal case ('happy path') and at least one edge case (e.g., empty input, boundary value).\n"
+            "2. If the user request contains specific examples (e.g., \"should return 42 when given 7\"), your test MUST verify that exact case.\n"
+            "3. If the code is supposed to modify a file or database, verify the change actually happened (e.g., read the file back).\n"
+            "4. If the code raises exceptions for invalid inputs, write a test that confirms the exception is raised.\n"
+            "5. Your test file must be self-contained: include all necessary imports and setup.\n\n"
 
-            "**Before final verdict**:\n"
-            "- Make sure all your tests PASS with the correct results.\n"
-            "- If a test fails, first check if the test itself is correct.\n\n"
+            "**BEFORE REPORTING SUCCESS**, you MUST ensure:\n"
+            "- All your tests PASS with the expected results (not just run without errors).\n"
+            "- The output values match the specification from the user request.\n"
+            "- No edge case was left untested.\n\n"
 
-            "**Tools**: You have read-only access to project files. You can write tests to a temp dir, "
-            "compile/run code, check environment, run ruff, and see git diff.\n\n"
+            "**IF A TEST FAILS**:\n"
+            "- First verify your test itself is correct (no syntax errors, correct imports, correct expected values).\n"
+            "- If your test is correct, report the failure with the actual vs expected output.\n"
+            "- If the code fails on edge cases, note that as a WARNING even if happy path passes.\n\n"
 
-            "**Report format** (copy this exactly, filling in the brackets):\n"
+            "**RESTRICTIONS**: You MUST NOT modify project files. You MUST NOT call `install_dependency`. "
+            "You have read-only access: `read_file`, `read_code_chunk`, `search_code`, `grep_search`, "
+            "`list_files`, `show_file_relations`, `read_line_context`, `list_installed_packages`, "
+            "`search_pypi`, `web_search`, `fetch_webpage`, `analyze_webpage`, `check_security`, "
+            "`extract_media`, `get_advice`.\n\n"
+
+            "**PERMISSIONS**: You CAN write test files using `write_test_file` — these go to your "
+            "isolated temp directory and do NOT affect the project. You CAN compile and run code "
+            "using `compile_code` and `run_code`. You CAN check code quality with `run_ruff`. "
+            "You CAN check the environment with `check_environment`. You CAN see git diff between "
+            "VFS and disk with `git_diff_vfs_disk`.\n\n"
+
+            "**MANDATORY REPORT FORMAT**: When testing is complete, write your FINAL MESSAGE as a "
+            "markdown report with these exact sections:\n\n"
             "# Testing Report\n"
             "## Requirements Compliance\n"
-            "[Check each user requirement against the code]\n\n"
-            "## Tests Run\n"
-            "[For each test: what you tested, input, expected, actual, PASS/FAIL]\n\n"
-            "## Issues Found\n"
-            "[List with severity: 🔴 Critical / 🟡 Warning / 🔵 Info]\n\n"
+            "[Point-by-point analysis of how well the solution matches the user's request]\n\n"
+            "## Test Cases Run\n"
+            "[For each test you wrote: describe the input, expected output, actual output, and PASS/FAIL]\n\n"
+            "## Errors Found\n"
+            "[List each error with severity: 🔴 Critical / 🟡 Warning / 🔵 Info. "
+            "If none: \"No errors found.\"]\n\n"
+            "## What Was Tested\n"
+            "[Files examined, tools used, test files written and their results]\n\n"
+            "## Findings\n"
+            "[Detailed results: compilation output, execution output, ruff results, test outputs]\n\n"
             "## Conclusion\n"
             "**Verdict: PASS / PASS WITH WARNINGS / FAIL**\n"
-            "[Summary]\n\n"
+            "[Brief summary of the overall assessment]\n\n"
 
-            "**Final note**: Write this report as your last message. Do not call tools after it."
+            "**IMPORTANT**: Write the report as your FINAL message with NO tool calls after it. "
+            "Do not add more tool calls after writing the report. Your verdict MUST be based on "
+            "the actual test results, not on the absence of compilation errors."
         )
 
         user_parts = [f"## User Request\n{self._user_request}"]
@@ -189,6 +244,7 @@ class TesterAgent:
                     temperature=0,
                     max_tokens=20000,
                     tool_choice="auto",
+                    preferred_provider=self._model_provider,
                 )
             except Exception as e:
                 logger.error(f"TesterAgent LLM call error on iteration {iteration}: {e}", exc_info=True)
@@ -220,6 +276,14 @@ class TesterAgent:
                     result = f"Tool error: {e}"
                     logger.warning(f"Tool execution error for {name}: {e}")
 
+    # Notify callback about tool call
+                    if self._on_tool_call is not None:
+                        try:
+                            success = not result.startswith("<!-- ERROR")
+                            self._on_tool_call(name, args, result[:500], success)
+                        except Exception as cb_err:
+                            logger.warning(f"Tool call callback error for {name}: {cb_err}")
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -236,3 +300,163 @@ class TesterAgent:
             )
 
         return final_content
+    async def ask_followup(self, user_question: str) -> dict:
+        """Handle a follow-up question from the user after the initial test report.
+
+        Args:
+            user_question: The user's follow-up question text.
+
+        Returns:
+            Dict with keys: response, is_new_report, new_report.
+        """
+        if not self._messages:
+            return {"response": "", "is_new_report": False, "new_report": None}
+
+        followup_context = (
+            "The user is asking a FOLLOW-UP question after you already produced a testing report. "
+            "Rules:\n"
+            "1. If the question is a clarification about your existing report — answer concisely in plain text. "
+            "   Do NOT regenerate the full report.\n"
+            "2. If the user explicitly asks to re-test or test something new — run tools and produce a NEW full report "
+            "   in the mandatory format.\n"
+            "3. Do NOT output your chain-of-thought reasoning or '<think>' tags. Output only the final answer.\n"
+            "4. You MUST end with a text response, not a tool call.\n"
+        )
+        self._messages.append({"role": "system", "content": followup_context})
+        self._messages.append({"role": "user", "content": user_question})
+
+
+        try:
+            response = await call_llm_with_tools(
+                model=self._model,
+                messages=self._messages,
+                tools=TESTER_TOOLS,
+                temperature=0,
+                max_tokens=20000,
+                tool_choice="auto",
+                preferred_provider=self._model_provider,
+            )
+        except Exception as e:
+            logger.error(f"ask_followup LLM call error: {e}", exc_info=True)
+            self._messages.pop()
+            return {"response": "", "is_new_report": False, "new_report": None}
+
+        content = response.get("content", "") or ""
+        tool_calls = response.get("tool_calls") or []
+
+        # Tool execution loop (up to 3 iterations)
+        for _iteration in range(6):
+            if not tool_calls:
+                break
+
+            self._messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls,
+            })
+
+            for tc in tool_calls:
+                try:
+                    name, args, tc_id = parse_tool_call(tc)
+                except Exception as e:
+                    logger.warning(f"Failed to parse tool call in followup: {e}")
+                    name, args, tc_id = "unknown", {}, f"followup_error"
+
+                try:
+                    result = self._tool_executor.execute(name, args)
+                except Exception as e:
+                    result = f"Tool error: {e}"
+                    logger.warning(f"Tool execution error in followup for {name}: {e}")
+
+                if self._on_tool_call is not None:
+                    try:
+                        success = not result.startswith("<!-- ERROR")
+                        self._on_tool_call(name, args, result[:500], success)
+                    except Exception as cb_err:
+                        logger.warning(f"Tool call callback error in followup for {name}: {cb_err}")
+
+                self._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "name": name,
+                    "content": result,
+                })
+
+            try:
+                response = await call_llm_with_tools(
+                    model=self._model,
+                    messages=self._messages,
+                    tools=TESTER_TOOLS,
+                    temperature=0,
+                    max_tokens=20000,
+                    tool_choice="auto",
+                    preferred_provider=self._model_provider,
+                )
+                content = response.get("content", "") or ""
+                tool_calls = response.get("tool_calls") or []
+            except Exception as e:
+                logger.error(f"ask_followup LLM call error in tool loop: {e}", exc_info=True)
+                break
+
+        # Если после цикла модель всё ещё хочет вызвать тулы или отдала пустой контент
+        if tool_calls or not content.strip():
+            try:
+                response = await call_llm_with_tools(
+                    model=self._model,
+                    messages=self._messages,
+                    tools=TESTER_TOOLS,
+                    temperature=0,
+                    max_tokens=20000,
+                    tool_choice="none",  # Запрещаем вызов инструментов, заставляем выдать текст
+                    preferred_provider=self._model_provider,
+                )
+                content = response.get("content", "") or ""
+            except Exception as e:
+                logger.error(f"ask_followup final LLM call error: {e}", exc_info=True)
+
+        # Очистка от возможных "мыслей" (CoT), если провайдер склеил их с ответом
+        import re
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+        if content:
+            self._messages.append({"role": "assistant", "content": content})
+
+        is_new_report = self._looks_like_report(content)
+
+        return {
+            "response": content,
+            "is_new_report": is_new_report,
+            "new_report": content if is_new_report else None,
+        }
+
+    def _looks_like_report(self, text: str) -> bool:
+        """Check if the text looks like a testing report.
+
+        Checks for at least 2 report markers (case-insensitive).
+
+        Args:
+            text: Text to check.
+
+        Returns:
+            True if the text appears to be a testing report.
+        """
+        if not text or not text.strip():
+            return False
+
+        markers = [
+            "# testing report",
+            "## conclusion",
+            "**verdict:",
+            "## requirements compliance",
+            "## errors found",
+        ]
+
+        text_lower = text.lower()
+        count = sum(1 for marker in markers if marker in text_lower)
+        return count >= 2
+
+    def cleanup(self) -> None:
+        """Clean up temporary resources. Idempotent — safe to call multiple times."""
+        if not self._cleaned_up:
+            shutil.rmtree(self._test_temp_dir, ignore_errors=True)
+            self._cleaned_up = True

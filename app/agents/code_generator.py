@@ -564,6 +564,7 @@ async def generate_code(
     model: Optional[str] = None,
     temperature: float = 0.2,
     max_tokens: int = 34000,
+    preferred_provider: Optional[str] = None,
 ) -> CodeGeneratorResult:
     """
     Generate code for ASK mode with validation and retry.
@@ -573,7 +574,13 @@ async def generate_code(
     VALIDATION_RETRIES = 2
     
     if model is None:
-        model = get_model_for_role("code_generator")
+        from config.intermediate_agent_models import get_generator_model_for_agent
+        model, _, provider_from_sel = get_generator_model_for_agent(
+            cfg.get_available_providers(),
+            preferred_provider=cfg.get_selected_agent_provider(),
+        )
+        if preferred_provider is None:
+            preferred_provider = provider_from_sel
     
     logger.info(f"Code Generator (ASK): using {cfg.get_model_display_name(model)}")
     
@@ -610,6 +617,7 @@ async def generate_code(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                preferred_provider=preferred_provider,
             )
             
             logger.info(f"Code Generator (ASK): received {len(response)} chars")
@@ -684,6 +692,7 @@ async def generate_code_agent_mode(
     model: Optional[str] = None,
     temperature: float = 0.2,
     max_tokens: int = 38500,
+    preferred_provider: Optional[str] = None,
 ) -> tuple[List[ParsedCodeBlock], str]:
     """
     Generate code in Agent Mode with CODE_BLOCK output.
@@ -718,7 +727,13 @@ async def generate_code_agent_mode(
     
     # Determine model
     if model is None:
-        model = get_model_for_role("code_generator")
+        from config.intermediate_agent_models import get_generator_model_for_agent
+        model, _, provider_from_sel = get_generator_model_for_agent(
+            cfg.get_available_providers(),
+            preferred_provider=cfg.get_selected_agent_provider(),
+        )
+        if preferred_provider is None:
+            preferred_provider = provider_from_sel
     
     logger.info(f"Code Generator (Agent Mode): using {cfg.get_model_display_name(model)}")
     
@@ -767,6 +782,7 @@ async def generate_code_agent_mode(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                preferred_provider=preferred_provider,
             )
             
             logger.info(f"Code Generator (Agent Mode): received response ({len(response)} chars)")
