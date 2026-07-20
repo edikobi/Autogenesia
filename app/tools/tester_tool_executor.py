@@ -272,6 +272,26 @@ class TesterToolExecutor:
                 if content is None:
                     return self._format_error(f"File not found in VFS: {file_path}")
 
+                # === Strict extension check & Language Override ===
+                file_ext = os.path.splitext(file_path)[1].lower()
+                valid_code_exts = ['.py', '.java', '.go', '.js', '.jsx', '.ts', '.tsx']
+                if file_ext not in valid_code_exts:
+                    return self._format_error(
+                        f"File '{file_path}' is not a code file. "
+                        f"You can only compile code files."
+                    )
+                
+                # Принудительная корректировка языка
+                if file_ext == '.jsx':
+                    language = "tsx" # Обрабатываем как TSX для поддержки JSX
+                elif file_ext == '.js':
+                    language = "javascript"
+                elif file_ext == '.ts':
+                    language = "typescript"
+                elif file_ext == '.tsx':
+                    language = "tsx"
+                
+                # ========================================================
                 if language == "python":
                     target_path = os.path.join(self._workspace_dir, file_path)
                     parent_dir = os.path.dirname(target_path)
@@ -280,11 +300,16 @@ class TesterToolExecutor:
                     Path(target_path).write_text(content, encoding='utf-8')
 
                     try:
+                        # Добавляем PYTHONPATH и cwd, чтобы py_compile видел соседние 
+                        # файлы из VFS и установленные в проекте библиотеки.
+                        env = {**os.environ, "PYTHONPATH": self._workspace_dir}
                         result = subprocess.run(
                             [self._project_python_path, "-m", "py_compile", target_path],
                             capture_output=True,
                             text=True,
                             timeout=30,
+                            cwd=self._workspace_dir,
+                            env=env,
                             encoding='utf-8',
                             errors='replace',
                         )
@@ -303,114 +328,101 @@ class TesterToolExecutor:
                         return self._format_error(f"Python compilation error: {e}")
 
                 elif language == "java":
-                    # Write VFS content to workspace for sibling file resolution
-                    target_path = os.path.join(self._workspace_dir, file_path)
-                    parent_dir = os.path.dirname(target_path)
-                    if parent_dir:
-                        os.makedirs(parent_dir, exist_ok=True)
-                    Path(target_path).write_text(content, encoding='utf-8')
                     try:
-                        result = self._java_adapter.compile_check(
-                            content, file_path, project_root=Path(self._workspace_dir)
+                        # Делегируем компиляцию адаптеру: он соберет весь проект, 
+                        # скачает Maven зависимости и скомпилирует файлы с учетом VFS.
+                        result = self._java_adapter.compile_check_with_deps(
+                            files=[(content, file_path)],
+                            project_root=Path(self._project_dir)
                         )
-                        return (
-                            f"<compile_result>\n"
-                            f"<success>{str(result.get('success', False)).lower()}</success>\n"
-                            f"<stdout>{result.get('stdout', '')}</stdout>\n"
-                            f"<stderr>{result.get('stderr', '')}</stderr>\n"
-                            f"<exit_code>{result.get('exit_code', -1)}</exit_code>\n"
-                            f"</compile_result>"
-                        )
-                    except Exception as e:
-                        return self._format_error(f"Java compilation error: {e}")
-
-                elif language == "go":
-                    target_path = os.path.join(self._workspace_dir, file_path)
-                    parent_dir = os.path.dirname(target_path)
-                    if parent_dir:
-                        os.makedirs(parent_dir, exist_ok=True)
-                    Path(target_path).write_text(content, encoding='utf-8')
-                    try:
-                        result = self._go_adapter.compile_check(
-                            content, file_path, project_root=Path(self._workspace_dir)
-                        )
-                        return (
-                            f"<compile_result>\n"
-                            f"<success>{str(result.get('success', False)).lower()}</success>\n"
-                            f"<stdout>{result.get('stdout', '')}</stdout>\n"
-                            f"<stderr>{result.get('stderr', '')}</stderr>\n"
-                            f"<exit_code>{result.get('exit_code', -1)}</exit_code>\n"
-                            f"</compile_result>"
-                        )
-                    except Exception as e:
-                        return self._format_error(f"Go compilation error: {e}")
-
-                elif language in ("javascript", "typescript", "tsx"):
-                    target_path = os.path.join(self._workspace_dir, file_path)
-                    parent_dir = os.path.dirname(target_path)
-                    if parent_dir:
-                        os.makedirs(parent_dir, exist_ok=True)
-                    Path(target_path).write_text(content, encoding='utf-8')
-                    # Re-check local node_modules in workspace for JS/TS tools
-                    workspace_nm = Path(self._workspace_dir) / 'node_modules' / '.bin'
-                    if workspace_nm.exists():
-                        self._js_ts_adapter = JsTsAdapter(
-                            Path(self._workspace_dir),
-                            vfs=self._vfs,
-                            node_modules_bin_dir=workspace_nm,
-                        )
-
-                    try:
-                        # [TSX FIX] Run tsc directly in the workspace to resolve relative imports and tsconfig.json
-                        is_typescript = language in ("typescript", "tsx")
-                        if not is_typescript:
-                            # JavaScript: simple node --check
-                            result = subprocess.run(
-                                ["node", "--check", target_path],
-                                capture_output=True, text=True, timeout=30, cwd=self._workspace_dir,
-                                encoding='utf-8', errors='replace'
-                            )
+                        
+                        if result.get('results'):
+                            file_result = result['results'][0]
+                            success = file_result.get('success', False)
+                            stdout = file_result.get('stdout', '')
+                            stderr = file_result.get('stderr', '')
+                            exit_code = file_result.get('exit_code', -1)
                         else:
-                            tsc_bin = self._js_ts_adapter._tsc_path or shutil.which('tsc')
-                            npx_bin = resolve_executable('npx') if shutil.which('npx') else None
-                            if not tsc_bin and not npx_bin:
-                                return self._format_error("TypeScript compiler (tsc) not available.")
-                            
-                            cmd = []
-                            if tsc_bin:
-                                cmd.append(tsc_bin)
-                            else:
-                                cmd.extend([npx_bin, 'tsc'])
-                                
-                            cmd.extend(['--noEmit', '--skipLibCheck'])
-                            if file_path.endswith('.tsx'):
-                                if not (Path(self._workspace_dir) / 'tsconfig.json').exists():
-                                    cmd.extend(['--jsx', 'react'])
-                            cmd.append(target_path)
-                            
-                            result = subprocess.run(
-                                cmd, capture_output=True, text=True, timeout=60, cwd=self._workspace_dir,
-                                encoding='utf-8', errors='replace'
-                            )
-                            
-                        success = result.returncode == 0
-                        stderr = result.stderr
-                        stdout = result.stdout
-                        if not success and not stderr:
-                            stderr = stdout  # tsc outputs errors to stdout
+                            success = result.get('success', False)
+                            stdout = result.get('stdout', '')
+                            stderr = result.get('stderr', '')
+                            exit_code = result.get('exit_code', -1)
                             
                         return (
                             f"<compile_result>\n"
                             f"<success>{str(success).lower()}</success>\n"
                             f"<stdout>{stdout}</stdout>\n"
                             f"<stderr>{stderr}</stderr>\n"
-                            f"<exit_code>{result.returncode}</exit_code>\n"
+                            f"<exit_code>{exit_code}</exit_code>\n"
                             f"</compile_result>"
                         )
-                    except subprocess.TimeoutExpired:
-                        return self._format_error("JS/TS compilation timed out")
                     except Exception as e:
-                        return self._format_error(f"JS/TS compilation error: {e}")
+                        return self._format_error(f"Java compilation error: {e}")
+
+                elif language == "go":
+                    try:
+                        # Делегируем компиляцию адаптеру: он синхронизирует go.mod,
+                        # скачает модули и соберет пакет с учетом VFS.
+                        result = self._go_adapter.compile_check_with_deps(
+                            files=[(content, file_path)],
+                            project_root=Path(self._project_dir)
+                        )
+                        
+                        if result.get('results'):
+                            file_result = result['results'][0]
+                            success = file_result.get('success', False)
+                            stdout = file_result.get('stdout', '')
+                            stderr = file_result.get('stderr', '')
+                            exit_code = file_result.get('exit_code', -1)
+                        else:
+                            success = result.get('success', False)
+                            stdout = result.get('stdout', '')
+                            stderr = result.get('stderr', '')
+                            exit_code = result.get('exit_code', -1)
+                            
+                        return (
+                            f"<compile_result>\n"
+                            f"<success>{str(success).lower()}</success>\n"
+                            f"<stdout>{stdout}</stdout>\n"
+                            f"<stderr>{stderr}</stderr>\n"
+                            f"<exit_code>{exit_code}</exit_code>\n"
+                            f"</compile_result>"
+                        )
+                    except Exception as e:
+                        return self._format_error(f"Go compilation error: {e}")
+                    
+                elif language in ("javascript", "typescript", "tsx", "jsx"):
+                    try:
+                        # Делегируем компиляцию адаптеру: он соберет весь проект, 
+                        # симлинкнет node_modules, применит tsconfig.json из VFS 
+                        # и запустит tsc -p tsconfig.json для проверки алиасов и типов.
+                        result = self._js_ts_adapter.compile_check_with_deps(
+                            files=[(content, file_path)],
+                            project_root=Path(self._project_dir)
+                        )
+                        
+                        if result.get('results'):
+                            file_result = result['results'][0]
+                            success = file_result.get('success', False)
+                            stdout = file_result.get('stdout', '')
+                            stderr = file_result.get('stderr', '')
+                            exit_code = file_result.get('exit_code', -1)
+                        else:
+                            success = result.get('success', False)
+                            stdout = result.get('stdout', '')
+                            stderr = result.get('stderr', '')
+                            exit_code = result.get('exit_code', -1)
+                            
+                        return (
+                            f"<compile_result>\n"
+                            f"<success>{str(success).lower()}</success>\n"
+                            f"<stdout>{stdout}</stdout>\n"
+                            f"<stderr>{stderr}</stderr>\n"
+                            f"<exit_code>{exit_code}</exit_code>\n"
+                            f"</compile_result>"
+                        )
+                    except Exception as e:
+                        return self._format_error(f"JS/TS compilation error: {e}")                 
                     
                 else:
                     return self._format_error(f"Unsupported language: {language}")
@@ -454,21 +466,26 @@ class TesterToolExecutor:
                     if not os.path.exists(target_path):
                         return self._format_error(f"File not found in VFS or workspace: {file_path}")
 
-                # Extension map
-                ext_map = {
-                    "python": ".py",
-                    "java": ".java",
-                    "go": ".go",
-                    "javascript": ".js",
-                    "typescript": ".ts",
-
-                    "tsx": ".tsx",
-                }
-                ext = ext_map.get(language)
-                if not ext:
-                    return self._format_error(f"Unsupported language: {language}")
-
-                # Build command by language
+                # === Strict extension check & Language Override ===
+                file_ext = os.path.splitext(file_path)[1].lower()
+                valid_code_exts = ['.py', '.java', '.go', '.js', '.jsx', '.ts', '.tsx']
+                if file_ext not in valid_code_exts:
+                    return self._format_error(
+                        f"File '{file_path}' is not a code file. "
+                        f"Data/Config files (.json, .md, .yaml) cannot be executed."
+                    )
+                
+                # Принудительная корректировка языка по расширению
+                if file_ext == '.jsx':
+                    language = "tsx"  # Направляем по ветке TS/TSX, чтобы использовался ts-node/tsc с JSX
+                elif file_ext == '.js':
+                    language = "javascript"
+                elif file_ext == '.ts':
+                    language = "typescript"
+                elif file_ext == '.tsx':
+                    language = "tsx"
+                # ========================================================                
+                
                 env = None
                 if language == "python":
                     cmd = [self._project_python_path, target_path, *args]
@@ -528,10 +545,11 @@ class TesterToolExecutor:
 
                     if ts_node_bin:
                         cmd = [ts_node_bin]
-                        if file_path.endswith('.tsx'):
-                            # [TSX FIX] ts-node needs JSX configuration for .tsx files
+                        if file_path.endswith('.tsx') or file_path.endswith('.jsx'):
+                            # [TSX/JSX FIX] ts-node needs JSX configuration
                             cmd.extend(['--compiler-options', '{"jsx":"react"}'])
-                        cmd.append(target_path)
+                        cmd.append(target_path)                        
+                        
                         cmd.extend(args)
                     elif shutil.which('npx'):
                         cmd = [resolve_executable('npx'), 'ts-node']
@@ -543,10 +561,10 @@ class TesterToolExecutor:
                         tsc_bin = self._js_ts_adapter._tsc_path or resolve_executable('tsc')
                         try:
                             compile_cmd = [tsc_bin, '--outDir', self._workspace_dir]
-                            if file_path.endswith('.tsx'):
+                            if file_path.endswith('.tsx') or file_path.endswith('.jsx'):
                                 if not (Path(self._workspace_dir) / 'tsconfig.json').exists():
                                     compile_cmd.extend(['--jsx', 'react'])
-                            compile_cmd.append(target_path)
+                            compile_cmd.append(target_path)                            
                             
                             compile_proc = subprocess.run(
                                 compile_cmd,

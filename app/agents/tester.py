@@ -8,9 +8,10 @@ import asyncio
 import logging
 import shutil
 import tempfile
+import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from typing import Callable
+from typing import Any, Dict, List, Optional, Callable
+from pathlib import Path
 import os
 
 from app.llm.api_client import call_llm_with_tools
@@ -99,7 +100,23 @@ class TesterAgent:
 # Create workspace subdirectory and materialize VFS
         self._test_workspace_dir = os.path.join(self._test_temp_dir, "workspace")
         self._vfs.materialize_to_directory(self._test_workspace_dir)
-        self._tool_executor = TesterToolExecutor(
+        
+        # Симлинкаем node_modules из реального проекта, чтобы ts-node и node могли резолвить библиотеки
+        node_modules_src = Path(self._project_dir) / 'node_modules'
+        node_modules_dst = Path(self._test_workspace_dir) / 'node_modules'
+        if node_modules_src.exists() and not node_modules_dst.exists():
+            try:
+                if sys.platform == 'win32':
+                    import ctypes
+                    ctypes.windll.kernel32.CreateSymbolicLinkW(
+                        str(node_modules_dst), str(node_modules_src), 1
+                    )
+                else:
+                    os.symlink(node_modules_src, node_modules_dst)
+            except Exception as e:
+                logger.warning(f"Could not symlink node_modules for tester: {e}")
+                
+        self._tool_executor = TesterToolExecutor(                    
                     project_dir, project_index, vfs, self._test_workspace_dir, project_python_path
                 )
         self._max_iterations = 50

@@ -35,7 +35,8 @@ RUFF_TOOL: Dict[str, Any] = {
     "function": {
         "name": "run_ruff",
         "description": (
-            "Run the ruff linter on a file from VFS (staged version). "
+            "Run the ruff linter on a PYTHON file (.py) from VFS (staged version). "
+            "Ruff is a Python-only linter."
             "The file is executed in the workspace context. "
             "Returns linting results in JSON format. "
             "Use this to check code quality, style violations, and potential bugs. "
