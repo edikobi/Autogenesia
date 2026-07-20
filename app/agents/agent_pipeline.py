@@ -3506,6 +3506,31 @@ Remember: You can override the validator if you believe the critique is incorrec
                 applied_files = list(commit_result.applied_files)
                 created_files = list(commit_result.created_files)
                 
+                # === RECONCILIATION: Восстановление не-Python файлов для UI ===
+                # VFS может не сообщать о не-Python файлах в applied_files/created_files,
+                # хотя физически они уже записаны на диск. Сверяем списки.
+                reported = set(applied_files) | set(created_files)
+                for change in self._pending_changes:
+                    fp = change.file_path
+                    if fp in reported:
+                        continue
+                    
+                    # Проверяем, действительно ли файл записан на диск
+                    disk_path = Path(self.project_dir) / fp
+                    if not disk_path.exists():
+                        continue
+                        
+                    # Определяем тип: новый файл или модификация
+                    is_new = original_contents.get(fp) is None
+                    if is_new:
+                        created_files.append(fp)
+                    else:
+                        applied_files.append(fp)
+                        
+                    logger.info(f"Reconciled missing file in report: {fp} (created={is_new})")
+                # === END RECONCILIATION ===                
+                
+                
                 # === ЗАПИСЬ В ИСТОРИЮ С ПОЛНЫМИ ДАННЫМИ ===
                 change_record_ids = []
                 if self.history_manager and self.thread_id:
@@ -3668,9 +3693,32 @@ Remember: You can override the validator if you believe the critique is incorrec
                 )
 
                 self._tester_agent = agent
-                report = await agent.run()
-                self._tester_report = report
-                return report
+                
+                # === Monkey-patch: перехватываем execute без изменения исходного класса ===
+                from app.tools.tester_tool_executor import TesterToolExecutor
+                _original_execute = TesterToolExecutor.execute
+
+                def _streaming_execute(executor_self, tool_name, arguments):
+                    result = _original_execute(executor_self, tool_name, arguments)
+                    if on_tool_call:
+                        success = not result.startswith("<!-- ERROR")
+                        try:
+                            on_tool_call(tool_name, arguments, result[:200], success)
+                        except Exception:
+                            pass
+                    return result
+
+                TesterToolExecutor.execute = _streaming_execute
+                # =========================================================================
+
+                try:
+                    report = await agent.run()
+                    self._tester_report = report
+                    return report
+                finally:
+                    # Возвращаем оригинальный метод, чтобы не ломать ask_followup
+                    TesterToolExecutor.execute = _original_execute
+
 
             except Exception as e:
                 logger.error(f"run_tester failed: {e}", exc_info=True)
