@@ -115,8 +115,15 @@ class StagingErrorType(Enum):
     # Structural integrity errors (e.g. unintended code deletion)
     INTEGRITY_FAILURE = "integrity_failure"
     
-    INVALID_CODE_FORMAT = "invalid_code_format"
+    # === NEW: AI repair cascade errors ===
+    AI_CASCADE_FAILED = "ai_cascade_failed"
+    STRUCTURAL_APPLY_FAILED = "structural_apply_failed"
+    
+    # === NEW: System/infrastructure errors ===
+    STAGING_SYSTEM_ERROR = "staging_system_error"
+    SYSTEM_ERROR = "system_error"
 
+    INVALID_CODE_FORMAT = "invalid_code_format"
     # Ambiguous pattern — matched more than one location
     AMBIGUOUS_REPLACE_PATTERN = "ambiguous_replace_pattern"
     
@@ -187,9 +194,15 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.INVALID_MODE: {
             "description": "The specified MODE is not recognized.",
             "cause": "Typo in mode name or using unsupported mode.",
-            "solution": "1. Use one of valid modes: REPLACE_FILE, REPLACE_CLASS, ADD_NEW_CLASS, REPLACE_METHOD, REPLACE_FUNCTION, ADD_METHOD, ADD_FUNCTION, ADD_CLASS, INSERT_IMPORT, APPEND_FILE. 2. Check spelling and case.",
-            "mode_hint": "Valid modes: REPLACE_FILE, REPLACE_METHOD, ADD_METHOD, etc.",
-        },
+            "solution": (
+                "1. Use one of the valid supported modes. "
+                "2. Check spelling and case. "
+                "3. Pick the MOST TARGETED approach that matches the intent (replacing an entire entity, making a localized change inside it, or adding a new entity) — do NOT default to REPLACE_FILE just because the previous mode was invalid. "
+                "4. REPLACE_FILE should be chosen ONLY when no targeted approach can express the required change, and the REPLACE_FILE precautions MUST be followed."
+            ),
+            "mode_hint": "Use the most targeted valid approach (replace entire entity, local change, or add new). REPLACE_FILE is the LAST RESORT only.",
+        },        
+        
         StagingErrorType.PARSER_UNAVAILABLE: {
             "description": "The code parser is not available to analyze the file structure.",
             "cause": "Tree-sitter parser failed to initialize.",
@@ -205,9 +218,16 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.SYNTAX_VALIDATION_FAILED: {
             "description": "The applied code change breaks the file's syntax structure, making classes/methods unparseable.",
             "cause": "Common causes: 1) Wrong indentation level (Python is indent-sensitive). 2) Incomplete code block (missing closing brackets, quotes, or colons). 3) Previous code block in the same file already broke syntax, causing cascading failures. 4) Code was inserted at wrong position breaking existing structure.",
-            "solution": "1. CHECK INDENTATION: Ensure code uses correct indentation (4 spaces for Python). Method bodies must be indented relative to class. 2. CHECK COMPLETENESS: Verify all brackets (), [], {} are balanced. Check all strings are properly closed. 3. CHECK PREVIOUS BLOCKS: If multiple blocks target same file, earlier block may have broken syntax. Fix that block first. 4. USE read_file TOOL: Read the current file content to see exact structure before modification. 5. SIMPLIFY: If complex insertion fails, try REPLACE_METHOD or REPLACE_CLASS to replace entire unit.",
-            "mode_hint": "Check indentation (4 spaces), ensure code is complete, consider REPLACE_METHOD instead of INSERT",
-        },
+            "solution": (
+                "1. CHECK INDENTATION: Ensure code uses correct indentation (4 spaces for Python). Method bodies must be indented relative to class. "
+                "2. CHECK COMPLETENESS: Verify all brackets (), [],  are balanced. Check all strings are properly closed. "
+                "3. CHECK PREVIOUS BLOCKS: If multiple blocks target same file, earlier block may have broken syntax. Fix that block first. "
+                "4. USE read_file TOOL: Read the current file content to see exact structure before modification. "
+                "5. TARGETED FIX FIRST: Try the most surgical approach that fits. Prefer replacing the entire target entity (the whole method, function, or class) OR making a localized replacement inside it, using the EXACT same target. Re-emit only the corrected code block with fixed indentation/brackets — do NOT touch anything outside the target. "
+                "6. ONLY IF TARGETED FIX FAILS: fall back to REPLACE_FILE (see REPLACE_FILE precautions below)."
+            ),
+            "mode_hint": "Check indentation (4 spaces), ensure code is complete. Prefer replacing the entire entity or making a localized change inside it. REPLACE_FILE is the LAST RESORT only.",
+        },        
         StagingErrorType.INTEGRITY_FAILURE: {
             "description": "Critical code loss detected: The modification removed existing classes/methods that were not targets of the change.",
             "cause": "The generated code block was incomplete or incorrectly overwrote large sections of the file instead of targeted elements.",
@@ -217,9 +237,16 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.INVALID_CODE_FORMAT: {
             "description": "Code block for ADD_NEW_FUNCTION must start with 'def' or 'async def'.",
             "cause": "Code doesn't start with function definition or has syntax error.",
-            "solution": "1. Ensure code starts with 'def function_name():' or 'async def function_name():'. 2. Check for syntax errors. 3. Provide complete function definition.",
-            "mode_hint": "ADD_NEW_FUNCTION requires a complete function definition",
-        },
+            "solution": (
+                "1. Ensure code starts with 'def function_name():' or 'async def function_name():'. "
+                "2. Check for syntax errors. "
+                "3. Provide a complete function definition. "
+                "4. If you intended to add a method to a class, instruct to add a new method to the target class instead of adding a standalone function. "
+                "5. LAST RESORT ONLY — REPLACE_FILE: only if the block cannot be expressed in any targeted mode. Follow REPLACE_FILE precautions if used."
+            ),
+            "mode_hint": "Ensure the code is a complete function definition starting with 'def' or 'async def'. If it belongs to a class, instruct to add a method. REPLACE_FILE is the LAST RESORT only.",
+        },        
+        
         StagingErrorType.AMBIGUOUS_REPLACE_PATTERN: {
             "description": "The REPLACE_PATTERN or INSERT anchor matched more than one location in the file.",
             "cause": "The pattern text is too short or non-unique — it appears identically two or more times in the file.",
@@ -229,14 +256,56 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
         StagingErrorType.REPLACE_PATTERN_NOT_FOUND: {
             "description": "The pattern specified in REPLACE_PATTERN was not found in the target file (or within the specified TARGET_METHOD/CLASS scope).",
             "cause": "The pattern text does not match any code lines in the search scope. This often happens due to whitespace mismatches or because the pattern includes too many lines.",
-            "solution": "1. Ensure the REPLACE_PATTERN exactly matches 1-2 lines from the file (ignoring indentation). 2. Do not include large blocks in REPLACE_PATTERN. 3. If a target scope (method/class) was provided, verify the pattern exists inside that specific scope.",
-            "mode_hint": "Use a shorter (1-2 lines) and more accurate REPLACE_PATTERN",
+            "solution": (
+                "1. Ensure the REPLACE_PATTERN exactly matches 1-2 lines from the file (ignoring indentation). "
+                "2. Do not include large blocks in REPLACE_PATTERN. "
+                "3. If a target scope (method/class) was provided, verify the pattern exists inside that specific scope. "
+                "4. TARGETED ALTERNATIVES (prefer these): instruct to replace the ENTIRE target entity (the whole method or function) — this locates the entity structurally by name and does NOT need a textual pattern. "
+                "5. LAST RESORT ONLY — REPLACE_FILE: if every targeted approach has been tried and failed, you may use REPLACE_FILE. In that case you MUST follow the REPLACE_FILE precautions."
+            ),
+            "mode_hint": "Use a shorter (1-2 lines) and more accurate REPLACE_PATTERN, or instruct to replace the entire target entity. REPLACE_FILE is the LAST RESORT only.",
+        },        
+        
+        StagingErrorType.AMBIGUOUS_REPLACE_PATTERN: {
+            "description": "The REPLACE_PATTERN or INSERT anchor matched more than one location in the file.",
+            "cause": "The pattern text is too short or non-unique — it appears identically two or more times in the file.",
+            "solution": (
+                "1. Use read_file to find all occurrences of the pattern. "
+                "2. Make the pattern longer and more specific so it matches exactly ONE location. "
+                "3. Include surrounding context lines in the pattern (e.g., the preceding or following line) to make it unique. "
+                "4. TARGETED ALTERNATIVE (preferred): instruct to replace the ENTIRE target entity (the whole method or function) — structural targeting is inherently unique and avoids pattern ambiguity. "
+                "5. LAST RESORT ONLY — REPLACE_FILE: only if every targeted approach above has been tried and failed. Follow REPLACE_FILE precautions if used."
+            ),
+            "mode_hint": "Use a longer, context-specific replace_pattern that uniquely identifies one location, OR instruct to replace the entire target entity. REPLACE_FILE is the LAST RESORT only.",
+        },        
+        StagingErrorType.AI_CASCADE_FAILED: {
+            "description": "AI syntax repair cascade (Model A → Model B) failed to produce structurally valid code.",
+            "cause": "Both the primary AI model and the fallback AI model generated code that did not pass tree-sitter structural validation after application.",
+            "solution": (
+                "1. Review the SPECIFIC ERROR MESSAGE above for details on what the AI models produced. "
+                "2. TARGETED FIX FIRST: re-emit ONLY the failing code block with corrected syntax/structure, using the SAME target as before. Common issues to fix: missing brackets, wrong indentation, incomplete blocks, mismatched quotes. Do NOT widen the change scope. "
+                "3. If a localized fix still fails, try replacing the ENTIRE entity (e.g., the whole method or function) for the SAME target. "
+                "4. LAST RESORT ONLY — REPLACE_FILE: only after every targeted approach has been exhausted. If you choose REPLACE_FILE you MUST follow the REPLACE_FILE precautions to avoid deleting unrelated code."
+            ),
+            "mode_hint": "Try a targeted block rewrite first (replace the entire method/function). REPLACE_FILE is the LAST RESORT and requires preserving ALL existing code.",
+        },        
+        StagingErrorType.STRUCTURAL_APPLY_FAILED: {
+            "description": "AI-validated fix could not be applied to the file structure.",
+            "cause": "The AI fixer produced code that passed validation in isolation, but when applied to the actual file, the structural modification failed (e.g. insertion point no longer exists, or file changed between validation and application).",
+            "solution": "1. Use read_file to check the current file structure. 2. Verify the target (class/method/function) still exists. 3. Provide a revised instruction with correct targets. 4. Consider using REPLACE_FILE or REPLACE_METHOD instead of surgical insertion.",
+            "mode_hint": "Use REPLACE_METHOD or REPLACE_FILE for more reliable application",
         },
-        StagingErrorType.AMBIGUOUS_TARGET_METHOD: {
-            "description": "Target method was not found with the specified TARGET_CLASS, but multiple methods with this exact name exist globally in the file.",
-            "cause": "Incorrect or missing TARGET_CLASS for a method that has multiple overloads or implementations in different structs/classes.",
-            "solution": "1. Use read_file to check exactly which struct/class this method belongs to. 2. Provide the correct TARGET_CLASS.",
-            "mode_hint": "Verify TARGET_CLASS context for the method",
+        StagingErrorType.STAGING_SYSTEM_ERROR: {
+            "description": "A system-level error occurred during staging (parser unavailable, infrastructure failure).",
+            "cause": "The tree-sitter parser or another system component was not available or crashed during the staging process.",
+            "solution": "1. This is a SYSTEM error, not an instruction error. 2. Try using REPLACE_FILE mode which does not require structural parsing. 3. If the problem persists, report the system error. 4. Do NOT change your instruction logic — only switch to REPLACE_FILE mode.",
+            "mode_hint": "Use REPLACE_FILE as fallback (bypasses structural parsing)",
+        },
+        StagingErrorType.SYSTEM_ERROR: {
+            "description": "An unexpected system exception occurred during code staging.",
+            "cause": "An unhandled exception (e.g. file I/O error, parser crash, memory issue) occurred while applying the code block.",
+            "solution": "1. Review the SPECIFIC ERROR MESSAGE above for the exception details. 2. If the error is transient, retry the same instruction. 3. If the error persists, simplify the code block or use REPLACE_FILE mode. 4. Check if the target file is accessible and not locked.",
+            "mode_hint": "Simplify the code block or use REPLACE_FILE",
         },
         StagingErrorType.UNKNOWN: {
             "description": "An unexpected staging error occurred.",
@@ -247,6 +316,61 @@ def get_staging_error_guidance(error_type: StagingErrorType) -> dict:
     }
     
     return guidance_map.get(error_type, guidance_map[StagingErrorType.UNKNOWN])
+
+def _normalize_staging_error_type(error_type: Any) -> "StagingErrorType":
+    """
+    Robustly convert a string or StagingErrorType to a valid StagingErrorType enum.
+    
+    Handles multiple input forms:
+    - StagingErrorType enum instance (passed through)
+    - Lowercase value string (e.g. "class_not_found") — direct value lookup
+    - Uppercase name string (e.g. "CLASS_NOT_FOUND") — name lookup
+    - Mixed-case string — case-insensitive search
+    
+    This prevents the bug where error_type strings passed as NAME form
+    (uppercase) fail StagingErrorType(value) lookup and fall back to UNKNOWN.
+    """
+    if error_type is None:
+        return StagingErrorType.UNKNOWN
+    
+    if isinstance(error_type, StagingErrorType):
+        return error_type
+    
+    if not isinstance(error_type, str):
+        return StagingErrorType.UNKNOWN
+    
+    s = error_type.strip()
+    if not s:
+        return StagingErrorType.UNKNOWN
+    
+    # Strategy 1: Direct value lookup (e.g. "class_not_found")
+    try:
+        return StagingErrorType(s)
+    except ValueError:
+        pass
+    
+    # Strategy 2: Uppercase NAME lookup (e.g. "CLASS_NOT_FOUND")
+    upper = s.upper()
+    for member in StagingErrorType:
+        if member.name == upper:
+            return member
+    
+    # Strategy 3: Case-insensitive value lookup
+    lower = s.lower()
+    for member in StagingErrorType:
+        if member.value == lower:
+            return member
+    
+    # Strategy 4: Case-insensitive name lookup (extra safety)
+    for member in StagingErrorType:
+        if member.name.lower() == lower:
+            return member
+    
+    logger.warning(
+        f"_normalize_staging_error_type: could not map '{error_type}' to any "
+        f"StagingErrorType, falling back to UNKNOWN"
+    )
+    return StagingErrorType.UNKNOWN
 
 
 class FeedbackPriority(Enum):
@@ -417,15 +541,25 @@ class TestErrorFeedback:
 class StagingErrorFeedback:
     """
     Staging errors: Code is valid python, but targets (files/classes/methods) are missing.
+    
+    UPDATED: Now includes specific error message, validation errors, and AI fix context
+    so the Orchestrator receives FULL details instead of just generic guidance.
     """
     file_path: str
     mode: str
-    error: str
+    error: str  # The SPECIFIC error message from FileModifier
     error_type: StagingErrorType = StagingErrorType.UNKNOWN
     target_class: Optional[str] = None
     target_method: Optional[str] = None
     target_function: Optional[str] = None
     insert_pattern: Optional[str] = None
+    # === NEW: Additional context fields ===
+    insert_after: Optional[str] = None
+    insert_before: Optional[str] = None
+    replace_pattern: Optional[str] = None
+    full_code: Optional[str] = None  # The code that failed to stage
+    ai_fixed_code: Optional[str] = None  # AI-proposed fix that also failed
+    validation_errors: List[Any] = field(default_factory=list)  # Structural validation error details
     
     def to_prompt_format(self) -> str:
         guidance = get_staging_error_guidance(self.error_type)
@@ -450,6 +584,36 @@ class StagingErrorFeedback:
             parts.append(f"Insert Pattern: {self.insert_pattern}")
         
         parts.append("")
+        
+        # === CRITICAL: Show the SPECIFIC error message ===
+        parts.append("🔴 SPECIFIC ERROR MESSAGE:")
+        parts.append(f"  {self.error}")
+        parts.append("")
+        
+        # === NEW: Show validation errors if available ===
+        if self.validation_errors:
+            parts.append("🔴 STRUCTURAL VALIDATION ERRORS:")
+            for ve in self.validation_errors[:10]:
+                parts.append(f"  • {ve}")
+            if len(self.validation_errors) > 10:
+                parts.append(f"  ... and {len(self.validation_errors) - 10} more errors")
+            parts.append("")
+        
+        # === NEW: Show AI fix attempt context if available ===
+        if self.ai_fixed_code:
+            parts.append("⚠️ AI SYNTAX FIXER ATTEMPTED BUT FAILED:")
+            parts.append(f"  The AI cascade (Model A → Model B) was invoked to fix this block")
+            parts.append(f"  but the resulting code also failed structural validation.")
+            ai_preview = self.ai_fixed_code[:300]
+            if len(self.ai_fixed_code) > 300:
+                ai_preview += "..."
+            parts.append(f"  AI-proposed code preview:")
+            parts.append(f"  ```")
+            for line in ai_preview.split('\n')[:10]:
+                parts.append(f"  {line}")
+            parts.append(f"  ```")
+            parts.append("")
+        
         
         # What went wrong
         parts.append("WHAT WENT WRONG:")
@@ -1070,16 +1234,22 @@ class FeedbackHandler:
         target_method: Optional[str] = None,
         target_function: Optional[str] = None,
         insert_pattern: Optional[str] = None,
+        # === NEW: Additional context parameters ===
+        insert_after: Optional[str] = None,
+        insert_before: Optional[str] = None,
+        replace_pattern: Optional[str] = None,
+        full_code: Optional[str] = None,
+        ai_fixed_code: Optional[str] = None,
+        validation_errors: Optional[List[Any]] = None,
     ) -> None:
-        """Add feedback about staging failure."""
-        # Sanitize error_type to prevent crashes on None
-        if error_type is None:
-            error_type = StagingErrorType.UNKNOWN
-        elif isinstance(error_type, str):
-            try:
-                error_type = StagingErrorType(error_type)
-            except ValueError:
-                error_type = StagingErrorType.UNKNOWN
+        """Add feedback about staging failure.
+        
+        UPDATED: Now accepts and stores full context (targets, validation errors,
+        AI fix attempts) so the Orchestrator receives complete error details
+        instead of just a generic error type.
+        """
+        # Robustly normalize error_type using the helper function
+        error_type = _normalize_staging_error_type(error_type)
             
         self._staging_errors.append(StagingErrorFeedback(
             file_path=file_path,
@@ -1090,9 +1260,18 @@ class FeedbackHandler:
             target_method=target_method,
             target_function=target_function,
             insert_pattern=insert_pattern,
+            insert_after=insert_after,
+            insert_before=insert_before,
+            replace_pattern=replace_pattern,
+            full_code=full_code,
+            ai_fixed_code=ai_fixed_code,
+            validation_errors=validation_errors or [],
         ))
-        logger.info(f"FeedbackHandler: Added staging error for {file_path} (type={error_type.value})")
-
+        logger.info(
+            f"FeedbackHandler: Added staging error for {file_path} "
+            f"(type={error_type.value}, error={error[:100]}...)"
+        )
+        
     def add_java_syntax_error(
         self,
         file_path: str,

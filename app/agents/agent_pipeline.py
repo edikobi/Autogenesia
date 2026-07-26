@@ -1277,14 +1277,8 @@ class AgentPipeline:
                             break
                         
                         # 2. Add to FeedbackHandler
-                        for err_item in apply_errors_data:
-                            self.feedback_loop.feedback_handler.add_staging_error(
-                                file_path=err_item["file_path"],
-                                mode=err_item["mode"],
-                                error=err_item["error"],
-                                error_type=err_item.get("error_type")
-                            )
-                    
+                        self._add_staging_errors_to_feedback(apply_errors_data)
+                                            
                         # 3. Get formatted feedback
                         feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
                         staging_text = feedback_dump.get("staging_errors", "")
@@ -1343,16 +1337,10 @@ class AgentPipeline:
                         })
                     
                         # 2. Добавляем в FeedbackHandler (для следующей большой итерации)
-                        for err_item in apply_errors_data:
-                            self.feedback_loop.feedback_handler.add_staging_error(
-                                file_path=err_item["file_path"],
-                                mode=err_item["mode"],
-                                error=err_item["error"],
-                                error_type=err_item.get("error_type")
-                            )
-                        
-                            # Dump full report to separate file
-                            trace.dump_staging_error_report(err_item)
+                        self._add_staging_errors_to_feedback(apply_errors_data)
+                                                
+                        # Dump full report to separate file
+                        trace.dump_staging_error_report(err_item)
                     
                         # 3. Логируем в трейс
                         for err_item in apply_errors_data:
@@ -2176,12 +2164,7 @@ class AgentPipeline:
                 self._notify_stage("STAGING", f"⚠️ Ошибки стейджинга: {len(apply_errors_data)}", None)
                 
                 # Добавляем в хендлер
-                for err_item in apply_errors_data:
-                    self.feedback_loop.feedback_handler.add_staging_error(
-                        file_path=err_item["file_path"],
-                        mode=err_item["mode"],
-                        error=err_item["error"]
-                    )
+                self._add_staging_errors_to_feedback(apply_errors_data)                
                 
                 # Запрашиваем исправление (аналогично валидации)
                 if self.feedback_loop.can_revise_instruction():
@@ -2714,13 +2697,8 @@ Please analyze this feedback and provide a revised instruction.""",
                     break
                 
                 # Add staging errors to feedback
-                for err_item in apply_errors_data:
-                    self.feedback_loop.feedback_handler.add_staging_error(
-                        file_path=err_item["file_path"],
-                        mode=err_item["mode"],
-                        error=err_item["error"],
-                        error_type=err_item.get("error_type")
-                    )
+                self._add_staging_errors_to_feedback(apply_errors_data)                
+                
                 
                 feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
                 staging_text = feedback_dump.get("staging_errors", "")
@@ -2778,13 +2756,7 @@ Please analyze this feedback and provide a revised instruction.""",
                 })
                 
                 # 2. Добавляем в FeedbackHandler (для следующей большой итерации)
-                for err_item in apply_errors_data:
-                    self.feedback_loop.feedback_handler.add_staging_error(
-                        file_path=err_item["file_path"],
-                        mode=err_item["mode"],
-                        error=err_item["error"],
-                        error_type=err_item.get("error_type")
-                    )
+                self._add_staging_errors_to_feedback(apply_errors_data)                
                 
                 # 3. Формируем сообщение для истории
                 feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
@@ -4436,6 +4408,34 @@ Remember: You can override the validator if you believe the critique is incorrec
             "validation_errors": validation_errors or [],
             "backup_content": backup_content,
         }
+
+    def _add_staging_errors_to_feedback(self, apply_errors_data: List[Dict[str, Any]]) -> None:
+        """
+        Pass staging errors to FeedbackHandler with FULL context.
+        
+        This ensures the Orchestrator receives:
+        - Correct error_type (not UNKNOWN)
+        - Specific error message
+        - Target information (class/method/function)
+        - Validation errors
+        - AI fix attempt context
+        """
+        for err_item in apply_errors_data:
+            self.feedback_loop.feedback_handler.add_staging_error(
+                file_path=err_item["file_path"],
+                mode=err_item["mode"],
+                error=err_item["error"],
+                error_type=err_item.get("error_type"),
+                target_class=err_item.get("target_class"),
+                target_method=err_item.get("target_method"),
+                target_function=err_item.get("target_function"),
+                insert_after=err_item.get("insert_after"),
+                insert_before=err_item.get("insert_before"),
+                replace_pattern=err_item.get("replace_pattern"),
+                full_code=err_item.get("full_code"),
+                ai_fixed_code=err_item.get("ai_fixed_code"),
+                validation_errors=err_item.get("validation_errors"),
+            )
 
     def _extract_broken_snapshot_robust(self, block: ParsedCodeBlock, content: str) -> Optional[str]:
         """Helper to extract context around the block for the AI fixer."""

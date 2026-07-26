@@ -100,7 +100,8 @@ class PendingChange:
             return len(self.new_content.splitlines()) if self.new_content else 0
         
         old_lines = set(self.original_content.splitlines())
-        new_lines = self.new_content.splitlines()
+        # FIX: Защита от None
+        new_lines = (self.new_content or "").splitlines()
         return sum(1 for line in new_lines if line not in old_lines)
     
     @property
@@ -110,9 +111,9 @@ class PendingChange:
             return 0
         
         old_lines = self.original_content.splitlines()
-        new_lines = set(self.new_content.splitlines())
+        # FIX: Защита от None
+        new_lines = set((self.new_content or "").splitlines())
         return sum(1 for line in old_lines if line not in new_lines)
-
 
 @dataclass
 class AffectedFiles:
@@ -282,6 +283,13 @@ class VirtualFileSystem:
         else:
             original_content = None
         
+        # FIX: Жёстко соблюдаем контракт new_content: str.
+        # Если передан None (например, при откате несуществующего файла), нормализуем в "".
+        if new_content is None:
+            new_content = ""
+            if change_type is None:
+                change_type = ChangeType.DELETE
+        
         # Auto-determine change type
         if change_type is None:
             if original_content is None:
@@ -289,7 +297,7 @@ class VirtualFileSystem:
             elif not new_content.strip():
                 change_type = ChangeType.DELETE
             else:
-                change_type = ChangeType.MODIFY
+                change_type = ChangeType.MODIFY        
         
         # Create PendingChange
         change = PendingChange(
@@ -1811,8 +1819,9 @@ else:
         if not change:
             return None
         
+        # FIX: Защита от None, если данные были испорчены ранее
         old_lines = (change.original_content or "").splitlines(keepends=True)
-        new_lines = change.new_content.splitlines(keepends=True)
+        new_lines = (change.new_content or "").splitlines(keepends=True)        
         
         diff = difflib.unified_diff(
             old_lines,
