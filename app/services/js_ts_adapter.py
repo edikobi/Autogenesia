@@ -768,15 +768,7 @@ class JsTsAdapter(LanguageAdapter):
                 TypeScript files are compiled together with tsc, JavaScript files are checked individually.
 
                 CRITICAL: For JS/TS projects, we must include ALL project source files,
-                not just the changed files. This is because TypeScript/JavaScript modules
-                may import other project files that need to be present during compilation.
-
-                Args:
-                    files: List of (code, file_path) tuples - these are the STAGED/CHANGED files
-                    project_root: Optional project root path
-
-                Returns:
-                    Dict with 'success', 'results', 'stderr', 'stdout', 'exit_code'
+                ...
                 """
                 if not files:
                     return {
@@ -787,11 +779,17 @@ class JsTsAdapter(LanguageAdapter):
                         'exit_code': 0,
                     }
 
+                # [НОВОЕ] Перехватываем .tsx и .jsx файлы для отдельной проверки
+                is_react_batch = any(fp.endswith(('.tsx', '.jsx')) for _, fp in files)
+                if is_react_batch:
+                    return self._compile_react_files(files, project_root)
+
                 effective_root = project_root or self.project_root
                 temp_dir = None
 
                 try:
                     temp_dir = tempfile.mkdtemp(prefix='js_ts_check_deps_')
+                    
 
                     # Build a map of staged files with MULTIPLE path formats for robust lookup
                     staged_files_map: Dict[str, str] = {}
@@ -1208,3 +1206,206 @@ class JsTsAdapter(LanguageAdapter):
                 finally:
                     if temp_dir and Path(temp_dir).exists():
                         shutil.rmtree(temp_dir, ignore_errors=True)
+                        
+    def _link_node_modules(self, temp_dir: str, project_root: Path) -> bool:
+        """Создает символическую ссылку или junction для node_modules."""
+        node_modules_src = Path(project_root) / 'node_modules'
+        node_modules_dst = Path(temp_dir) / 'node_modules'
+        
+        if not node_modules_src.exists():
+            return False
+            
+        if node_modules_dst.exists():
+            return True
+            
+        try:
+            if sys.platform == 'win32':
+                # Windows: используем junction (не требует прав администратора)
+                subprocess.run(
+                    ['cmd', '/c', 'mklink', '/J', str(node_modules_dst), str(node_modules_src)],
+                    check=True,
+                    capture_output=True
+                )
+            else:
+                os.symlink(node_modules_src, node_modules_dst)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to link node_modules: {e}")
+            return False
+
+    def _compile_react_files(self, files: List[Tuple[str, str]], project_root: Optional[Path] = None) -> Dict:
+        """
+        Специальная проверка для .tsx и .jsx файлов.
+        Запускает tsc --noEmit с корректным окружением (node_modules).
+        """
+        effective_root = project_root or self.project_root
+        temp_dir = None
+        
+        # Если в проекте нет node_modules, tsc выдаст TS2307 на все пакеты.
+        # Возвращаем явную ошибку окружения, чтобы не валидировать ложные ошибки типов.
+        node_modules_src = Path(effective_root) / 'node_modules' if effective_root else None
+        if not node_modules_src or not node_modules_src.exists():
+            logger.warning("RUNTIME/TSX: node_modules not found in project root. Skipping React type check.")
+            return {
+                'success': False,
+                'results': [{'file_path': fp, 'success': False, 'stderr': 'node_modules not found. Run npm install first.', 'exit_code': -1} for _, fp in files],
+                'stderr': 'node_modules not found in project root.',
+                'stdout': '',
+                'exit_code': -1
+            }
+        
+        try:
+            temp_dir = tempfile.mkdtemp(prefix='react_check_')
+            
+            # 1. Линкуем node_modules
+            if not self._link_node_modules(temp_dir, effective_root):
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': 'Failed to link node_modules', 'exit_code': -1} for _, fp in files],
+                    'stderr': 'Failed to link node_modules',
+                    'stdout': '',
+                    'exit_code': -1
+                }
+            
+            # 2. Копируем все JS/TS/React файлы проекта во временную папку
+            staged_files_map = {fp.replace('\\', '/'): code for code, fp in files}
+            staged_rel_paths = [fp.replace('\\', '/') for _, fp in files]
+            
+            if effective_root and Path(effective_root).exists():
+                for source_file in Path(effective_root).rglob('*'):
+                    if source_file.suffix not in ('.js', '.jsx', '.ts', '.tsx'):
+                        continue
+                    try:
+                        rel_path = source_file.relative_to(effective_root)
+                        rel_path_str = str(rel_path).replace('\\', '/')
+                        parts = rel_path.parts
+                        if any(p.startswith('.') or p in ('node_modules', 'dist', 'build', 'coverage') for p in parts):
+                            continue
+                        
+                        # Безопасное извлечение контента
+                        if rel_path_str in staged_files_map:
+                            content = staged_files_map[rel_path_str]
+                        else:
+                            content = self._read_file_content(source_file, rel_path_str)
+                            
+                        if content is None:
+                            continue
+                        
+                        temp_file = Path(temp_dir) / rel_path
+                        temp_file.parent.mkdir(parents=True, exist_ok=True)
+                        temp_file.write_text(content, encoding='utf-8')
+                    except Exception:
+                        continue
+                        
+            # 3. Генерируем идеальный tsconfig.json, читая его из VFS
+            tsconfig_data = {}
+            if self.vfs:
+                content = self.vfs.read_file('tsconfig.json')
+                if content:
+                    try: 
+                        tsconfig_data = json.loads(content)
+                    except: 
+                        pass
+            if not tsconfig_data and (Path(effective_root) / 'tsconfig.json').exists():
+                try: 
+                    tsconfig_data = json.loads((Path(effective_root) / 'tsconfig.json').read_text(encoding='utf-8'))
+                except: 
+                    pass
+                    
+            compiler_options = tsconfig_data.get('compilerOptions', {})
+            compiler_options['noEmit'] = True
+            compiler_options['skipLibCheck'] = True
+            compiler_options['esModuleInterop'] = True
+            compiler_options['moduleResolution'] = 'node'
+            compiler_options['pretty'] = False
+            
+            # Безопасно мапим baseUrl на временную директорию
+            original_base_url = compiler_options.get('baseUrl', '.')
+            compiler_options['baseUrl'] = str(Path(temp_dir) / original_base_url)
+            
+            if 'jsx' not in compiler_options:
+                compiler_options['jsx'] = 'react-jsx'
+                
+            tsconfig_data['compilerOptions'] = compiler_options
+            tsconfig_data['include'] = staged_rel_paths  # Проверяем только измененные файлы
+            
+            (Path(temp_dir) / 'tsconfig.json').write_text(json.dumps(tsconfig_data, indent=2), encoding='utf-8')
+            
+            # 4. Запускаем tsc
+            cmd = []
+            # ИСПРАВЛЕНИЕ: На Windows subprocess падает с WinError 2, если передать просто 'tsc' или 'npx'. 
+            # Нужно явно получать полный путь к .cmd файлу через shutil.which.
+            tsc_cmd = self._tsc_path or shutil.which('tsc')
+            npx_cmd = shutil.which('npx')
+            
+            if tsc_cmd:
+                cmd.append(tsc_cmd)
+            elif npx_cmd:
+                cmd.extend([npx_cmd, 'tsc'])
+            else:
+                return {
+                    'success': False,
+                    'results': [{'file_path': fp, 'success': False, 'stderr': 'tsc not available', 'exit_code': -1} for _, fp in files],
+                    'stderr': 'tsc not available',
+                    'stdout': '',
+                    'exit_code': -1
+                }
+                                
+            cmd.extend(['-p', 'tsconfig.json'])
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=temp_dir,
+                timeout=60,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            # 5. Парсим ошибки, оставляя только те, что касаются проверяемых файлов
+            individual_results = []
+            output = result.stdout + "\n" + result.stderr
+            
+            for code, fp in files:
+                fp_norm = fp.replace('\\', '/')
+                # tsc выводит ошибки в формате: src/path/file.tsx(line,col): error TS...
+                file_errors = [line for line in output.splitlines() if line.startswith(fp_norm)]
+                
+                if not file_errors:
+                    individual_results.append({
+                        'file_path': fp,
+                        'success': True,
+                        'stderr': '',
+                        'stdout': '',
+                        'exit_code': 0
+                    })
+                else:
+                    individual_results.append({
+                        'file_path': fp,
+                        'success': False,
+                        'stderr': '\n'.join(file_errors),
+                        'stdout': '',
+                        'exit_code': 1
+                    })
+                    
+            overall_success = all(r['success'] for r in individual_results)
+            return {
+                'success': overall_success,
+                'results': individual_results,
+                'stderr': output if not overall_success else '',
+                'stdout': '',
+                'exit_code': 0 if overall_success else 1
+            }
+            
+        except Exception as e:
+            logger.error(f"React compilation error: {e}", exc_info=True)
+            return {
+                'success': False,
+                'results': [{'file_path': fp, 'success': False, 'stderr': str(e), 'exit_code': -1} for _, fp in files],
+                'stderr': str(e),
+                'stdout': '',
+                'exit_code': -1
+            }
+        finally:
+            if temp_dir and Path(temp_dir).exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)                        

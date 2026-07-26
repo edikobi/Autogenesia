@@ -726,7 +726,7 @@ class MultiLanguageParser:
         'javascript': {
             'module': 'tree_sitter_javascript',
             'extensions': ['.js', '.jsx', '.mjs'],
-            'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+            'function_types': ['function_declaration', 'generator_function_declaration', 'method_definition', 'function_expression', 'arrow_function',],
             'class_types': ['class_declaration'],
             'body_type': 'statement_block',
         },
@@ -734,8 +734,8 @@ class MultiLanguageParser:
             'module': 'tree_sitter_typescript',
             'attr': 'language_typescript',
             'extensions': ['.ts', '.tsx'],
-            'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
-            'class_types': ['class_declaration'],
+            'function_types': ['function_declaration', 'generator_function_declaration', 'method_definition', 'function_expression', 'arrow_function',],
+            'class_types': ['class_declaration', 'interface_declaration', 'type_alias_declaration', 'enum_declaration'],
             'body_type': 'statement_block',
         },
         'go': {
@@ -749,11 +749,11 @@ class MultiLanguageParser:
             'module': 'tree_sitter_java',
             'extensions': ['.java'],
             'function_types': ['method_declaration', 'constructor_declaration'],
-            'class_types': ['class_declaration', 'interface_declaration'],
+            'class_types': ['class_declaration', 'interface_declaration', 'enum_declaration', 'record_declaration'],
             'body_type': 'block',
         },
     }
-
+    
     def __init__(self):
             """Initialize parser cache."""
             self._parsers: Dict[str, any] = {}
@@ -764,10 +764,11 @@ class MultiLanguageParser:
                     'module': 'tree_sitter_typescript',
                     'attr': 'language_tsx',
                     'extensions': ['.tsx'],
-                    'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
-                    'class_types': ['class_declaration'],
+                    'function_types': ['function_declaration', 'generator_function_declaration', 'method_definition'],
+                    'class_types': ['class_declaration', 'interface_declaration', 'type_alias_declaration', 'enum_declaration'],
                     'body_type': 'statement_block',
-                }
+                }                
+                
                 # Remove '.tsx' from typescript extensions
                 ts_config = MultiLanguageParser.LANGUAGE_CONFIGS['typescript']
                 if '.tsx' in ts_config.get('extensions', []):
@@ -782,10 +783,11 @@ class MultiLanguageParser:
                     'module': 'tree_sitter_typescript',
                     'attr': 'language_tsx',
                     'extensions': ['.jsx'],
-                    'function_types': ['function_declaration', 'method_definition', 'arrow_function'],
+                    'function_types': ['function_declaration', 'generator_function_declaration', 'method_definition'],
                     'class_types': ['class_declaration'],
                     'body_type': 'statement_block',
-                }
+                }                
+                
                 # Убираем .jsx из javascript, чтобы не было конфликта
                 js_config = MultiLanguageParser.LANGUAGE_CONFIGS.get('javascript', {})
                 if '.jsx' in js_config.get('extensions', []):
@@ -1186,6 +1188,142 @@ class MultiLanguageParser:
     
             except Exception as e:
                 logger.warning(f"Error finding element: {e}")
+                return None
+
+
+    def find_target_node(
+            self,
+            source_bytes: bytes,
+            language: str,
+            target_name: str,
+            target_type: str,  # 'class', 'function', 'method'
+            parent_name: Optional[str] = None
+        ) -> Optional[Dict[str, Any]]:
+            """
+            [NEW] Finds a specific code element by name and type in the AST.
+            Handles language-specific unwrapping (e.g., JS exports) and context (e.g., Go receivers).
+            Returns 'ambiguous_target_method' dict if multiple matches found without parent context.
+            
+            Returns:
+                Dict with 'node', 'start_line', 'end_line', 'indent', or {'error': 'ambiguous_target_method'}, or None.
+            """
+            try:
+                ts_parser, _ = self._get_parser_for_language(language)
+                tree = ts_parser.parse(source_bytes)
+                
+                config = self.LANGUAGE_CONFIGS[language]
+                class_types = config.get('class_types', [])
+                function_types = config.get('function_types', [])
+                
+                if target_type == 'class':
+                    target_types = class_types
+                elif target_type in ('function', 'method'):
+                    target_types = function_types
+                elif target_type == 'all':
+                    if parent_name:
+                        # If parent context is provided, we are looking for a method/function inside a class.
+                        # We must NOT match nested classes with the same name!
+                        target_types = function_types
+                    else:
+                        # No parent context: search both classes and functions/interfaces.
+                        target_types = class_types + function_types
+                else:
+                    return None
+                                
+                all_matches = []
+                
+                def unwrap_export(node):
+                    """For JS/TS: if node is export_statement or export_default, return the inner declaration."""
+                    if language in ('javascript', 'typescript', 'tsx', 'jsx') and node.type in ('export_statement', 'export_default_declaration'):
+                        for child in node.children:
+                            if child.type in class_types or child.type in function_types:
+                                return child
+                            # ИСПРАВЛЕНИЕ 3: Разворачиваем переменные (export const MyComp = ...)
+                            if child.type in ('lexical_declaration', 'variable_declaration'):
+                                return child
+                    return node
+                
+                def contains_function(node):
+                    """Рекурсивно проверяет, содержит ли узел function_expression или arrow_function."""
+                    if node.type in ('function_expression', 'arrow_function'):
+                        return True
+                    for c in node.children:
+                        if contains_function(c):
+                            return True
+                    return False
+
+                def walk(node, current_parent=None):
+                    real_node = unwrap_export(node)
+                    # If we unwrapped an export, we process the inner node directly
+                    if real_node != node:
+                        walk(real_node, current_parent)
+                        return
+                        
+                    is_class = real_node.type in class_types
+                    is_target_type = real_node.type in target_types
+                    
+                    node_name = None
+                    
+                    # ИСПРАВЛЕНИЕ 2: Обработка lexical_declaration / variable_declaration
+                    # Если переменной присваивается функция (() => {}, function() {}) или HOC (memo(...))
+                    if real_node.type in ('lexical_declaration', 'variable_declaration'):
+                        for vd in real_node.children:
+                            if vd.type == 'variable_declarator':
+                                name_node = vd.child_by_field_name('name')
+                                value_node = vd.child_by_field_name('value')
+                                if name_node and value_node:
+                                    is_var_func = False
+                                    # Случай 1: Обычная стрелка или function expression
+                                    if value_node.type in ('function_expression', 'arrow_function'):
+                                        is_var_func = True
+                                    # Случай 2: Обернуто в вызов функции (HOC, например memo(function...))
+                                    elif value_node.type == 'call_expression':
+                                        if contains_function(value_node):
+                                            is_var_func = True
+                                    
+                                    if is_var_func:
+                                        node_name = source_bytes[name_node.start_byte:name_node.end_byte].decode('utf-8', errors='ignore')
+                                        is_target_type = True  # Считаем целью, если имя совпадет
+
+                    if is_class or is_target_type:
+                        if not node_name:
+                            node_name = self._extract_node_name(real_node, source_bytes, language)
+                        
+                    next_parent = node_name if is_class else current_parent
+                    
+                    if is_target_type and node_name == target_name:
+                        # If parent context is specified, enforce it strictly
+                        if parent_name:
+                            if language == 'go' and real_node.type == 'method_declaration':
+                                receiver_type = self._get_go_receiver_type(real_node, source_bytes)
+                                if receiver_type == parent_name:
+                                    all_matches.append(real_node)
+                            elif current_parent == parent_name:
+                                all_matches.append(real_node)
+                        else:
+                            # No parent context, collect all matches to check for ambiguity
+                            all_matches.append(real_node)
+                            
+                    for child in real_node.children:
+                        walk(child, next_parent)                
+                walk(tree.root_node)
+                
+                if not all_matches:
+                    return None
+                if len(all_matches) == 1:
+                    found_node = all_matches[0]
+                    return {
+                        'node': found_node,
+                        'start_line': found_node.start_point[0] + 1,
+                        'end_line': found_node.end_point[0] + 1,
+                        'indent': found_node.start_point[1]
+                    }
+                
+                # Multiple matches found without parent context -> ambiguous
+                return {'error': 'ambiguous_target_method'}
+                
+            except Exception as e:
+                logger.warning(f"Error in find_target_node: {e}")
                 return None
 
     def validate_syntax(self, source_code: str, language: str) -> Tuple[bool, List[str]]:

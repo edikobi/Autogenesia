@@ -139,10 +139,10 @@ class AdapterManager:
     
     EXTENSION_TO_LANGUAGE: Dict[str, str] = {
         '.js': 'javascript',
-        '.jsx': 'javascript',
+        '.jsx': 'jsx',
         '.mjs': 'javascript',
         '.ts': 'typescript',
-    '.tsx': 'tsx',
+        '.tsx': 'tsx',
         '.go': 'go',
         '.java': 'java',
     }
@@ -201,9 +201,10 @@ class AdapterManager:
             if adapter.is_available():
                 self._adapters['javascript'] = adapter
                 self._adapters['typescript'] = adapter
-
+                self._adapters['jsx'] = adapter
                 self._adapters['tsx'] = adapter
-                logger.info(f"JsTsAdapter registered for javascript/typescript (vfs={'yes' if self.vfs else 'no'})")
+                logger.info(f"JsTsAdapter registered for javascript/typescript/jsx/tsx (vfs={'yes' if self.vfs else 'no'})")
+        
         except ImportError as e:
             logger.debug(f"JsTsAdapter not available: {e}")
         except Exception as e:

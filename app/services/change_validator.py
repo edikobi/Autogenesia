@@ -707,20 +707,18 @@ class ChangeValidator:
                 logger.info(f"[SYNTAX] Batch compiling {len(language_files)} {language} files together")
 
                 # Handle JS/TS/Go using tree-sitter syntax checks
-                if language in ('javascript', 'js', 'typescript', 'ts', 'tsx', 'go'):
+                if language in ('javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'go'):
                     for code, file_path in language_files:
                         if language in ('javascript', 'js'):
                             check_result = self.syntax_checker.check_javascript(code, auto_fix=True)
                         elif language in ('typescript', 'ts'):
-                            # [TSX FIX] .tsx files must use TSX-specific check
-                            # even if adapter returned 'typescript' as language
                             if file_path.endswith('.tsx'):
                                 check_result = self.syntax_checker.check_tsx(code, auto_fix=True)
                             else:
                                 check_result = self.syntax_checker.check_typescript(code, auto_fix=True)
-                        elif language == 'tsx':
+                        elif language in ('tsx', 'jsx'):  # Объединяем tsx и jsx
                             check_result = self.syntax_checker.check_tsx(code, auto_fix=True)
-                        elif language == 'go':
+                        elif language == 'go':                            
                             check_result = self.syntax_checker.check_go(code, auto_fix=True)
 
                         # Process tree-sitter check results for JS/TS/Go/TSX
@@ -2507,7 +2505,7 @@ exclude =
                                                 result.runtime_files_passed += 1
                                         else:
                                             error_message = (
-                                                f"Compilation/syntax check failed for {language} file.\n"
+                                                f"Type check failed for {language} file.\n"
                                                 f"Error output:\n{file_stderr[:500]}"
                                             )
                                         
@@ -2517,9 +2515,9 @@ exclude =
                                                 file_path=file_path,
                                                 message=error_message,
                                                 code=f"{language}_compile_error",
-                                                suggestion=f"Fix the {language} compilation errors shown above",
+                                                suggestion=f"Fix the {language} type errors shown above",
                                                 language=language,
-                                            ))
+                                            ))                                        
                                         
                                             logger.warning(f"RUNTIME FAILED ({language}): {file_path}")
                                             if result is not None:

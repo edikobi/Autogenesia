@@ -1950,131 +1950,74 @@ class FileModifier:
             target_function: Optional[str],
             target_name: Optional[str] = None
         ) -> Optional[Dict[str, Any]]:
-            """Find a target element (class, method, function) in non-Python code using tree-sitter."""
-            try:
-                # Get parser for language
-                ts_parser, _ = parser._get_parser_for_language(language)
-                tree = ts_parser.parse(source_bytes)
-        
-                # Get language config
-                lang_config = parser.LANGUAGE_CONFIGS.get(language, {})
-                function_types = lang_config.get('function_types', [])
-                class_types = lang_config.get('class_types', [])
-        
-                # Walk tree to find target
-                def walk_tree(node, current_class=None):
-                    node_name = None
-                    is_class = node.type in class_types
-                    is_function = node.type in function_types
-            
-                    if is_class or is_function:
-                        node_name = parser._extract_node_name(node, source_bytes, language)
-            
-                    # Update current class context - FIX: Only update if is_class AND node_name is not None
-                    next_class = node_name if (is_class and node_name is not None) else current_class
-                    
-                    # [Go Specific] Override context for Go methods (via receiver)
-                    if language == 'go' and is_function and node.type == 'method_declaration':
-                        receiver_type = parser._get_go_receiver_type(node, source_bytes)
-                        if receiver_type:
-                            next_class = receiver_type
-
-                    # 1. Universal search by target_name (if no specific types given)
-                    if target_name and not (target_class or target_method or target_function):
-                        # [Go Specific] Structural signature matching
-                        if language == 'go' and is_function and target_name.startswith('func'):
-                            content = source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='ignore')
-                            decl_line = content.split('\n')[0].strip()
-                            
-                            def norm(s):
-                                import re
-                                s = s.replace('* ', '*').replace(' *', '*')
-                                return re.sub(r'\s+', ' ', s).strip()
-                            
-                            if norm(decl_line).startswith(norm(target_name)):
-                                return {
-                                    'node': node,
-                                    'start_line': node.start_point[0] + 1,
-                                    'end_line': node.end_point[0] + 1,
-                                    'name': node_name,
-                                    'kind': 'function'
-                                }
-
-                        if (is_class or is_function) and node_name == target_name:
-                            return {
-                                'node': node,
-                                'start_line': node.start_point[0] + 1,
-                                'end_line': node.end_point[0] + 1,
-                                'name': node_name,
-                                'kind': 'class' if is_class else 'function'
-                            }
-
-                    # 2. If we are looking for a class specifically and found it
-                    if target_class and not target_method and is_class and node_name == target_class:
-                        return {
-                            'node': node,
-                            'start_line': node.start_point[0] + 1,
-                            'end_line': node.end_point[0] + 1,
-                            'name': node_name,
-                            'kind': 'class'
-                        }
-            
-                    # 3. If we are looking for a method/function specifically and found it
-                    target_func_name = target_function or target_method
-                    if target_func_name and is_function and node_name == target_func_name:
-                        # If target_class is specified, we must be inside it (or have it as receiver for Go)
-                        if not target_class or next_class == target_class:
-                            return {
-                                'node': node,
-                                'start_line': node.start_point[0] + 1,
-                                'end_line': node.end_point[0] + 1,
-                                'name': node_name,
-                                'kind': 'function'
-                            }
-            
-                    # Recurse
-                    for child in node.children:
-                        result = walk_tree(child, next_class)
-                        if result:
-                            return result
-            
-                    return None
-            
-                result = walk_tree(tree.root_node)
-                
-                # Custom fallback for Go/JS/TS: if target class and method provided, but method not found in class context
-                if result is None and target_class and target_method and language in ('go', 'javascript', 'typescript'):
-                    global_matches = []
-                    
-                    def find_global_matches(node):
-                        is_func = node.type in function_types
-                        if is_func:
-                            n_name = parser._extract_node_name(node, source_bytes, language)
-                            if n_name == target_method:
-                                global_matches.append({
-                                    'node': node,
-                                    'start_line': node.start_point[0] + 1,
-                                    'end_line': node.end_point[0] + 1,
-                                    'name': n_name,
-                                    'kind': 'function'
-                                })
-                        for child in node.children:
-                            find_global_matches(child)
-                            
-                    find_global_matches(tree.root_node)
-                    
-                    if len(global_matches) == 1:
-                        # Only exactly one such method globally, assume it is intended
-                        return global_matches[0]
-                    elif len(global_matches) > 1:
-                        # Ambiguous
-                        return {'error': 'ambiguous_target_method'}
-                
-                return result
-        
-            except Exception as e:
-                logger.warning(f"Error finding multilang target: {e}")
+            """
+            Find a target element (class, method, function) in non-Python code.
+            Delegates the AST traversal to MultiLanguageParser.find_target_node.
+            """
+            # Determine target_type and target_name based on what was provided
+            if target_method and target_class:
+                t_type = 'method'
+                t_name = target_method
+            elif target_class:
+                t_type = 'class'
+                t_name = target_class
+            elif target_function:
+                t_type = 'function'
+                t_name = target_function
+            elif target_method:
+                t_type = 'method'
+                t_name = target_method
+            elif target_name:
+                t_type = 'all'
+                t_name = target_name
+            else:
                 return None
+
+            parent = target_class if target_method else None
+
+            # Attempt 1: Strict search based on LLM instruction
+            result = parser.find_target_node(
+                source_bytes=source_bytes,
+                language=language,
+                target_name=t_name,
+                target_type=t_type,
+                parent_name=parent
+            )
+
+            # Attempt 2: Fallback to 'all' if strict search failed
+            if not result and t_type != 'all':
+                result = parser.find_target_node(
+                    source_bytes=source_bytes,
+                    language=language,
+                    target_name=t_name,
+                    target_type='all',
+                    parent_name=parent
+                )
+                
+            # Attempt 3: Fallback for Go/JS/TS: if target class and method provided, 
+            # but method not found in class context, try searching by method name globally (as a standalone function).
+            if not result and target_class and target_method and language in ('go', 'javascript', 'typescript', 'tsx', 'jsx'):
+                result = parser.find_target_node(
+                    source_bytes=source_bytes,
+                    language=language,
+                    target_name=target_method,
+                    target_type='function',
+                    parent_name=None
+                )                
+                
+            if result:
+                if result.get('error'):
+                    return result
+                    
+                return {
+                    'node': result['node'],
+                    'start_line': result['start_line'],
+                    'end_line': result['end_line'],
+                    'name': t_name,
+                    'kind': t_type
+                }
+
+            return None    
     
     def _find_unique_anchor(
         self,
@@ -2229,7 +2172,11 @@ class FileModifier:
 
 
     def _validate_multilang_syntax(self, content: str, language: str) -> Tuple[bool, List[str]]:
-            """Validate syntax of non-Python code using tree-sitter. Returns (is_valid, error_messages)."""
+            """
+            Validate syntax of non-Python code using tree-sitter.
+            Checks for BOTH 'ERROR' nodes (syntax garbage) and 'is_missing' nodes (missing tokens like ';' or '}').
+            Returns (is_valid, error_messages).
+            """
             try:
                 parser = MultiLanguageParser()
                 ts_parser, _ = parser._get_parser_for_language(language)
@@ -2237,12 +2184,32 @@ class FileModifier:
             
                 errors = []
             
-                # Walk tree to find ERROR nodes
                 def walk_tree(node):
+                    # 1. Проверка явных синтаксических ошибок (ERROR nodes)
                     if node.type == 'ERROR':
                         line_num = node.start_point[0] + 1
-                        text_snippet = content[node.start_byte:node.end_byte][:30]
+                        text_snippet = content[node.start_byte:node.end_byte][:30].strip()
                         errors.append(f"Line {line_num}: Syntax error near '{text_snippet}'")
+                        
+                    # 2. Проверка пропущенных токенов (is_missing nodes)
+                    # Tree-sitter помечает пропущенные ';' или '}' как missing
+                    missing_attr = getattr(node, 'is_missing', False)
+                    is_miss = missing_attr() if callable(missing_attr) else bool(missing_attr)
+                    if is_miss:
+                        line_num = node.start_point[0] + 1
+                        mapping = {
+                            '}': 'closing brace "}"',
+                            '{': 'opening brace "{"',
+                            ')': 'closing parenthesis ")"',
+                            '(': 'opening parenthesis "("',
+                            ']': 'closing bracket "]"',
+                            '[': 'opening bracket "["',
+                            ';': 'semicolon ";"',
+                            ':': 'colon ":"',
+                        }
+                        token_name = str(node.type)
+                        display_name = mapping.get(token_name, f"token '{token_name}'")
+                        errors.append(f"Line {line_num}: Missing {display_name}")
                 
                     for child in node.children:
                         walk_tree(child)
@@ -2257,6 +2224,7 @@ class FileModifier:
             except Exception as e:
                 logger.debug(f"Error validating syntax: {e}")
                 return (True, [])
+
 
     def _smart_validate_multilang(self, content: str, language: str) -> bool:
         """
@@ -5841,15 +5809,8 @@ class FileModifier:
                         "(optionally preceded by decorators or comments)",
             )
         
-        if not code.startswith(('def ', 'async def ')):
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message="Code must be a function definition starting with 'def' or 'async def'",
-            )
-        
         lines = existing_content.splitlines(keepends=True)
-        
+                
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -6653,156 +6614,156 @@ class FileModifier:
         
         return False
 
-def _code_starts_with_function_def(self, code: str) -> bool:
-    """
-    Проверяет, что код представляет собой определение функции,
-    допускает наличие декораторов и комментариев перед `def`.
-    
-    Пропускаемые префиксы:
-      - пустые строки
-      - комментарии (# ...)
-      - декораторы (@decorator, возможно многострочные через (...) или \\)
-    
-    После пропускания префикса первая значимая строка должна начинаться
-    с 'def ' или 'async def '.
-    
-    Args:
-        code: Строка с кодом (рекомендуется .strip() перед вызовом)
-    
-    Returns:
-        True если код — определение функции (возможно, декорированной)
-    """
-    if not code or not code.strip():
-        return False
-    
-    lines = code.expandtabs(4).splitlines()
-    i = 0
-    paren_balance = 0  # баланс () [] {} для многострочных декораторов
-    
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
+    def _code_starts_with_function_def(self, code: str) -> bool:
+        """
+        Проверяет, что код представляет собой определение функции,
+        допускает наличие декораторов и комментариев перед `def`.
         
-        # Пустая строка в префиксе — допускается
-        if not stripped:
-            i += 1
-            continue
+        Пропускаемые префиксы:
+        - пустые строки
+        - комментарии (# ...)
+        - декораторы (@decorator, возможно многострочные через (...) или \\)
         
-        # Комментарий — допускается в префиксе
-        if stripped.startswith('#'):
-            i += 1
-            continue
+        После пропускания префикса первая значимая строка должна начинаться
+        с 'def ' или 'async def '.
         
-        # Если мы внутри скобок многострочного декоратора — пропускаем,
-        # обновляя баланс
-        if paren_balance > 0:
-            paren_balance += self._count_brace_delta(stripped)
-            i += 1
-            continue
+        Args:
+            code: Строка с кодом (рекомендуется .strip() перед вызовом)
         
-        # Декоратор: начинается с '@'
-        if stripped.startswith('@'):
-            paren_balance += self._count_brace_delta(stripped)
-            # Backslash-продолжение строки
-            if stripped.endswith('\\'):
+        Returns:
+            True если код — определение функции (возможно, декорированной)
+        """
+        if not code or not code.strip():
+            return False
+        
+        lines = code.expandtabs(4).splitlines()
+        i = 0
+        paren_balance = 0  # баланс () [] {} для многострочных декораторов
+        
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # Пустая строка в префиксе — допускается
+            if not stripped:
                 i += 1
-                # Продолжаем собирать строку, пока встречается '\'
-                while i < len(lines):
-                    nxt = lines[i].strip()
-                    if not nxt:
-                        i += 1
-                        continue
-                    paren_balance += self._count_brace_delta(nxt)
-                    if nxt.endswith('\\') and paren_balance <= 0:
-                        i += 1
-                        continue
-                    if paren_balance > 0:
-                        i += 1
-                        continue
+                continue
+            
+            # Комментарий — допускается в префиксе
+            if stripped.startswith('#'):
+                i += 1
+                continue
+            
+            # Если мы внутри скобок многострочного декоратора — пропускаем,
+            # обновляя баланс
+            if paren_balance > 0:
+                paren_balance += self._count_brace_delta(stripped)
+                i += 1
+                continue
+            
+            # Декоратор: начинается с '@'
+            if stripped.startswith('@'):
+                paren_balance += self._count_brace_delta(stripped)
+                # Backslash-продолжение строки
+                if stripped.endswith('\\'):
                     i += 1
-                    break
-                continue
-            i += 1
-            continue
-        
-        # Первая значимая строка без декоратора/комментария —
-        # должна быть определением функции
-        return stripped.startswith(('def ', 'async def '))
-    
-    # Дошли до конца, не встретив def — это только декораторы без функции
-    return False
-
-
-def _count_brace_delta(self, text: str) -> int:
-    """
-    Считает баланс скобок () [] {} в строке, игнорируя строки и комментарии.
-    Возвращает положительное число для незакрытых открывающих скобок,
-    отрицательное — для лишних закрывающих.
-    """
-    delta = 0
-    i = 0
-    n = len(text)
-    in_single = False
-    in_double = False
-    in_triple_single = False
-    in_triple_double = False
-    
-    while i < n:
-        c = text[i]
-        
-        # Пропуск строковых литералов
-        if not in_single and not in_double and not in_triple_single and not in_triple_double:
-            if text[i:i+3] == "'''":
-                in_triple_single = not in_triple_single
-                i += 3
-                continue
-            if text[i:i+3] == '"""':
-                in_triple_double = not in_triple_double
-                i += 3
-                continue
-            if c == "'":
-                in_single = True
+                    # Продолжаем собирать строку, пока встречается '\'
+                    while i < len(lines):
+                        nxt = lines[i].strip()
+                        if not nxt:
+                            i += 1
+                            continue
+                        paren_balance += self._count_brace_delta(nxt)
+                        if nxt.endswith('\\') and paren_balance <= 0:
+                            i += 1
+                            continue
+                        if paren_balance > 0:
+                            i += 1
+                            continue
+                        i += 1
+                        break
+                    continue
                 i += 1
                 continue
-            if c == '"':
-                in_double = True
-                i += 1
-                continue
-            if c == '#':
-                break  # комментарий до конца строки
-        else:
-            if in_triple_single:
+            
+            # Первая значимая строка без декоратора/комментария —
+            # должна быть определением функции
+            return stripped.startswith(('def ', 'async def '))
+        
+        # Дошли до конца, не встретив def — это только декораторы без функции
+        return False
+
+
+    def _count_brace_delta(self, text: str) -> int:
+        """
+        Считает баланс скобок () [] {} в строке, игнорируя строки и комментарии.
+        Возвращает положительное число для незакрытых открывающих скобок,
+        отрицательное — для лишних закрывающих.
+        """
+        delta = 0
+        i = 0
+        n = len(text)
+        in_single = False
+        in_double = False
+        in_triple_single = False
+        in_triple_double = False
+        
+        while i < n:
+            c = text[i]
+            
+            # Пропуск строковых литералов
+            if not in_single and not in_double and not in_triple_single and not in_triple_double:
                 if text[i:i+3] == "'''":
-                    in_triple_single = False
+                    in_triple_single = not in_triple_single
                     i += 3
                     continue
-            elif in_triple_double:
                 if text[i:i+3] == '"""':
-                    in_triple_double = False
+                    in_triple_double = not in_triple_double
                     i += 3
-                    continue
-            elif in_single:
-                if c == '\\':
-                    i += 2
                     continue
                 if c == "'":
-                    in_single = False
-            elif in_double:
-                if c == '\\':
-                    i += 2
+                    in_single = True
+                    i += 1
                     continue
                 if c == '"':
-                    in_double = False
+                    in_double = True
+                    i += 1
+                    continue
+                if c == '#':
+                    break  # комментарий до конца строки
+            else:
+                if in_triple_single:
+                    if text[i:i+3] == "'''":
+                        in_triple_single = False
+                        i += 3
+                        continue
+                elif in_triple_double:
+                    if text[i:i+3] == '"""':
+                        in_triple_double = False
+                        i += 3
+                        continue
+                elif in_single:
+                    if c == '\\':
+                        i += 2
+                        continue
+                    if c == "'":
+                        in_single = False
+                elif in_double:
+                    if c == '\\':
+                        i += 2
+                        continue
+                    if c == '"':
+                        in_double = False
+            
+            if not in_single and not in_double and not in_triple_single and not in_triple_double:
+                if c in '([{':
+                    delta += 1
+                elif c in ')]}':
+                    delta -= 1
+            
+            i += 1
         
-        if not in_single and not in_double and not in_triple_single and not in_triple_double:
-            if c in '([{':
-                delta += 1
-            elif c in ')]}':
-                delta -= 1
-        
-        i += 1
-    
-    return delta
+        return delta
 
     def _analyze_code_indents(
         self, 
