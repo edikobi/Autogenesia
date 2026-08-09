@@ -428,10 +428,9 @@ def _build_available_models(role="orchestrator"):
     for provider in sorted_providers:
         for model_id, display_name, description in get_role_models(provider, role):
             tagged_name = f"[{provider.upper()}] {display_name}"
-            models.append((str(key_counter), model_id, tagged_name, description))
+            models.append((str(key_counter), model_id, tagged_name, description, provider))
             key_counter += 1
     return models
-
 
 
 AVAILABLE_ORCHESTRATOR_MODELS = _build_available_models("orchestrator")
@@ -479,6 +478,11 @@ class AppState:
         except (ValueError, ImportError):
             self.generator_model: str = cfg.MODEL_NORMAL
         
+        # Per-role провайдеры (None = авто/fallback)
+        self.orchestrator_provider: Optional[str] = None
+        self.generator_provider: Optional[str] = None
+        self.prefilter_provider: Optional[str] = None
+        
         # Кэш сообщений сессии в памяти
         self.session_messages: List[Dict[str, str]] = []
         
@@ -522,7 +526,6 @@ class AppState:
             return None
         if self.fixed_orchestrator_model:
             return self.fixed_orchestrator_model
-        # Dynamic fallback from available provider (preferred provider first)
         try:
             from config.intermediate_agent_models import get_orchestrator_model_for_agent
             model, _, _ = get_orchestrator_model_for_agent(
@@ -533,6 +536,12 @@ class AppState:
         except (ValueError, ImportError):
             return cfg.MODEL_NORMAL
     
+    def get_current_orchestrator_provider(self) -> Optional[str]:
+        """Возвращает текущего провайдера оркестратора (или None если роутер/авто)"""
+        if self.use_router:
+            return None
+        return self.orchestrator_provider
+        
     def get_current_generator_model(self) -> str:
         """Возвращает текущую модель генератора"""
         return self.generator_model
@@ -553,12 +562,16 @@ def load_user_settings() -> Dict[str, Any]:
     
     default_settings = {
         "prefilter_mode": cfg.PREFILTER_DEFAULT_MODE,
-        "prefilter_model": None,  # Dynamic selection via get_orchestrator_model_for_agent
-        "generator_model": None,  # Dynamic selection via get_generator_model_for_agent
+        "prefilter_model": None,
+        "prefilter_provider": None,
+        "generator_model": None,
+        "generator_provider": None,
         "use_router": cfg.ROUTER_ENABLED,
         "fixed_orchestrator_model": None,
+        "orchestrator_provider": None,
         "enable_type_checking": False,
-    }
+    }    
+    
     
     if not settings_path.exists():
         return default_settings
@@ -617,12 +630,14 @@ def get_current_user_settings() -> Dict[str, Any]:
     return {
         "prefilter_mode": state.prefilter_mode,
         "prefilter_model": state.prefilter_model,
+        "prefilter_provider": state.prefilter_provider,
         "generator_model": state.generator_model,
+        "generator_provider": state.generator_provider,
         "use_router": state.use_router,
         "fixed_orchestrator_model": state.fixed_orchestrator_model,
+        "orchestrator_provider": state.orchestrator_provider,
         "enable_type_checking": state.enable_type_checking,
     }
-
 
 def apply_user_settings(settings: Dict[str, Any]) -> None:
     """
@@ -633,9 +648,10 @@ def apply_user_settings(settings: Dict[str, Any]) -> None:
     """
     state.prefilter_mode = settings.get("prefilter_mode", "normal")
     state.prefilter_model = settings.get("prefilter_model")
+    state.prefilter_provider = settings.get("prefilter_provider")
     state.generator_model = settings.get("generator_model")
+    state.generator_provider = settings.get("generator_provider")
     if not state.generator_model:
-        # Dynamic fallback via provider-aware selection
         try:
             from config.intermediate_agent_models import get_generator_model_for_agent
             model_id, _, _ = get_generator_model_for_agent(
@@ -647,9 +663,11 @@ def apply_user_settings(settings: Dict[str, Any]) -> None:
             state.generator_model = cfg.MODEL_NORMAL
     state.use_router = settings.get("use_router", True)
     state.fixed_orchestrator_model = settings.get("fixed_orchestrator_model")
+    state.orchestrator_provider = settings.get("orchestrator_provider")
     state.enable_type_checking = settings.get("enable_type_checking", False)
     
-    logger.info(f"Applied user settings: prefilter_mode={state.prefilter_mode}, prefilter_model={state.prefilter_model}")
+    logger.info(f"Applied user settings: prefilter_mode={state.prefilter_mode}, prefilter_model={state.prefilter_model}, orchestrator_provider={state.orchestrator_provider}")
+
 
 # ============================================================================
 # УТИЛИТЫ НАВИГАЦИИ
@@ -855,7 +873,7 @@ def print_status_bar():
         parts.append(f"🎯 Оркестратор: [dim]Авто[/]")
     else:
         current_model = state.get_current_orchestrator_model()
-        model_name = get_model_short_name(current_model)
+        model_name = get_model_short_name(current_model, state.orchestrator_provider)        
         if len(model_name) > 20:
             model_name = model_name[:17] + "..."
         parts.append(f"🎯 Оркестратор: [bold]{model_name}[/]")
@@ -863,7 +881,7 @@ def print_status_bar():
     # NEW: Модель генератора (только для режимов ask и agent)
     if state.mode in ("ask", "agent"):
         gen_model = state.get_current_generator_model()
-        gen_name = get_generator_model_short_name(gen_model)
+        gen_name = get_generator_model_short_name(gen_model, state.generator_provider)        
         parts.append(f"⚙️ Генератор: [bold]{gen_name}[/]")
     
     # Статус проверки типов (только для Agent режима)
@@ -912,7 +930,7 @@ def print_main_menu():
     menu.add_row("", "")
     menu.add_row("[4]", "📜 История диалогов")
     menu.add_row("[5]", "⚙️  Настройки модели оркестратора")
-    menu.add_row("[6]", f"🔧 Настройки модели генератора: [{get_generator_model_short_name(state.generator_model)}]")
+    menu.add_row("[6]", f"🔧 Настройки модели генератора: [{get_generator_model_short_name(state.generator_model, state.generator_provider)}]")    
     menu.add_row("[7]", "🔍 Проверка типов (mypy): " + ("[green]ВКЛ[/]" if state.enable_type_checking else "[dim]ВЫКЛ[/]"))
    
     # NEW: Настройки Pre-filter
@@ -1251,7 +1269,9 @@ async def run_prefilter_analysis(
     is_planning: bool = False,
     is_new_project: bool = False,
     on_tool_call: Optional[Callable] = None,
-) -> Tuple[str, Optional[PreFilterAdvice]]:
+    preferred_provider: Optional[str] = None,
+) -> Tuple[str, Optional[PreFilterAdvice]]:    
+    
     """
     Запускает Pre-filter анализ запроса и возвращает советы для Оркестратора.
 
@@ -1298,6 +1318,7 @@ async def run_prefilter_analysis(
         
         # Определяем модель: если не указана, выбираем динамически
         actual_model = model
+        resolved_provider = preferred_provider
         if actual_model is None:
             try:
                 from config.intermediate_agent_models import get_orchestrator_model_for_agent
@@ -1305,12 +1326,19 @@ async def run_prefilter_analysis(
                     cfg.get_available_providers(),
                     preferred_provider=cfg.get_selected_agent_provider(),
                 )
+                try:
+                    resolved_provider = cfg.resolve_provider_for_model(actual_model)
+                except Exception:
+                    pass
                 console.print(f"   [dim]Модель (dynamic selection):[/] [bold]{actual_model}[/]")
             except (ValueError, ImportError):
                 actual_model = cfg.MODEL_NORMAL
                 console.print(f"   [dim]Модель (fallback):[/] [bold]{actual_model}[/]")
         
         model_display = cfg.get_model_display_name(actual_model)
+        console.print(f"   [dim]Провайдер:[/] [bold]{resolved_provider or 'auto/fallback'}[/]")
+        logger.info(f"[PRE-FILTER] Using model: {model_display}, provider: {resolved_provider}")        
+        
         console.print(f"   [dim]Модель (итоговая):[/] [bold]{model_display}[/] ({actual_model})")
         
         logger.info(f"[PRE-FILTER] Using model: {model_display}")
@@ -1372,9 +1400,9 @@ async def run_prefilter_analysis(
                 model=actual_model,
                 is_planning=is_planning,
                 is_new_project=is_new_project,
-                on_tool_call=on_tool_call
-            )
-        
+                on_tool_call=on_tool_call,
+                preferred_provider=resolved_provider,
+            )        
         llm_elapsed = _time.time() - llm_start
         
         # =====================================================================
@@ -2540,7 +2568,7 @@ def print_model_selection_menu(show_router: bool = True, compact: bool = False):
     console.print("[bold]Или выберите фиксированную модель:[/]")
     console.print()
     
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         console.print(f"[bold cyan][{key}][/] [bold]{short_name}[/]")
         if compact:
             # Укорачиваем описание
@@ -2551,7 +2579,7 @@ def print_model_selection_menu(show_router: bool = True, compact: bool = False):
         console.print()
 
 
-def get_model_short_name(model_id: str) -> str:
+def get_model_short_name(model_id: str, provider: Optional[str] = None) -> str:
     """
     Возвращает короткое название модели по её ID.
     
@@ -2561,13 +2589,16 @@ def get_model_short_name(model_id: str) -> str:
     Returns:
         Короткое название или display_name из конфига
     """
-    for key, mid, short_name, desc in AVAILABLE_ORCHESTRATOR_MODELS:
+    for key, mid, short_name, desc, prov in AVAILABLE_ORCHESTRATOR_MODELS:
+        if mid == model_id and (provider is None or prov == provider):
+            return short_name
+    for key, mid, short_name, desc, prov in AVAILABLE_ORCHESTRATOR_MODELS:
         if mid == model_id:
             return short_name
     return cfg.get_model_display_name(model_id)
 
 
-def get_generator_model_short_name(model_id: str) -> str:
+def get_generator_model_short_name(model_id: str, provider: Optional[str] = None) -> str:
     """
     Возвращает короткое название модели генератора по её ID.
     
@@ -2577,11 +2608,13 @@ def get_generator_model_short_name(model_id: str) -> str:
     Returns:
         Короткое название
     """
-    for key, mid, short_name, desc in AVAILABLE_GENERATOR_MODELS:
+    for key, mid, short_name, desc, prov in AVAILABLE_GENERATOR_MODELS:
+        if mid == model_id and (provider is None or prov == provider):
+            return short_name
+    for key, mid, short_name, desc, prov in AVAILABLE_GENERATOR_MODELS:
         if mid == model_id:
             return short_name
     return cfg.get_model_display_name(model_id)
-
 
 def print_generator_model_selection_menu(compact: bool = False):
     """
@@ -2593,7 +2626,7 @@ def print_generator_model_selection_menu(compact: bool = False):
     console.print("[bold]Выберите модель генератора кода:[/]")
     console.print()
     
-    for key, model_id, short_name, description in AVAILABLE_GENERATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_GENERATOR_MODELS:
         console.print(f"[bold cyan][{key}][/] [bold]{short_name}[/]")
         if compact:
             short_desc = description[:60] + "..." if len(description) > 60 else description
@@ -2614,14 +2647,14 @@ async def select_generator_model() -> bool:
     
     # Текущая модель
     current_model = state.get_current_generator_model()
-    current_name = get_generator_model_short_name(current_model)
+    current_name = get_generator_model_short_name(current_model, state.generator_provider)    
     console.print(f"[dim]Текущая модель: {current_name}[/]")
     console.print()
     
     # Выводим меню
     print_generator_model_selection_menu(compact=False)
     
-    valid_choices = [key for key, _, _, _ in AVAILABLE_GENERATOR_MODELS]
+    valid_choices = [key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS]
     
     try:
         choice = prompt_with_navigation(
@@ -2635,17 +2668,18 @@ async def select_generator_model() -> bool:
         raise
     
     # Найти выбранную модель
-    for key, model_id, short_name, description in AVAILABLE_GENERATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_GENERATOR_MODELS:
         if key == choice:
             state.generator_model = model_id
+            state.generator_provider = provider
             
-            # Если pipeline уже создан — нужно пересоздать
             if state.pipeline is not None:
                 console.print("[dim]Pipeline будет пересоздан с новой моделью генератора[/]")
                 state.pipeline = None
             
             print_success(f"Выбрана модель генератора: {short_name}", "Настройки")
-            return True
+            save_user_settings(get_current_user_settings())
+            return True    
     
     console.print("[dim]Неверный выбор[/]")
     return False
@@ -2689,8 +2723,9 @@ async def select_prefilter_settings() -> bool:
     console.print("\n[bold cyan]Выберите модель Pre-filter:[/]\n")
     console.print("  [yellow]0[/] - Отмена (вернуться в меню)\n")
     
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
-        console.print(f"  [green]{key}[/] - {short_name}")
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
+        console.print(f"  [green]{key}[/] - {short_name}")        
+        
         # Укорачиваем описание для компактности
         short_desc = description[:80] + "..." if len(description) > 80 else description
         console.print(f"      [dim]{short_desc}[/]\n")
@@ -2703,9 +2738,11 @@ async def select_prefilter_settings() -> bool:
     
     # Ищем выбранную модель
     selected_model = None
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+    selected_provider = None
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         if key == model_choice:
             selected_model = model_id
+            selected_provider = provider
             break
     
     if selected_model is None:
@@ -2713,7 +2750,8 @@ async def select_prefilter_settings() -> bool:
         return False
     
     state.prefilter_model = selected_model
-    
+    state.prefilter_provider = selected_provider
+        
     console.print(f"\n[green]✅ Настройки Pre-filter обновлены:[/]")
     mode_label = "Обычный" if state.prefilter_mode == "normal" else "Продвинутый"
     console.print(f"   • Режим: {mode_label}")
@@ -2745,7 +2783,8 @@ async def select_orchestrator_model() -> bool:
         console.print(f"[dim]Текущий режим: Автоматический роутер[/]")
     else:
         current_model = state.get_current_orchestrator_model()
-        model_name = get_model_short_name(current_model)
+        model_name = get_model_short_name(current_model, state.orchestrator_provider)        
+        
         console.print(f"[dim]Текущая модель: {model_name}[/]")
     
     console.print()
@@ -2753,30 +2792,37 @@ async def select_orchestrator_model() -> bool:
     # Выводим меню с описаниями
     print_model_selection_menu(show_router=True, compact=False)
     
+    # Динамически формируем список ключей: ["r", "1", "2", ..., "N"]
+    valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
+    
     try:
         choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
+            choices=valid_keys,
             default="r",
             show_back=True,
             show_menu=True
         )
     except (BackException, BackToMenuException, QuitException):
-        raise
+        raise    
     
     if choice.lower() == "r":
         state.use_router = True
         state.fixed_orchestrator_model = None
+        state.orchestrator_provider = None
         print_success("Включён автоматический роутер", "Настройки модели")
+        save_user_settings(get_current_user_settings())
         return True
     
-    # Выбрана конкретная модель
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         if key == choice:
             state.use_router = False
             state.fixed_orchestrator_model = model_id
+            state.orchestrator_provider = provider
             print_success(f"Выбрана модель: {short_name}", "Настройки модели")
-            return True
+            save_user_settings(get_current_user_settings())
+            return True    
+    
     
     console.print("[dim]Неверный выбор[/]")
     return False
@@ -4284,15 +4330,20 @@ async def handle_ask_mode(query: str):
             "fixed_model": state.get_current_orchestrator_model(),
         })
         
+        preferred_provider: Optional[str] = None
+        
         try:
             if state.use_router:
                 with console.status("[bold cyan]🔍 Анализ сложности запроса...[/]"):
                     routing = await route_request(query, project_index)
                     model = routing.orchestrator_model
-                    model_name = get_model_short_name(model)
+                    preferred_provider = getattr(routing, 'orchestrator_provider', None)
+                    model_name = get_model_short_name(model, preferred_provider)
                     
                 console.print(f"[green]✓[/] Роутер выбрал: [bold]{model_name}[/]")
                 console.print(f"   [dim]Сложность: {routing.complexity_level}[/]")
+                if preferred_provider:
+                    console.print(f"   [dim]Провайдер: {preferred_provider.upper()}[/]")
                 if routing.reasoning:
                     reasoning_preview = routing.reasoning[:150] + "..." if len(routing.reasoning) > 150 else routing.reasoning
                     console.print(f"   [dim]Причина: {reasoning_preview}[/]")
@@ -4301,21 +4352,25 @@ async def handle_ask_mode(query: str):
                     "model": model,
                     "model_name": model_name,
                     "complexity_level": routing.complexity_level,
+                    "preferred_provider": preferred_provider,
                     "reasoning": routing.reasoning[:200] if routing.reasoning else None,
                 })
             else:
                 model = state.get_current_orchestrator_model()
-                model_name = get_model_short_name(model)
+                preferred_provider = state.orchestrator_provider
+                model_name = get_model_short_name(model, preferred_provider)
                 console.print(f"[green]✓[/] Используется фиксированная модель: [bold]{model_name}[/]")
+                if preferred_provider:
+                    console.print(f"   [dim]Провайдер: {preferred_provider.upper()}[/]")
                 
                 trace_stage("ROUTER_COMPLETE", {
                     "model": model,
                     "model_name": model_name,
                     "source": "fixed",
+                    "preferred_provider": preferred_provider,
                 })
         except Exception as e:
             logger.error(f"Ошибка роутера: {e}", exc_info=True)
-            # Dynamic fallback via provider-aware selection (NOT hardcoded OpenRouter)
             try:
                 from config.intermediate_agent_models import get_orchestrator_model_for_agent
                 model, _, _ = get_orchestrator_model_for_agent(
@@ -4324,14 +4379,18 @@ async def handle_ask_mode(query: str):
                 )
             except (ValueError, ImportError):
                 model = cfg.MODEL_NORMAL
-            model_name = get_model_short_name(model)
+            try:
+                preferred_provider = cfg.resolve_provider_for_model(model)
+            except Exception:
+                preferred_provider = None
+            model_name = get_model_short_name(model, preferred_provider)
             console.print(f"[yellow]⚠️ Ошибка роутера, используется модель по умолчанию: {model_name}[/]")
             
             trace_stage("ROUTER_ERROR", {
                 "error": str(e),
                 "fallback_model": model,
-            })
-        
+                "fallback_provider": preferred_provider,
+            })        
     # =====================================================================
         # ШАГ 2: PRE-FILTER АНАЛИЗ (СОВЕТЫ ДЛЯ ОРКЕСТРАТОРА)
         # =====================================================================
@@ -4350,9 +4409,9 @@ async def handle_ask_mode(query: str):
                 mode=state.prefilter_mode,
                 model=state.prefilter_model,
                 is_new_project=state.is_new_project,
-                on_tool_call=_prefilter_streaming_handler
-            )
-            
+                on_tool_call=_prefilter_streaming_handler,
+                preferred_provider=state.prefilter_provider,
+            )            
             trace_stage("PREFILTER_ANALYSIS", {
                 "mode": state.prefilter_mode,
                 "has_advice": bool(prefilter_advice_str),
@@ -4432,6 +4491,7 @@ async def handle_ask_mode(query: str):
                     project_map=project_map,
                     is_new_project=state.is_new_project,
                     prefilter_advice=prefilter_advice_str,
+                    preferred_provider=preferred_provider,
                 )
             else:
                 orchestrator_result = await orchestrate(
@@ -4444,8 +4504,9 @@ async def handle_ask_mode(query: str):
                     index=project_index,
                     project_map=project_map,
                     prefilter_advice=prefilter_advice_str,
+                    preferred_provider=preferred_provider,
                 )
-            
+                            
             trace_stage("ORCHESTRATOR_COMPLETE", {
                 "analysis_length": len(orchestrator_result.analysis) if orchestrator_result.analysis else 0,
                 "instruction_length": len(orchestrator_result.instruction) if orchestrator_result.instruction else 0,
@@ -4615,8 +4676,8 @@ async def handle_ask_mode(query: str):
                         file_code=file_code,
                         target_file=target_file,
                         model=state.generator_model,
-                    )
-                
+                        preferred_provider=state.generator_provider,
+                    )                
                 # =====================================================================
                 # НОВЫЙ ПАРСЕР ДЛЯ ASK РЕЖИМА
                 # =====================================================================
@@ -4884,7 +4945,7 @@ async def handle_ask_mode(query: str):
         logger.error(f"Unexpected error in handle_ask_mode: {e}", exc_info=True)
         print_error(f"Неожиданная ошибка: {e}")
 
-async def _select_tester_model(state) -> Optional[str]:
+async def _select_tester_model(state) -> Tuple[Optional[str], Optional[str]]:
     """
     Interactive selection of the model for TesterAgent.
 
@@ -4905,22 +4966,21 @@ async def _select_tester_model(state) -> Optional[str]:
         f"(модель Оркестратора: {get_model_short_name(current_model) if current_model else 'авто'})"
     )
 
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         console.print(f"  [green]{key}[/] - {short_name}")
-
+        
     choice = console.input(
         f"\n[bold]Ваш выбор (0-{len(AVAILABLE_ORCHESTRATOR_MODELS)}):[/] "
     ).strip()
 
     if choice == "0" or choice == "":
-        return current_model
+        return current_model, None
 
-    for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         if key == choice:
-            return model_id
-
-    return current_model
-
+            return model_id, provider
+        
+    return current_model, None
 
 async def handle_agent_mode(query: str):
     """Обработка режима Агента - Автономная генерация кода с валидацией"""
@@ -4969,8 +5029,9 @@ async def handle_agent_mode(query: str):
                     model=state.prefilter_model,
                     is_planning=True,
                     is_new_project=state.is_new_project,
-                    on_tool_call=_prefilter_streaming_handler
-                )
+                    on_tool_call=_prefilter_streaming_handler,
+                    preferred_provider=state.prefilter_provider,
+                )                
                 
                 log_pipeline_stage("PLANNING", f"Planning completed", {
                     "has_advice": bool(prefilter_advice_str),
@@ -5015,9 +5076,10 @@ async def handle_agent_mode(query: str):
                 model=state.prefilter_model,
                 is_planning=False,
                 is_new_project=state.is_new_project,
-                on_tool_call=_prefilter_streaming_handler
+                on_tool_call=_prefilter_streaming_handler,
+                preferred_provider=state.prefilter_provider,
             )
-            
+                        
             log_pipeline_stage("PREFILTER_ANALYSIS", f"Pre-filter completed", {
                 "mode": state.prefilter_mode,
                 "has_advice": bool(prefilter_advice_str),
@@ -5066,11 +5128,13 @@ async def handle_agent_mode(query: str):
     # Устанавливаем модель
     if state.use_router:
         state.pipeline.set_orchestrator_model(None)
+        state.pipeline.set_orchestrator_provider(None)
     else:
         state.pipeline.set_orchestrator_model(state.get_current_orchestrator_model())
+        state.pipeline.set_orchestrator_provider(state.orchestrator_provider)
         
     state.pipeline.set_generator_model(state.generator_model)
-
+    state.pipeline.set_generator_provider(state.generator_provider)
 
     await save_message("user", query)
     
@@ -6076,7 +6140,7 @@ async def handle_agent_mode(query: str):
             
             elif choice == "4":
                 # === ТЕСТИРОВЩИК ===
-                tester_model = await _select_tester_model(state)
+                tester_model, tester_provider = await _select_tester_model(state)
                 try:
                     additional_input = Prompt.ask("[dim]Что проверить дополнительно? (Enter — пропустить)[/]", default="")
                 except KeyboardInterrupt:
@@ -6086,8 +6150,9 @@ async def handle_agent_mode(query: str):
                 report = await state.pipeline.run_tester(
                     user_additional_input=additional_input,
                     tester_model=tester_model,
-                        on_tool_call=_tester_streaming_handler,
-                )
+                    tester_provider=tester_provider,
+                    on_tool_call=_tester_streaming_handler,
+                )                
                 
                 if report and report.success and report.translated_report:
                     console.print()
@@ -6500,8 +6565,10 @@ async def handle_general_chat(query: str):
         # Создаём оркестратор
         orchestrator = GeneralChatOrchestrator(
             model=state.get_current_orchestrator_model(),
-            is_legal_mode=state.is_legal_mode
-        )
+            is_legal_mode=state.is_legal_mode,
+            preferred_provider=state.orchestrator_provider,
+        )        
+        
         
         with console.status(f"[bold {COLORS['primary']}]🤖 Обрабатываю запрос...[/]"):
             result = await orchestrator.orchestrate_general(
@@ -7281,13 +7348,16 @@ async def setup_mode_session(mode: str) -> bool:
         console.print("\n[bold]Выбор модели:[/]\n")
         print_model_selection_menu(show_router=True, compact=False)
         
+        valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
+        
         try:
             choice = prompt_with_navigation(
                 "Выбор",
-                choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                choices=valid_keys,
                 default="r"
             )
-        except BackException:
+        except BackException:            
+            
             # Возврат к выбору подрежима — рекурсия
             return await setup_mode_session(mode)
         except (BackToMenuException, QuitException):
@@ -7296,14 +7366,17 @@ async def setup_mode_session(mode: str) -> bool:
         if choice.lower() == "r":
             state.use_router = True
             state.fixed_orchestrator_model = None
+            state.orchestrator_provider = None
             console.print("[green]✓[/] Включён автоматический роутер")
         else:
-            for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+            for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
                 if key == choice:
                     state.use_router = False
                     state.fixed_orchestrator_model = model_id
+                    state.orchestrator_provider = provider
                     console.print(f"[green]✓[/] Выбрана модель: {short_name}")
-                    break
+                    break        
+        
         
         # Ищем существующий тред или создаём новый
         try:
@@ -7395,13 +7468,15 @@ async def setup_mode_session(mode: str) -> bool:
     console.print("\n[bold]Выбор модели оркестратора:[/]\n")
     print_model_selection_menu(show_router=True, compact=False)
     
+    valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
+    
     try:
         model_choice = prompt_with_navigation(
             "Выбор",
-            choices=["r", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
+            choices=valid_keys,
             default="r"
         )
-    except BackException:
+    except BackException:        
         # Возврат к выбору проекта
         return await setup_mode_session(mode)
     except (BackToMenuException, QuitException):
@@ -7410,25 +7485,26 @@ async def setup_mode_session(mode: str) -> bool:
     if model_choice.lower() == "r":
         state.use_router = True
         state.fixed_orchestrator_model = None
+        state.orchestrator_provider = None
         console.print("[green]✓[/] Включён автоматический роутер")
     else:
-        for key, model_id, short_name, description in AVAILABLE_ORCHESTRATOR_MODELS:
+        for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
             if key == model_choice:
                 state.use_router = False
                 state.fixed_orchestrator_model = model_id
+                state.orchestrator_provider = provider
                 console.print(f"[green]✓[/] Выбрана модель оркестратора: {short_name}")
-                break
-    
+                break    
     # ========================================
     # NEW: Выбор модели генератора (для ask и agent)
     # ========================================
     console.print("\n[bold]Выбор модели генератора кода:[/]\n")
     print_generator_model_selection_menu(compact=True)
     
-    gen_valid_choices = [key for key, _, _, _ in AVAILABLE_GENERATOR_MODELS]
+    gen_valid_choices = [key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS]
     
     try:
-        gen_choice = prompt_with_navigation(
+        gen_choice = prompt_with_navigation(            
             "Выбор генератора",
             choices=gen_valid_choices,
             default="1",
@@ -7441,12 +7517,12 @@ async def setup_mode_session(mode: str) -> bool:
     except (BackToMenuException, QuitException):
         raise
     
-    for key, model_id, short_name, description in AVAILABLE_GENERATOR_MODELS:
+    for key, model_id, short_name, description, provider in AVAILABLE_GENERATOR_MODELS:
         if key == gen_choice:
             state.generator_model = model_id
+            state.generator_provider = provider
             console.print(f"[green]✓[/] Выбрана модель генератора: {short_name}")
-            break
-    
+            break    
     # ========================================
     # Ищем существующий тред или создаём новый
     # ========================================

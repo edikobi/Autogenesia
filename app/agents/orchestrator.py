@@ -1380,7 +1380,7 @@ class GeneralChatOrchestrator:
     Работает с файлами пользователя и веб-поиском.
     """
     
-    def __init__(self, model: str = None, is_legal_mode: bool = False):
+    def __init__(self, model: str = None, is_legal_mode: bool = False, preferred_provider: Optional[str] = None):
         """
         Args:
             model: Модель для использования (по умолчанию из cfg.GENERAL_CHAT_MODEL)
@@ -1388,7 +1388,8 @@ class GeneralChatOrchestrator:
         """
         self.model = model or cfg.GENERAL_CHAT_MODEL
         self.is_legal_mode = is_legal_mode
-        logger.info(f"GeneralChatOrchestrator initialized: model={cfg.get_model_display_name(self.model)}, legal_mode={is_legal_mode}")
+        self.preferred_provider = preferred_provider
+        logger.info(f"GeneralChatOrchestrator initialized: model={cfg.get_model_display_name(self.model)}, legal_mode={is_legal_mode}, provider={preferred_provider}")
 
     async def orchestrate_general(
         self,
@@ -1457,6 +1458,7 @@ class GeneralChatOrchestrator:
                     temperature=None,  # Чуть выше для креативности в General Chat
                     max_tokens=7000,
                     tool_choice="auto",
+                    preferred_provider=self.preferred_provider,
                 )
                 
                 content = response.get("content", "")
