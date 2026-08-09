@@ -2782,9 +2782,42 @@ class FileModifier:
         instruction: ModifyInstruction
     ) -> ModifyResult:
         """Добавляет импорт если его ещё нет"""
-        import_statement = instruction.code.strip()
+        raw_code = instruction.code
         
-        # Проверяем, есть ли уже такой импорт
+        # 1. Очистка от markdown fences (```python ... ```)
+        _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
+        _raw_lines = raw_code.splitlines()
+        _start = 0
+        _end = len(_raw_lines)
+        for _i, _ln in enumerate(_raw_lines):
+            if not _ln.strip():
+                continue
+            if _fence_re.match(_ln):
+                _start = _i + 1
+                break
+        for _i in range(len(_raw_lines) - 1, _start - 1, -1):
+            if not _raw_lines[_i].strip():
+                continue
+            if _fence_re.match(_raw_lines[_i]):
+                _end = _i
+                break
+        if _start > 0 or _end < len(_raw_lines):
+            _stripped = '\n'.join(_raw_lines[_start:_end])
+            if _stripped.strip():
+                raw_code = _stripped
+                
+        # 2. Dedent для удаления случайных отступов LLM, чтобы применить целевые
+        import_statement = textwrap.dedent(raw_code).strip()
+        
+        if not import_statement:
+            return ModifyResult(
+                success=False,
+                new_content=existing_content,
+                message="Empty import code",
+                warnings=["Empty import code, skipped"]
+            )
+        
+        # 3. Проверяем, есть ли уже такой импорт
         if import_statement in existing_content:
             return ModifyResult(
                 success=True,
@@ -2795,48 +2828,85 @@ class FileModifier:
         
         lines = existing_content.splitlines(keepends=True)
         
-        # Находим конец импортов
+        # 4. Находим конец блока импортов (приблизительно, через текст)
         insert_idx = self._find_imports_end(lines)
+        target_indent_str = ""
         
-        # КРИТИЧЕСКАЯ ПРОВЕРКА: Проверяем отступ строки перед insert_idx
-        if insert_idx > 0 and insert_idx - 1 < len(lines):
-            prev_line = lines[insert_idx - 1]
-            prev_stripped = prev_line.lstrip()
-            prev_indent = len(prev_line) - len(prev_stripped)
-            
-            # Если предыдущая строка имеет отступ, мы внутри блока (например, if TYPE_CHECKING:)
-            if prev_indent > 0:
-                # Итерируем НАЗАД от insert_idx - 1 до 0
-                for i in range(insert_idx - 1, -1, -1):
-                    line = lines[i]
-                    line_stripped = line.lstrip()
-                    line_indent = len(line) - len(line_stripped)
+        # 5. Уточняем позицию и отступ с помощью Tree-sitter AST
+        ts_parser = _get_tree_sitter_parser()
+        if ts_parser:
+            try:
+                parse_result = ts_parser.parse(existing_content)
+                if parse_result.parsed_imports:
+                    # Ищем импорт, который заканчивается на или перед insert_idx
+                    best_import = None
+                    for imp in parse_result.parsed_imports:
+                        if imp.span.end_line <= insert_idx:
+                            if best_import is None or imp.span.end_line > best_import.span.end_line:
+                                best_import = imp
                     
-                    # Ищем первую строку с импортом и 0 отступом
-                    if line_indent == 0 and (line_stripped.startswith('import ') or line_stripped.startswith('from ')):
-                        # Устанавливаем insert_idx на строку сразу после найденной
-                        insert_idx = i + 1
-                        break
-        
-        # Вставляем импорт на скорректированную позицию
-        if insert_idx == 0:
-            # Нет импортов — вставляем в начало
-            lines.insert(0, import_statement + '\n')
+                    if best_import:
+                        # Вставляем строго после найденного AST-узла импорта
+                        insert_idx = best_import.span.end_line
+                        # Берем отступ из первой строки найденного импорта
+                        first_line_idx = best_import.span.start_line - 1
+                        if 0 <= first_line_idx < len(lines):
+                            first_line = lines[first_line_idx]
+                            first_line_stripped = first_line.lstrip()
+                            target_indent_str = first_line[:len(first_line) - len(first_line_stripped)]
+                    elif insert_idx > 0 and insert_idx - 1 < len(lines):
+                        # Если импортов выше нет, но insert_idx > 0 (например, после docstring)
+                        # Проверяем, не находимся ли мы внутри блока (if TYPE_CHECKING:)
+                        prev_line = lines[insert_idx - 1]
+                        prev_stripped = prev_line.lstrip()
+                        if prev_stripped.endswith(':'):
+                            target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
+            except Exception as e:
+                logger.debug(f"Tree-sitter import analysis failed: {e}")
+                # Fallback to text-based logic if Tree-sitter fails
+                if insert_idx > 0 and insert_idx - 1 < len(lines):
+                    prev_line = lines[insert_idx - 1]
+                    prev_stripped = prev_line.lstrip()
+                    if prev_stripped.startswith(('import ', 'from ')):
+                        target_indent_str = prev_line[:len(prev_line) - len(prev_stripped)]
+                    elif prev_stripped.endswith(':'):
+                        target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
         else:
-            # Вставляем после последнего импорта
-            lines.insert(insert_idx, import_statement + '\n')
+            # Fallback if no Tree-sitter available
+            if insert_idx > 0 and insert_idx - 1 < len(lines):
+                prev_line = lines[insert_idx - 1]
+                prev_stripped = prev_line.lstrip()
+                if prev_stripped.startswith(('import ', 'from ')):
+                    target_indent_str = prev_line[:len(prev_line) - len(prev_stripped)]
+                elif prev_stripped.endswith(':'):
+                    target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
+
+        # 6. Применяем отступ к многострочному импорту (если ИИ прислал несколько строк)
+        import_lines = import_statement.split('\n')
+        indented_import = '\n'.join(
+            target_indent_str + line if line.strip() else line
+            for line in import_lines
+        )
         
+        # 7. Вставляем импорт на скорректированную позицию
+        lines.insert(insert_idx, indented_import + '\n')
         new_content = ''.join(lines)
+        
+        # 8. Валидация и авто-фикс синтаксиса (как в других режимах)
+        new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
+        
+        # Формируем короткое сообщение для логов
+        first_line_msg = import_lines[0] if import_lines else ""
         
         return ModifyResult(
             success=True,
             new_content=new_content,
-            message=f"Added import: {import_statement}",
-            changes_made=[f"Added import: {import_statement}"],
-            lines_added=1,
+            message=f"Added import: {first_line_msg}",
+            changes_made=[f"Added import: {first_line_msg}"],
+            lines_added=len(import_lines),
         )
-    
-    
+        
+            
     def _replace_import(
         self,
         existing_content: str,
@@ -2848,7 +2918,32 @@ class FileModifier:
         Использует replace_pattern для поиска импорта в распарсенном дереве.
         """
         replace_pattern = instruction.replace_pattern
-        new_import = instruction.code.strip()
+        
+        # 1. Очистка от markdown fences (```python ... ```)
+        raw_code = instruction.code
+        _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
+        _raw_lines = raw_code.splitlines()
+        _start = 0
+        _end = len(_raw_lines)
+        for _i, _ln in enumerate(_raw_lines):
+            if not _ln.strip():
+                continue
+            if _fence_re.match(_ln):
+                _start = _i + 1
+                break
+        for _i in range(len(_raw_lines) - 1, _start - 1, -1):
+            if not _raw_lines[_i].strip():
+                continue
+            if _fence_re.match(_raw_lines[_i]):
+                _end = _i
+                break
+        if _start > 0 or _end < len(_raw_lines):
+            _stripped = '\n'.join(_raw_lines[_start:_end])
+            if _stripped.strip():
+                raw_code = _stripped
+        
+        # Dedent для удаления случайных отступов LLM, чтобы применить целевые
+        new_import = textwrap.dedent(raw_code).strip()
         
         if not replace_pattern:
             return ModifyResult(
@@ -2895,10 +2990,24 @@ class FileModifier:
                 new_lines = lines[:start_idx] + lines[end_idx:]
                 msg = f"Removed import matching '{replace_pattern}'"
             else:
-                new_lines = lines[:start_idx] + [new_import + '\n'] + lines[end_idx:]
+                # === КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сохраняем отступ оригинального импорта ===
+                original_line = lines[start_idx] if start_idx < len(lines) else ""
+                original_indent_str = original_line[:len(original_line) - len(original_line.lstrip())]
+                
+                # Применяем оригинальный отступ к каждой строке новых импортов
+                new_import_lines = new_import.split('\n')
+                indented_new_import = '\n'.join(
+                    original_indent_str + line if line.strip() else line
+                    for line in new_import_lines
+                )
+                
+                new_lines = lines[:start_idx] + [indented_new_import + '\n'] + lines[end_idx:]
                 msg = f"Replaced import matching '{replace_pattern}'"
             
             new_content = ''.join(new_lines)
+            
+            # === НОВОЕ: Валидация и авто-фикс синтаксиса (как в других режимах) ===
+            new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
             
             return ModifyResult(
                 success=True,
@@ -2915,8 +3024,7 @@ class FileModifier:
                 success=False,
                 new_content=existing_content,
                 message=f"Error replacing import: {e}",
-            )
-    
+            )    
     
     def _reindent_if_needed(self, code: str, target_indent: int) -> str:
         """Checks if code starts with 0 indent. If so, shifts it to target_indent. Otherwise returns as is."""
