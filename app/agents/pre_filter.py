@@ -477,7 +477,7 @@ async def _run_advanced_prefilter(
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
-                max_tokens=10000,
+                max_tokens=15000,
                 preferred_provider=model_provider,
             )
             
@@ -553,7 +553,7 @@ async def _run_advanced_prefilter(
             model=model,
             messages=messages,
             temperature=0,
-            max_tokens=10000,
+            max_tokens=15000,
             preferred_provider=model_provider,
         )
         
@@ -622,7 +622,7 @@ async def run_planning_loop(
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
-                max_tokens=10000,
+                max_tokens=15000,
                 preferred_provider=preferred_provider,
             )
 
@@ -695,7 +695,7 @@ async def run_planning_loop(
             model=current_model,
             messages=messages,
             temperature=0,
-            max_tokens=10000,
+            max_tokens=15000,
             preferred_provider=preferred_provider,
         )
 
