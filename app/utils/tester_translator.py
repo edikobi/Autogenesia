@@ -83,7 +83,7 @@ async def _translate_with_gemini_flash_lite(text: str) -> str:
         model=translator_model,
         messages=messages,
         temperature=0.2,
-        max_tokens=min(len(text) * 2, 8000),
+        max_tokens=30000,
         preferred_provider=translator_provider,
         is_intermediate=True,
     )

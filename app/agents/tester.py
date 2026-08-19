@@ -9,10 +9,12 @@ import logging
 import shutil
 import tempfile
 import sys
+import re
+import os
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable
 from pathlib import Path
-import os
 
 from app.llm.api_client import call_llm_with_tools
 from app.tools.tool_executor import parse_tool_call
@@ -182,6 +184,7 @@ class TesterAgent:
             "- All your tests PASS with the expected results (not just run without errors).\n"
             "- The output values match the specification from the user request.\n"
             "- No edge case was left untested.\n\n"
+            "- No existing functions, classes, logic and etc were removed unless explicitly requested by the user or required by the task.\n\n"
 
             "**IF A TEST FAILS**:\n"
             "- First verify your test itself is correct (no syntax errors, correct imports, correct expected values).\n"
@@ -316,7 +319,9 @@ class TesterAgent:
                 "Tester agent failed to produce a report."
             )
 
-        return final_content
+        # Очищаем финальный ответ от мыслей (CoT) и возможного мусора до маркера отчета
+        return self._extract_final_report(final_content)
+        
     async def ask_followup(self, user_question: str) -> dict:
         """Handle a follow-up question from the user after the initial test report.
 
@@ -431,21 +436,20 @@ class TesterAgent:
             except Exception as e:
                 logger.error(f"ask_followup final LLM call error: {e}", exc_info=True)
 
-        # Очистка от возможных "мыслей" (CoT), если провайдер склеил их с ответом
-        import re
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        # Очистка от возможных "мыслей" (CoT) и извлечение отчета, если он есть
+        extracted_content = self._extract_final_report(content)
 
-        if content:
-            self._messages.append({"role": "assistant", "content": content})
+        if extracted_content:
+            self._messages.append({"role": "assistant", "content": extracted_content})
 
-        is_new_report = self._looks_like_report(content)
+        is_new_report = self._looks_like_report(extracted_content)
 
         return {
-            "response": content,
+            "response": extracted_content,
             "is_new_report": is_new_report,
-            "new_report": content if is_new_report else None,
+            "new_report": extracted_content if is_new_report else None,
         }
-
+        
     def _looks_like_report(self, text: str) -> bool:
         """Check if the text looks like a testing report.
 
@@ -471,6 +475,34 @@ class TesterAgent:
         text_lower = text.lower()
         count = sum(1 for marker in markers if marker in text_lower)
         return count >= 2
+
+    def _extract_final_report(self, content: str) -> str:
+        """
+        Извлекает чистый отчет из финального ответа LLM.
+        Отсекает "мысли" (CoT) и любой текст до маркера начала отчета.
+        Если маркер не найден, возвращает очищенный от тегов текст (fallback).
+        """
+        if not content:
+            return ""
+
+        # 1. Удаляем известные теги мыслей (CoT), если провайдер склеил их с текстом
+        cleaned_content = re.sub(
+            r"<(?:thinking|thought|DataContext|reflection)>.*?<\/(?:thinking|thought|DataContext|reflection)>",
+            "",
+            content,
+            flags=re.DOTALL | re.IGNORECASE
+        ).strip()
+
+        # 2. Ищем маркер начала отчета (без учета регистра)
+        marker = "# Testing Report"
+        marker_idx = cleaned_content.lower().find(marker.lower())
+
+        if marker_idx != -1:
+            # Отсекаем весь текст до маркера (гарантированно убираем префикс-мусор)
+            return cleaned_content[marker_idx:].strip()
+
+        # 3. Fallback: если маркер не найден, возвращаем очищенный от тегов текст
+        return cleaned_content
 
     def cleanup(self) -> None:
         """Clean up temporary resources. Idempotent — safe to call multiple times."""

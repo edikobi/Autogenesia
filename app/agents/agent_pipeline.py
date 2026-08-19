@@ -18,7 +18,6 @@ Key principles:
 """
 
 from __future__ import annotations
-from app.agents.tester import TesterAgent, TesterReport
 
 import asyncio
 import logging
@@ -45,6 +44,8 @@ from app.agents.orchestrator import orchestrate_agent, OrchestratorResult
 from app.agents.code_generator import generate_code_agent_mode, CodeGeneratorResult
 from app.agents.validator import AIValidator, AIValidationResult, AIValidationRequest
 from app.agents.pre_filter import pre_filter_chunks, PreFilterResult
+from app.agents.tester import TesterAgent, TesterReport
+from app.utils.tester_translator import translate_tester_report
 
 # Feedback system
 from app.agents.feedback_handler import (
@@ -3713,7 +3714,23 @@ Remember: You can override the validator if you believe the critique is incorrec
         if self._tester_agent is None:
             return None
         try:
-            return await self._tester_agent.ask_followup(user_question)
+            result = await self._tester_agent.ask_followup(user_question)
+            
+            # === СИНХРОНИЗАЦИЯ СОСТОЯНИЯ ===
+            # Если Тестировщик сгенерировал новый отчет в ходе ответа на уточнение,
+            # обновляем внутреннее состояние pipeline, чтобы Оркестратор получил
+            # именно этот новый отчет, а не устаревший первичный.
+            if result and result.get("is_new_report") and result.get("new_report"):
+                if self._tester_report:
+                    self._tester_report.original_report = result["new_report"]
+                    # Переводим новый отчет, чтобы translated_report также был актуален
+                    try:
+                        self._tester_report.translated_report = await translate_tester_report(result["new_report"])
+                    except Exception as trans_err:
+                        logger.warning(f"Failed to translate follow-up tester report: {trans_err}")
+                        self._tester_report.translated_report = result["new_report"] # Fallback к оригиналу
+            
+            return result
         except Exception as e:
             logger.error(f"ask_tester_followup failed: {e}", exc_info=True)
             return None
