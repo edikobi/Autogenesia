@@ -140,19 +140,25 @@ TEXT TO TRANSLATE:
 
 RUSSIAN TRANSLATION:"""
         
-        logger.debug(f"Calling Gemini Flash for translation, text length: {len(text)}")
+        logger.debug(f"Calling {translator_model} for translation, text length: {len(text)}")
         
         from config.intermediate_agent_models import get_intermediate_model
-        translator_model, _, translator_provider = get_intermediate_model("translator", cfg.get_available_providers(), preferred_provider=cfg.get_selected_agent_provider())
+        # Получаем модель, effort ("disabled") и провайдера
+        translator_model, translator_reasoning, translator_provider = get_intermediate_model(
+            "translator", 
+            cfg.get_available_providers(), 
+            preferred_provider=cfg.get_selected_agent_provider()
+        )
 
         result = await call_llm(
             model=translator_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,  # Низкая температура для консистентности
-            max_tokens=min(len(text) * 2, 2500),  # Русский текст обычно короче
+            max_tokens=30000,  # Бюджет на случай если мышление всё же включится
             preferred_provider=translator_provider,
             is_intermediate=True,
-        )
+            reasoning_effort=translator_reasoning,  # <-- ВОТ ЭТО ОТКЛЮЧИТ МЫШЛЕНИЕ!
+        )        
         
         if result and result.strip():
             logger.debug(f"Translation successful, result length: {len(result)}")
