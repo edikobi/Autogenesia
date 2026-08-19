@@ -23,6 +23,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+import httpx
 from openai import AsyncOpenAI
 import openai as openai_sdk
 
@@ -32,10 +33,24 @@ from config.settings import cfg
 logger = logging.getLogger(__name__)
 
 # ============== CONSTANTS =============
-REQUEST_TIMEOUT = 120.0
-MAX_RETRIES = 8
+# HOTFIX (A): httpx.Timeout instead of float — float(120.0) was overriding ALL
+# 4 phases (connect/read/write/pool) to 120s, causing ReadTimeout on reasoning
+# models that generate 300–700s. Now: read=600s covers normal generation,
+# connect=10s fails fast on network issues.
+REQUEST_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
+# Extended read timeout for reasoning/thinking calls (reasoning_effort=max
+# can take 300–700s on server side).
+REASONING_REQUEST_TIMEOUT = httpx.Timeout(900.0, connect=10.0)
+
+# HOTFIX (D): 8→4 + capped backoff to break the ~52min cascade.
+MAX_RETRIES = 4
 RETRY_BASE_DELAY = 2.0  # seconds
+RETRY_MAX_DELAY = 30.0  # Cap exponential backoff (was unbounded: 2^7=128s)
+# HOTFIX (C): Separate cap for timeout retries — retrying a timed-out generative
+# request is wasteful (server may have completed generation = billed).
+TIMEOUT_MAX_RETRIES = 2
 CONCURRENT_REQUESTS = 5
+
 
 # Providers that accept `reasoning_effort` as a direct kwarg at the provider level
 # (all models from these providers support it).
@@ -463,7 +478,8 @@ class LLMClient:
         async with self._semaphore:
             last_error = None
             rate_limit_retries = 0
-            
+            timeout_retries = 0  # HOTFIX (C): separate counter for timeout retries
+
             for attempt in range(MAX_RETRIES):
                 try:
                     start_time = time.time()
@@ -500,7 +516,7 @@ class LLMClient:
 
                 except RateLimitError as e:
                     rate_limit_retries += 1
-                    
+
                     # Специальная логика для rate limit с большим количеством попыток
                     if rate_limit_retries <= RATE_LIMIT_MAX_RETRIES:
                         # Экспоненциальная задержка с максимумом
@@ -508,18 +524,18 @@ class LLMClient:
                             RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_retries - 1)),
                             RATE_LIMIT_MAX_DELAY
                         )
-                        
+
                         # Для Gemini добавляем дополнительное время
                         if "gemini" in request.model.lower():
                             delay = min(delay * 1.5, RATE_LIMIT_MAX_DELAY)
-                        
+
                         logger.warning(
                             f"Rate limit hit (rate_limit_retry {rate_limit_retries}/{RATE_LIMIT_MAX_RETRIES}), "
                             f"waiting {delay:.0f}s before retry"
                         )
                         await asyncio.sleep(delay)
                         last_error = e
-                        
+
                         # Не считаем rate limit как обычную попытку
                         # (позволяем продолжить основной цикл)
                         continue
@@ -531,10 +547,36 @@ class LLMClient:
                             error_type="rate_limit"
                         )
 
+                except LLMTimeoutError as e:
+                    # HOTFIX (C): Separate branch for timeouts.
+                    # Retry capped at TIMEOUT_MAX_RETRIES — each timed-out request
+                    # may have been billed (server completes generation regardless).
+                    timeout_retries += 1
+                    if timeout_retries <= TIMEOUT_MAX_RETRIES:
+                        logger.error(
+                            f"⏳ Таймаут {timeout_retries}/{TIMEOUT_MAX_RETRIES} "
+                            f"(attempt {attempt + 1}/{MAX_RETRIES}): "
+                            f"модель продолжала генерацию на сервере. {e}"
+                        )
+                        await asyncio.sleep(min(RETRY_BASE_DELAY, 5.0))
+                        last_error = e
+                        continue
+                    else:
+                        logger.error(
+                            f"⏳ Таймаут: исчерпано {TIMEOUT_MAX_RETRIES} попыток. {e}"
+                        )
+                        raise LLMAPIError(
+                            f"Timeout after {TIMEOUT_MAX_RETRIES} retries. "
+                            f"Model was still generating on server. Last error: {e}",
+                            error_type="timeout"
+                        )
+
                 except RetryableError as e:
                     # Server errors (500, 502, 503) - retry with backoff
-                    delay = RETRY_BASE_DELAY * (2 ** attempt)
-                    logger.warning(
+                    # HOTFIX (D): Cap delay at RETRY_MAX_DELAY (was unbounded)
+                    delay = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+                    # HOTFIX (F): warning → error for visibility in ai_errors_*.log
+                    logger.error(
                         f"Retryable error (attempt {attempt + 1}/{MAX_RETRIES}): {e}, "
                         f"waiting {delay}s"
                     )
@@ -561,6 +603,7 @@ class LLMClient:
                 f"All {MAX_RETRIES} retries exhausted. Last error: {last_error}"
             )
 
+
     async def _make_request(
                 self,
                 request: LLMRequest,
@@ -582,10 +625,14 @@ class LLMClient:
                     base_url = base_url.rsplit("/v1/chat/completions", 1)[0] if "/v1/chat/completions" in base_url else base_url
 
                 # Create OpenAI SDK client
+                # HOTFIX (B): max_retries=0 disables SDK's hidden retry loop
+                # (SDK default max_retries=2 was silently retrying timeouts,
+                #  compounding with our outer loop → 3×120s per external attempt)
                 client = AsyncOpenAI(
                     api_key=api_key,
                     base_url=base_url,
                     timeout=REQUEST_TIMEOUT,
+                    max_retries=0,
                 )
 
                 # Build kwargs for chat.completions.create()
@@ -605,18 +652,22 @@ class LLMClient:
                     extra_params = dict(extra_params)  # shallow copy
                 else:
                     extra_params = {}
+                
                 if "reasoning_effort" not in extra_params:
                     model_cfg = cfg.MODEL_CONFIGS.get(request.model, {})
-                    if "reasoning" in model_cfg:
-                        extra_params["reasoning_effort"] = model_cfg["reasoning"].get("effort")
+                    _reasoning_cfg = model_cfg.get("reasoning")
+                    if isinstance(_reasoning_cfg, dict):
+                        extra_params["reasoning_effort"] = _reasoning_cfg.get("effort")
+
 
                 # Resolve whether this (provider, model) supports reasoning_effort as direct kwarg
                 supports_re = _supports_reasoning_effort(provider, api_model)
 
                 if extra_params:
                     if "thinking" in extra_params:
-                        existing = kwargs.get("extra_body", {})
-                        kwargs["extra_body"] = {**existing, "thinking": extra_params["thinking"]}
+                        existing = kwargs.get("extra_body") or {}
+                        kwargs["extra_body"] = {**existing, "thinking": extra_params["thinking"]}                        
+                        
                         if "temperature" in kwargs:
                             del kwargs["temperature"]
                         if "top_p" in kwargs:
@@ -629,8 +680,10 @@ class LLMClient:
                     if "reasoning_effort" in extra_params:
                         if extra_params["reasoning_effort"] == "disabled":
                             # Thinking explicitly disabled — inject extra_body for API
-                            existing_body = kwargs.get("extra_body", {})
+                            existing_body = kwargs.get("extra_body") or {}
                             kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
+                            
+                            
                             logger.debug(f"Thinking explicitly disabled for {request.model}")
                         elif supports_re:
                             # Model supports reasoning_effort as a direct kwarg
@@ -691,13 +744,13 @@ class LLMClient:
                     re_active = "reasoning_effort" in kwargs
                     is_glm_turbo = api_model == "glm-5-turbo"
                     if is_glm_turbo and not re_active:
-                        existing_body = kwargs.get("extra_body", {})
+                        existing_body = kwargs.get("extra_body") or {}
                         if "thinking" not in existing_body:
                             kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
                             logger.debug(f"GLM glm-5-turbo: thinking disabled (no reasoning_effort active) for {request.model}")
                 except Exception:
                     pass
-
+                
                 # === Add tools if specified ===
                 if request.tools:
                     kwargs["tools"] = request.tools
@@ -739,13 +792,31 @@ class LLMClient:
                             if msg.get("content") is None:
                                 msg["content"] = ""
 
+                # HOTFIX (A): Use extended timeout for reasoning/thinking calls.
+                # We extract nested dicts safely: dict.get(key, {}) does NOT protect
+                # against explicit None values, so we use explicit isinstance checks.
+                _extra_body = kwargs.get("extra_body")
+                _thinking_cfg = _extra_body.get("thinking") if isinstance(_extra_body, dict) else None
+                _has_thinking = isinstance(_thinking_cfg, dict) and _thinking_cfg.get("type") == "enabled"
+                _uses_reasoning = "reasoning_effort" in kwargs or _has_thinking
+                
+                if _uses_reasoning:
+                    client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
+
                 # === Make API call using OpenAI SDK ===
                 try:
                     response = await client.chat.completions.create(**kwargs)
-                    return response.model_dump()
-
+                    
+                    
                 except openai_sdk.RateLimitError as e:
                     raise RateLimitError(str(e))
+
+                # HOTFIX (C): APITimeoutError is a SUBCLASS of APIConnectionError!
+                # Must be caught FIRST to route timeouts to LLMTimeoutError
+                # (separate retry cap = TIMEOUT_MAX_RETRIES) instead of generic
+                # RetryableError (which uses MAX_RETRIES = 4).
+                except openai_sdk.APITimeoutError as e:
+                    raise LLMTimeoutError(str(e))
 
                 except openai_sdk.APIConnectionError as e:
                     raise RetryableError(str(e))
@@ -765,6 +836,7 @@ class LLMClient:
                         raise RetryableError(error_text)
                     else:
                         raise LLMAPIError(error_text, error_type="fatal")
+                return response.model_dump()
 
 
     def _parse_response(
@@ -775,12 +847,16 @@ class LLMClient:
         latency_ms: float,
     ) -> LLMResponse:
         """Parse API response into standardized format"""
+        # FIX: защита от None / не-dict
+        if not isinstance(response, dict):
+            response = {}
+
         # Extract content
         choices = response.get("choices") or []
         choice = choices[0] if choices else {}
-        message = choice.get("message", {}) or {}
-        content = message.get("content", "")
-        
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+                
         if content is None:
             content = ""
 
@@ -813,8 +889,10 @@ class LLMClient:
         if "reasoning_details" in message:
             reasoning_details = message["reasoning_details"]
         # Check delta level (streaming format)
-        elif "delta" in choice and "reasoning_details" in choice["delta"]:
-            reasoning_details = choice["delta"]["reasoning_details"]
+        else:
+            delta = choice.get("delta")
+            if isinstance(delta, dict) and "reasoning_details" in delta:
+                reasoning_details = delta["reasoning_details"]    
         
         # [EXISTING] Извлекаем thought_signature (специфично для Gemini 3.0 Pro)
         thought_signature = None
@@ -869,10 +947,11 @@ class LLMClient:
                 tool_calls.append(tool_call_data)
 
         # Extract usage
-        usage = response.get("usage", {})
-        input_tokens = usage.get("prompt_tokens", 0)
-        output_tokens = usage.get("completion_tokens", 0)
-        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        # FIX: .get("usage", {}) вернёт None если ключ есть, но значение None
+        usage = response.get("usage") or {}
+        input_tokens = usage.get("prompt_tokens") or 0
+        output_tokens = usage.get("completion_tokens") or 0
+        total_tokens = usage.get("total_tokens") or (input_tokens + output_tokens)
 
         # Calculate cost
         cost_usd = self._estimate_cost(model, input_tokens, output_tokens)
@@ -1172,6 +1251,16 @@ class RetryableError(LLMAPIError):
     def __init__(self, message: str):
         super().__init__(message, error_type="retryable")
 
+class LLMTimeoutError(LLMAPIError):
+    """API timeout — model was still generating on server side.
+
+    APITimeoutError is a SUBCLASS of APIConnectionError in OpenAI SDK,
+    so it MUST be caught BEFORE APIConnectionError in _make_request.
+    Retried up to TIMEOUT_MAX_RETRIES times in _execute_with_retry,
+    then raised as fatal LLMAPIError(error_type="timeout").
+    """
+    def __init__(self, message: str):
+        super().__init__(message, error_type="timeout")
 
 class ContextOverflowError(LLMAPIError):
     """Context/token limit exceeded - needs compression"""
