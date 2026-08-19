@@ -4588,8 +4588,10 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("")
     prompt_parts.append("4️⃣ **Error Handling & Edge Cases**")
     prompt_parts.append("   • Which exceptions to catch (specific types, or any)")
-    prompt_parts.append("   • Recovery action: log, retry, return default, re-raise")
-    prompt_parts.append("   • Special conditions: empty inputs, missing resources, platform specifics")
+    prompt_parts.append("   • Define primary failure paths and business-level exceptions (e.g., missing required resources, invalid user state).")
+    prompt_parts.append("   • Recovery action: log, retry, return default, or re-raise.")
+    prompt_parts.append("   • Focus on expected workflow execution; avoid over-specifying speculative runtime anomalies.")    
+    
     prompt_parts.append("")
     prompt_parts.append("5️⃣ **Data Contracts**")
     prompt_parts.append("   • Structure of complex objects (fields, types, nesting)")
@@ -4606,6 +4608,20 @@ def _build_agent_mode_instruction_format() -> str:
     prompt_parts.append("⚠️ **Do NOT** provide step‑by‑step implementation instructions, variable names, or algorithmic details. Focus on **what** the code must achieve and **how** it connects to the rest of the system.")
     prompt_parts.append("")
 
+
+    # === ПРАГМАТИЧНЫЕ ГРАНИЦЫ СПЕЦИФИКАЦИИ ===
+    prompt_parts.append("")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("⚖️ PRAGMATIC SPECIFICATION BOUNDARIES")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("Your specifications must be ambitious yet achievable. When defining complex logic, pipelines, or system integrations:")
+    prompt_parts.append("- PRIORITIZE THE STANDARD CONTRACT: Focus on the expected execution flow, primary inputs, core transformations, and required outputs. Define the happy path with architectural precision.")
+    prompt_parts.append("- AVOID SPECULATIVE CASCADES: Specify primary failure recovery (e.g., handling a missing dependency or a base-level exception), but DO NOT design exhaustive, speculative defensive cascades for every theoretical edge case or malformed input.")
+    prompt_parts.append("- ENFORCE STATIC DISPATCH: When integrating with external boundaries or dynamic data, specify explicit deterministic checks (e.g., version or type validation) to route logic. Do not instruct the implementation to guess API contracts or data shapes via speculative exception-handling cascades.")
+    prompt_parts.append("- MANAGE STATE COMPLEXITY: For unpredictable external inputs, define the standard parsing contract and clear recovery actions for primary failure points. Avoid excessively deep, speculative fallback trees intended to catch every theoretical data anomaly, as this can overload the implementation phase.")
+    prompt_parts.append("- ARCHITECT FOR EXECUTION: Design the most direct, robust path to achieve the functional goal. Over-specifying hypothetical failure states to guarantee 'bulletproof' code hinders execution.")
+    prompt_parts.append("")    
+    
     
     prompt_parts.append("- Confirm target location: [Class Body | Method Body | Module Level] (as specified in Structural Scope)")
     prompt_parts.append("- Define architectural approach and component relationships")
@@ -5533,7 +5549,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("You receive:")
     prompt_parts.append("1. INSTRUCTION from Orchestrator (what to do, where, how)")
     # добавил, чтобы Генератор подумал
-    prompt_parts.append("   This instruction contains the complete task specification and context — analyze it thoroughly to understand the full scope and intent.")
+    prompt_parts.append("   This instruction contains the complete task specification and context — analyze the specification methodically to implement the required logic with high quality.")
     prompt_parts.append("   Use this understanding to guide your implementation, ensuring the final code fully embodies the intended solution.")
     prompt_parts.append("2. EXISTING FILE CONTENT(S) — one or more files with their current state")
     prompt_parts.append("")
@@ -5558,6 +5574,7 @@ def _build_code_generator_system_prompt_agent() -> str:
     prompt_parts.append("")
     
     
+        
     prompt_parts.append("")
     prompt_parts.append("📋 ADDITIONAL GUIDELINES FOR INSTRUCTION EXECUTION")
     prompt_parts.append("")
