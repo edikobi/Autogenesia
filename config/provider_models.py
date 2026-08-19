@@ -52,7 +52,8 @@ DEEPSEEK_MODELS = [
 ]
 
 GLM_MODELS = [
-    ("glm-5.2", "GLM 5.2", "Флагманская модель GLM от Zhipu AI. Передовая модель."),
+    ("glm-5.3", "GLM 5.3", "Флагманская модель GLM от Zhipu AI. Передовая модель."),
+    ("glm-5.2", "GLM 5.2", "Старый, но все еще акутальный флагман от Zhipu AI."),
     ("glm-5-turbo", "GLM 5 Turbo", "Быстрая модель GLM. Хороша для структурированного кода."),
 ]
 
@@ -104,7 +105,7 @@ ORCHESTRATOR_MODEL_IDS = {
     "moonshotai/kimi-k2.6", "kimi-k2.6",
     "qwen/qwen3.7-plus", "qwen3.7-plus", "qwen/qwen3.7-max", "qwen3.7-max", "qwen3.6-plus",
     "xiaomi/mimo-v2.5-pro", "mimo-v2.5-pro", "mimo-v2.5",
-    "z-ai/glm-5.2", "glm-5.2",
+    "z-ai/glm-5.2", "glm-5.2", "glm-5.3",
     "minimax/minimax-m3", "minimax-m3",
     "x-ai/grok-4.3",
     "google/gemini-2.0-flash-001",
@@ -132,6 +133,7 @@ GENERATOR_MODEL_IDS = {
     "qwen/qwen3.7-plus",
     "minimax/minimax-m3",
     "z-ai/glm-5.2",
+    "glm-5.3",
     "moonshotai/kimi-k2.7-code",
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
