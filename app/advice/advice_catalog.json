@@ -122,10 +122,27 @@
     },
     {
       "id": "ADV-G14",
-      "name": "Atomic Slicing Imperative (Vertical Chunks Only)",
+      "name": "Structured Decomposition & Sequential Reasoning",
       "category": "general",
-      "description": "Methodology for breaking down large, overwhelming tasks into small, executable vertical slices to avoid context overload and excessive token consumption.",
-      "when_to_use": "When a task involves modifying more than 3 files or adding >50 lines of logic, and the agent falls into endless reasoning without producing output."
+      "description": "Cognitive load management framework for decomposing massive tasks into logical modules. Guides you to define contracts between modules and reason through them sequentially (first design A, then B) without losing global architectural context.",
+      "when_to_use": "When a task is too large and complex, causing context overload, or when you need to structure your thinking process across multiple interdependent logical blocks."
+    },
+
+    {
+      "id": "ADV-G15",
+      "name": "Network Resilience & Request Hygiene",
+      "category": "general",
+      "description": "Framework for designing robust network integrations that respect external limits and handle failures gracefully. Prevents your code from spamming APIs, enforces strict timeouts, implements exponential backoff with jitter, and ensures your system degrades elegantly instead of hanging when external services fail.",
+      "when_to_use": "When designing any feature that involves HTTP requests, API calls, database connections over a network, webhooks, or interacting with external third-party services."
+    },
+
+
+    {
+      "id": "ADV-G16",
+      "name": "Proactive Security Architecture & Threat Resilience",
+      "category": "general",
+      "description": "Framework for embedding security into system architecture from day one. Guides you to model threats (both malicious and accidental), enforce trust boundaries, apply defense-in-depth, contain blast radiuses, and design systems that fail securely.",
+      "when_to_use": "When designing system architecture, defining API contracts, handling user input, managing authentication/authorization, integrating external services, or processing sensitive data."
     },
 
     {
