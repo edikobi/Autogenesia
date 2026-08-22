@@ -164,10 +164,11 @@ class ModifyInstruction:
     target_class: Optional[str] = None      # Для INSERT_INTO_CLASS, REPLACE_METHOD
     target_method: Optional[str] = None     # Для REPLACE_METHOD
     target_function: Optional[str] = None   # Для REPLACE_FUNCTION
-    target_attribute: Optional[str] = None  # ⭐ НОВОЕ: Для замены атрибута в классе
+    target_attribute: Optional[str] = None  # Для замены атрибута в классе
     insert_after: Optional[str] = None      # Вставить после указанного элемента
     insert_before: Optional[str] = None     # Вставить перед указанным элементом
     replace_pattern: Optional[str] = None   # Паттерн для поиска и замены
+    replace_pattern_line: Optional[int] = None   # Опциональный номер строки (1-indexed) для REPLACE PATTERN.
     preserve_imports: bool = True           # Сохранять существующие импорты
     auto_format: bool = True                # Автоформатирование отступов
     skip_normalization: bool = False        # Пропустить нормализацию отступов (для auto-correct)
@@ -262,6 +263,7 @@ class ParsedCodeBlock:
         insert_after_target: Optional[str] = None,
         insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
+        replace_pattern_line: Optional[int] = None,   # ⭐ НОВОЕ
         language: Optional[str] = None,
     ):
         self.file_path = file_path
@@ -276,6 +278,7 @@ class ParsedCodeBlock:
         self.insert_after_target = insert_after_target
         self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
+        self.replace_pattern_line = replace_pattern_line   # ⭐ НОВОЕ
         self.language = language  # Programming language (python, javascript, typescript, go, java)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -293,6 +296,7 @@ class ParsedCodeBlock:
             'insert_after_target': self.insert_after_target,
             'insert_before_target': self.insert_before_target,
             'replace_pattern': self.replace_pattern,
+            'replace_pattern_line': self.replace_pattern_line,   # ⭐ НОВОЕ
             'language': self.language,
         }
 
@@ -312,6 +316,7 @@ class MultiLangDiffInstruction:
         insert_after_target: Optional[str] = None,
         insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
+        replace_pattern_line: Optional[int] = None,
         mode: str = "DIFF_INSERT",
     ):
         """Initialize multi-language diff instruction."""
@@ -326,6 +331,7 @@ class MultiLangDiffInstruction:
         self.insert_after_target = insert_after_target
         self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
+        self.replace_pattern_line = replace_pattern_line
         self.mode = mode
 
 # ============================================================================
@@ -603,6 +609,7 @@ class FileModifier:
                 insert_after=kwargs.get('insert_after', instruction.insert_after),
                 insert_before=kwargs.get('insert_before', instruction.insert_before),
                 replace_pattern=kwargs.get('replace_pattern', instruction.replace_pattern),
+                replace_pattern_line=kwargs.get('replace_pattern_line', instruction.replace_pattern_line),  # ⭐ НОВОЕ
                 preserve_imports=instruction.preserve_imports,
                 auto_format=instruction.auto_format,
                 skip_normalization=True
@@ -952,6 +959,7 @@ class FileModifier:
                     insert_after_target=block.insert_after_target,
                     insert_before_target=block.insert_before_target,
                     replace_pattern=block.replace_pattern,
+                    replace_pattern_line=block.replace_pattern_line, 
                     mode=block.mode,
                 )
                 
@@ -994,9 +1002,13 @@ class FileModifier:
                 insert_after=block.insert_after,
                 insert_before=block.insert_before,
                 replace_pattern=block.replace_pattern,
+                replace_pattern_line=block.replace_pattern_line,
                 preserve_imports=True,  # Always preserve imports
                 auto_format=True        # Always auto-format
             )
+            
+            #  Отладочный лог
+            logger.info(f"DEBUG REPLACE_PATTERN_LINE: Mode={block.mode}, Hint={block.replace_pattern_line}, Pattern={block.replace_pattern}")
             
             # Delegate to unified apply logic (includes Tree-sitter & auto-correct)
             modify_result = self.apply(existing_content, instruction)
@@ -1081,10 +1093,11 @@ class FileModifier:
                     insert_after=block.insert_after,
                     insert_before=block.insert_before,
                     replace_pattern=block.replace_pattern,
+                    replace_pattern_line=block.replace_pattern_line,  # ⭐ НОВОЕ
                     mode=block.mode,
                 )
-        
-                result = self.apply_multilang_diff(existing_content, diff_instruction)
+                
+                result = self.apply_multilang_diff(existing_content, diff_instruction)        
         
                 if result.success:
                     change_type = ChangeType.CREATE if not existing_content else ChangeType.MODIFY
@@ -1405,6 +1418,7 @@ class FileModifier:
                     insert_after=block.insert_after,
                     insert_before=block.insert_before,
                     replace_pattern=block.replace_pattern,
+                    replace_pattern_line=block.replace_pattern_line,
                     preserve_imports=True,
                     auto_format=True,
                 )
@@ -1803,8 +1817,78 @@ class FileModifier:
                         search_start = target_info['start_line'] - 1  # Convert to 0-indexed
                         search_end = target_info['end_line']
                 
-                # Try to find pattern in target scope
-                result = self._find_unique_anchor(lines, instruction.replace_pattern, search_start, search_end)
+                # ⭐ НОВОЕ: Проверка опционального хинта номера строки от ИИ.
+                # Если replace_pattern_line указан и паттерн совпал — немедленная
+                # замена без поиска. Если не совпал — fallback к _find_unique_anchor.
+                if instruction.replace_pattern_line is not None:
+                    hint_start = instruction.replace_pattern_line - 1
+                    if 0 <= hint_start < len(lines):
+                        pattern_first_line = next(
+                            (l.strip() for l in instruction.replace_pattern.splitlines() if l.strip()),
+                            None
+                        )
+                        if pattern_first_line:
+                            file_line = lines[hint_start].strip()
+                            if pattern_first_line in file_line or file_line in pattern_first_line:
+                                # Хинт совпал! Вычисляем match_end.
+                                hint_end = hint_start + 1
+                                file_idx = hint_start + 1
+                                remaining_pattern_lines = [
+                                    l.strip() for l in instruction.replace_pattern.splitlines()
+                                    if l.strip()
+                                ][1:]
+                                for pl in remaining_pattern_lines:
+                                    while file_idx < len(lines) and not lines[file_idx].strip():
+                                        file_idx += 1
+                                    if file_idx >= len(lines):
+                                        break
+                                    fl = lines[file_idx].strip()
+                                    if pl in fl or fl in pl:
+                                        file_idx += 1
+                                        hint_end = file_idx
+                                    else:
+                                        break
+
+                                new_lines = instruction.code.split('\n')
+                                if new_lines and new_lines[-1].strip() != "":
+                                    new_lines.append("")
+
+                                modified_lines = lines[:hint_start] + new_lines + lines[hint_end:]
+                                modified_content = '\n'.join(modified_lines)
+
+                                if is_code_file:
+                                    is_valid, errors = self._validate_multilang_syntax(
+                                        modified_content, instruction.language
+                                    )
+                                    if not is_valid:
+                                        return ModifyResult(
+                                            success=False,
+                                            new_content=existing_content,
+                                            broken_content=modified_content,
+                                            message=(
+                                                f"DIFF_REPLACE: Syntax validation failed "
+                                                f"(line hint {instruction.replace_pattern_line}). "
+                                                f"Errors: {'; '.join(errors[:3])}"
+                                            )
+                                        )
+
+                                logger.info(
+                                    f"DIFF_REPLACE: Line hint {instruction.replace_pattern_line} "
+                                    f"matched, using direct replacement"
+                                )
+                                return ModifyResult(
+                                    success=True,
+                                    new_content=modified_content,
+                                    message=f"DIFF_REPLACE: Replaced code for {instruction.language} (via line hint)",
+                                    changes_made=[
+                                        f"Replaced lines {hint_start + 1} to {hint_end} (via line hint)"
+                                    ],
+                                )
+
+                # Try to find pattern in target scope (существующий код)
+                result = self._find_unique_anchor(
+                    lines, instruction.replace_pattern, search_start, search_end
+                )               
                 
                 # TERTIARY (fuzzy): fallback for SECONDARY only — multiline patterns not found by exact match
                 if not result['found'] and '\n' in instruction.replace_pattern:
@@ -5424,7 +5508,80 @@ class FileModifier:
             logger.debug(f"_expand_compound_block_python fallback failed: {e}")
             return match_start, match_end
 
+    def _try_pattern_at_line(
+        self,
+        lines: List[str],
+        pattern: str,
+        line_number: int,
+    ) -> Optional[Tuple[int, int]]:
+        """
+        ⭐ НОВОЕ: Проверяет совпадение паттерна на указанной строке (1-indexed).
 
+        Если первая непустая строка паттерна совпадает (substring match) с
+        указанной строкой файла — немедленно возвращает (match_start, match_end)
+        без полного поиска. Если не совпадает — возвращает None, и вызывающий
+        код использует стандартные механизмы поиска.
+
+        Args:
+            lines: Все строки файла (с line endings)
+            pattern: Паттерн для проверки (может быть многострочным)
+            line_number: 1-indexed номер строки, где паттерн должен начинаться
+
+        Returns:
+            Tuple (match_start, match_end) 0-indexed, или None
+        """
+        if line_number is None or line_number < 1:
+            return None
+
+        hint_start = line_number - 1  # Конвертация в 0-indexed
+
+        if hint_start < 0 or hint_start >= len(lines):
+            return None
+
+        # Получаем непустые строки паттерна (stripped)
+        pattern_lines = [line.strip() for line in pattern.splitlines() if line.strip()]
+        if not pattern_lines:
+            return None
+
+        # Проверяем первую строку паттерна против указанной строки файла
+        first_pattern_line = pattern_lines[0]
+        file_line = lines[hint_start].strip()
+
+        # Substring match в обе стороны (как в _find_multiline_match)
+        if first_pattern_line not in file_line and file_line not in first_pattern_line:
+            return None  # Паттерн не совпал на указанной строке
+
+        # Первая строка совпала! Вычисляем match_end.
+        # Для однострочного паттерна — match_end = hint_start + 1
+        if len(pattern_lines) == 1:
+            return (hint_start, hint_start + 1)
+
+        # Для многострочного паттерна — пытаемся сопоставить последующие строки
+        file_idx = hint_start + 1
+        match_end = hint_start + 1
+
+        for pattern_line in pattern_lines[1:]:
+            # Пропускаем пустые строки файла
+            while file_idx < len(lines) and not lines[file_idx].strip():
+                file_idx += 1
+
+            if file_idx >= len(lines):
+                break  # Достигнут конец файла
+
+            file_line = lines[file_idx].strip()
+            if pattern_line in file_line or file_line in pattern_line:
+                file_idx += 1
+                match_end = file_idx
+            else:
+                break  # Строка не совпала
+
+        # Гарантируем, что match_end как минимум hint_start + 1
+        if match_end <= hint_start:
+            match_end = hint_start + 1
+
+        return (hint_start, match_end)
+    
+    
     def _replace_in_method(
         self,
         existing_content: str,
@@ -5567,98 +5724,121 @@ class FileModifier:
             print(f"⚠️ [DIAG-REPLACE] Diagnostic failed: {_diag_err}")
     # ═══════════════════════════════════════════════════════════════════        
         
-        # === ОГРАНИЧЕНИЕ ОБЛАСТИ ПОИСКА ЧЕРЕЗ insert_after / insert_before ===
-        search_start = method_start
-        search_end = method_end
-        
-        target_name = f"{target_class}.{target_method}" if target_class else target_method
+        # ⭐ НОВОЕ: Проверка опционального хинта номера строки от ИИ.
+        match_start = None
+        match_end = None
 
-        if instruction.insert_after:
-            anchor_res = self._find_unique_anchor(lines, instruction.insert_after, search_start, search_end)
-            if not anchor_res['found'] or not anchor_res['unique']:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Anchor for insert_after '{instruction.insert_after}' not found or ambiguous in '{target_name}'",
-                )
-            # Сдвигаем начало поиска строго ПОСЛЕ якоря
-            search_start = max(search_start, anchor_res['match_end'])
-            if search_start >= search_end:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Invalid scope: insert_after '{instruction.insert_after}' leaves no room for replace_pattern in '{target_name}'",
-                )
-
-        if instruction.insert_before:
-            anchor_res = self._find_unique_anchor(lines, instruction.insert_before, search_start, search_end)
-            if not anchor_res['found'] or not anchor_res['unique']:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Anchor for insert_before '{instruction.insert_before}' not found or ambiguous in '{target_name}'",
-                )
-            # Сдвигаем конец поиска строго ДО якоря
-            search_end = min(search_end, anchor_res['line_number'])
-            if search_start >= search_end:
-                return ModifyResult(
-                    success=False,
-                    new_content=existing_content,
-                    message=f"Invalid scope: insert_before '{instruction.insert_before}' leaves no room for replace_pattern in '{target_name}'",
-                )
-
-        # Используем _find_multiline_match для поиска паттерна в ограниченном диапазоне
-        match_start, match_end = self._find_multiline_match(lines, replace_pattern, search_start, search_end)
-        
-        # Expand single-line match to cover full multi-line expression
-        # ВАЖНО: передаем search_end вместо method_end, чтобы расширение блоков
-        # не вышло за пределы разрешенной области (не "съело" якорь INSERT_BEFORE)
-        if match_start is not None and match_end is not None:
-            match_start, match_end = self._expand_multiline_block(
-                lines, match_start, match_end, search_end
+        if instruction.replace_pattern_line is not None:
+            hint_result = self._try_pattern_at_line(
+                lines, replace_pattern, instruction.replace_pattern_line
             )
-            match_start, match_end = self._expand_compound_block_python(
-                lines, match_start, match_end, search_end
-            )       
-       
-        
-        # Fallback: search for comment pattern with exact unique match
-        if match_start is None and replace_pattern.strip().startswith('#'):
-            comment_pattern = replace_pattern.strip()
-            matches = []
-            for i in range(method_start, method_end):
-                if i < len(lines):
-                    line_stripped = lines[i].strip()
-                    if line_stripped == comment_pattern:
-                        matches.append(i)
-            
-            if len(matches) == 1:
-                match_start = matches[0]
-                match_end = matches[0] + 1
-                logger.debug(f"Found unique comment anchor '{comment_pattern}' at line {match_start + 1}")
-        
-        # Check if match_start is None
+            if hint_result is not None:
+                match_start, match_end = hint_result
+                # Расширяем match для покрытия составных блоков.
+                # Используем len(lines) вместо method_end, т.к. tree-sitter span
+                # может быть неточным (диагностика выше это показывает).
+                match_start, match_end = self._expand_multiline_block(
+                    lines, match_start, match_end, len(lines)
+                )
+                match_start, match_end = self._expand_compound_block_python(
+                    lines, match_start, match_end, len(lines)
+                )
+                logger.info(
+                    f"REPLACE_IN_METHOD: Line hint {instruction.replace_pattern_line} matched, "
+                    f"using direct replacement at lines {match_start + 1}-{match_end}"
+                )
+
         if match_start is None:
-            target_name = f"{target_class}.{target_method}" if target_class else target_method
+            # === ОГРАНИЧЕНИЕ ОБЛАСТИ ПОИСКА ЧЕРЕЗ insert_after / insert_before ===
+            search_start = method_start
+            search_end = method_end
             
-            # Check for ambiguity to provide a precise error
-            pattern_lines = [line.strip() for line in replace_pattern.splitlines() if line.strip()]
-            if len(pattern_lines) == 1:
-                target = pattern_lines[0]
-                count = sum(1 for line in lines[method_start:method_end] if target in line)
-                if count > 1:
+            target_name = f"{target_class}.{target_method}" if target_class else target_method
+
+            if instruction.insert_after:
+                anchor_res = self._find_unique_anchor(lines, instruction.insert_after, search_start, search_end)
+                if not anchor_res['found'] or not anchor_res['unique']:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
-                        message=f"Ambiguous replace_pattern: {count} occurrences found in '{target_name}'",
+                        message=f"Anchor for insert_after '{instruction.insert_after}' not found or ambiguous in '{target_name}'",
                     )
+                # Сдвигаем начало поиска строго ПОСЛЕ якоря
+                search_start = max(search_start, anchor_res['match_end'])
+                if search_start >= search_end:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Invalid scope: insert_after '{instruction.insert_after}' leaves no room for replace_pattern in '{target_name}'",
+                    )
+
+            if instruction.insert_before:
+                anchor_res = self._find_unique_anchor(lines, instruction.insert_before, search_start, search_end)
+                if not anchor_res['found'] or not anchor_res['unique']:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Anchor for insert_before '{instruction.insert_before}' not found or ambiguous in '{target_name}'",
+                    )
+                # Сдвигаем конец поиска строго ДО якоря
+                search_end = min(search_end, anchor_res['line_number'])
+                if search_start >= search_end:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Invalid scope: insert_before '{instruction.insert_before}' leaves no room for replace_pattern in '{target_name}'",
+                    )
+
+            # Используем _find_multiline_match для поиска паттерна в ограниченном диапазоне
+            match_start, match_end = self._find_multiline_match(lines, replace_pattern, search_start, search_end)
             
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
-            )        
+            # Expand single-line match to cover full multi-line expression
+            # ВАЖНО: передаем search_end вместо method_end, чтобы расширение блоков
+            # не вышло за пределы разрешенной области (не "съело" якорь INSERT_BEFORE)
+            if match_start is not None and match_end is not None:
+                match_start, match_end = self._expand_multiline_block(
+                    lines, match_start, match_end, search_end
+                )
+                match_start, match_end = self._expand_compound_block_python(
+                    lines, match_start, match_end, search_end
+                )       
         
+            # Fallback: search for comment pattern with exact unique match
+            if match_start is None and replace_pattern.strip().startswith('#'):
+                comment_pattern = replace_pattern.strip()
+                matches = []
+                for i in range(method_start, method_end):
+                    if i < len(lines):
+                        line_stripped = lines[i].strip()
+                        if line_stripped == comment_pattern:
+                            matches.append(i)
+                
+                if len(matches) == 1:
+                    match_start = matches[0]
+                    match_end = matches[0] + 1
+                    logger.debug(f"Found unique comment anchor '{comment_pattern}' at line {match_start + 1}")
+        
+            # Check if match_start is None
+            if match_start is None:
+                target_name = f"{target_class}.{target_method}" if target_class else target_method
+                
+                # Check for ambiguity to provide a precise error
+                pattern_lines = [line.strip() for line in replace_pattern.splitlines() if line.strip()]
+                if len(pattern_lines) == 1:
+                    target = pattern_lines[0]
+                    count = sum(1 for line in lines[method_start:method_end] if target in line)
+                    if count > 1:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message=f"Ambiguous replace_pattern: {count} occurrences found in '{target_name}'",
+                        )
+                
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=f"Pattern '{replace_pattern}' not found in '{target_name}'",
+                )        
         
         # line_indent — ЕДИНСТВЕННЫЙ ИСТОЧНИК: строка файла где найден replace_pattern.
         # Шаг 1: вычислить базовый отступ строки-паттерна.
@@ -5854,6 +6034,8 @@ class FileModifier:
             skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
         )
         
+        
+        
         return self._patch_method(existing_content, patch_instruction)
 
     def _replace_in_function(
@@ -5882,13 +6064,14 @@ class FileModifier:
             target_method=target_function,  # ВАЖНО: маппим сюда!
             target_class=None,              # Класса нет
             replace_pattern=instruction.replace_pattern,
+            replace_pattern_line=instruction.replace_pattern_line,  # ⭐ НОВОЕ
             insert_after=instruction.insert_after,
             insert_before=instruction.insert_before,
             preserve_imports=instruction.preserve_imports,
             auto_format=instruction.auto_format,
             skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
         )
-
+        
         return self._replace_in_method(existing_content, replace_instruction)
 
     

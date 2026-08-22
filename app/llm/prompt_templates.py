@@ -5797,7 +5797,9 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("Required fields:")
     parts.append("• TARGET_CLASS — Name of the class or object the method belongs to (skip for top-level functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for search (optional but recommended)")
-    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern. PLAN PATTERN AND CODE TOGETHER: Treat the pattern and your replacement code as a single structural unit. If your replacement code introduces or retains closing elements (e.g., braces, brackets, terminators), those exact lines must also be included in your REPLACE_PATTERN. Otherwise, the original closing elements will remain and cause duplication and syntax errors.")
+    parts.append("Optional fields:")
+    parts.append("• REPLACE_PATTERN_LINE — The 1-indexed line number of the REPLACE_PATTERN in <existing_code>. If provided and the pattern matches this line, replacement is executed immediately, bypassing uniqueness search.")
     parts.append("")
     parts.append("🚨 ZERO AMBIGUITY RULE FOR DIFF_REPLACE:")
     parts.append("The REPLACE_PATTERN must be unique. LLMs cannot reliably count occurrences in a file. Therefore:")
@@ -5809,6 +5811,7 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("If your target line is a HIGH-RISK pattern, or you have ANY doubt it is unique, you MUST do one of the following:")
     parts.append("1. Expand REPLACE_PATTERN to include 1-2 surrounding lines (copy exact indentation from <existing_code>).")
     parts.append("2. Switch to DIFF_REPLACE_TARGET and rewrite the ENTIRE method or function. (CRITICAL: When rewriting the entire entity, you MUST copy all unchanged lines from <existing_code> byte-for-byte. Do not lose any existing logic).")    
+    parts.append("3. Provide `REPLACE_PATTERN_LINE: <line_number>` (1-indexed, single-line patterns only). Whenever you know the exact line number from <existing_code>, providing it will execute the replacement immediately at that line if the pattern matches, bypassing the standard search. This is highly recommended to guarantee the exact location of the change and speed up the process.")    
     parts.append("")
     parts.append("NEVER submit a short, generic REPLACE_PATTERN. NEVER use DIFF_REPLACE to replace an entire entity (use DIFF_REPLACE_TARGET instead).")
     parts.append("")   
@@ -5943,6 +5946,23 @@ def _get_javascript_prompt_injection() -> str:
     parts.append("⚠️ This example is here to break the single-line habit: REPLACE_PATTERN MUST span all lines you want to remove.")
     parts.append("")    
     
+    parts.append("**Example 6: DIFF_REPLACE with REPLACE_PATTERN_LINE**")
+    parts.append("If a pattern is ambiguous, provide the 1-indexed line number from <existing_code> to bypass the uniqueness search.")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/services/UserService.ts")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("TARGET_METHOD: findById")
+    parts.append("REPLACE_PATTERN: return null;")
+    parts.append("REPLACE_PATTERN_LINE: 12")
+    parts.append("")
+    parts.append("```typescript")
+    parts.append("    throw new UserNotFoundException(`User with id ${id} not found`);")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")    
     
     parts.append("**When to use each mode:**")
     parts.append("Use DIFF_INSERT and DIFF_REPLACE for most changes — they apply precise, targeted updates without touching unrelated code.")
@@ -6042,7 +6062,9 @@ def _get_go_prompt_injection() -> str:
     parts.append("Required fields:")
     parts.append("• TARGET_CLASS — Name of the struct/type that acts as the method receiver (required for Go methods, skip for plain functions)")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for search (optional but recommended)")
-    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern. PLAN PATTERN AND CODE TOGETHER: Treat the pattern and your replacement code as a single structural unit. If your replacement code introduces or retains closing elements (e.g., braces, brackets, terminators), those exact lines must also be included in your REPLACE_PATTERN. Otherwise, the original closing elements will remain and cause duplication and syntax errors.")
+    parts.append("Optional fields:")
+    parts.append("• REPLACE_PATTERN_LINE — The 1-indexed line number of the REPLACE_PATTERN in <existing_code>. If provided and the pattern matches this line, replacement is executed immediately, bypassing uniqueness search.")
     parts.append("")
     parts.append("🚨 ZERO AMBIGUITY RULE FOR DIFF_REPLACE:")
     parts.append("The REPLACE_PATTERN must be unique. LLMs cannot reliably count occurrences in a file. Therefore:")
@@ -6054,6 +6076,7 @@ def _get_go_prompt_injection() -> str:
     parts.append("If your target line is a HIGH-RISK pattern, or you have ANY doubt it is unique, you MUST do one of the following:")
     parts.append("1. Expand REPLACE_PATTERN to include 1-2 surrounding lines (copy exact indentation from <existing_code>).")
     parts.append("2. Switch to DIFF_REPLACE_TARGET and rewrite the ENTIRE function or method. (CRITICAL: When rewriting the entire entity, you MUST copy all unchanged lines from <existing_code> byte-for-byte. Do not lose any existing logic).")    
+    parts.append("3. Provide `REPLACE_PATTERN_LINE: <line_number>` (1-indexed, single-line patterns only). Whenever you know the exact line number from <existing_code>, providing it will execute the replacement immediately at that line if the pattern matches, bypassing the standard search. This is highly recommended to guarantee the exact location of the change and speed up the process.")
     parts.append("NEVER submit a short, generic REPLACE_PATTERN. NEVER use DIFF_REPLACE to replace an entire entity (use DIFF_REPLACE_TARGET instead).")
     parts.append("")    
     
@@ -6114,6 +6137,49 @@ def _get_go_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+    
+    parts.append("**Example 2b: DIFF_REPLACE with REPLACE_PATTERN_LINE**")
+    parts.append("If a pattern is ambiguous, provide the 1-indexed line number from <existing_code> to bypass the uniqueness search.")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/services/auth.go")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_CLASS: AuthService")
+    parts.append("TARGET_METHOD: ValidateToken")
+    parts.append("REPLACE_PATTERN: return false, err")
+    parts.append("REPLACE_PATTERN_LINE: 24")
+    parts.append("")
+    parts.append("```go")
+    parts.append("\treturn false, fmt.Errorf(\"token validation failed: %w\", err)")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")    
+    
+    # --- Многострочный пример DIFF_REPLACE (ломает однострочный стереотип) ---
+    parts.append("")
+    parts.append("**Example 2c– multi-line REPLACE_PATTERN (mandatory when replacing blocks):**")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: internal/service.go")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_FUNCTION: FetchData")
+    parts.append("REPLACE_PATTERN: if cached {")
+    parts.append("    return cache")
+    parts.append("}")
+    parts.append("")
+    parts.append("```go")
+    parts.append("if cached {")
+    parts.append("    log.Println(\"cache hit\")")
+    parts.append("    return cache")
+    parts.append("}")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("⚠️ This example is here to break the single-line habit: REPLACE_PATTERN MUST span all lines you want to remove.")
+    parts.append("")    
+    
+    
     parts.append("**Example 3: DIFF_INSERT — Add import to a Go file**")
     parts.append("```")
     parts.append("### CODE_BLOCK")
@@ -6127,7 +6193,7 @@ def _get_go_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
-    
+        
     
     parts.append("")
     parts.append("**Example 4: DIFF_INSERT_TARGET: new function after an existing one:**")
@@ -6187,28 +6253,6 @@ def _get_go_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
-    # --- Многострочный пример DIFF_REPLACE (ломает однострочный стереотип) ---
-    parts.append("")
-    parts.append("**Example – multi-line REPLACE_PATTERN (mandatory when replacing blocks):**")
-    parts.append("```")
-    parts.append("### CODE_BLOCK")
-    parts.append("FILE: internal/service.go")
-    parts.append("MODE: DIFF_REPLACE")
-    parts.append("TARGET_FUNCTION: FetchData")
-    parts.append("REPLACE_PATTERN: if cached {")
-    parts.append("    return cache")
-    parts.append("}")
-    parts.append("")
-    parts.append("```go")
-    parts.append("if cached {")
-    parts.append("    log.Println(\"cache hit\")")
-    parts.append("    return cache")
-    parts.append("}")
-    parts.append("```")
-    parts.append("### END_CODE_BLOCK")
-    parts.append("```")
-    parts.append("⚠️ This example is here to break the single-line habit: REPLACE_PATTERN MUST span all lines you want to remove.")
-    parts.append("")    
     
     
     parts.append("**When to use each mode:**")
@@ -6301,7 +6345,9 @@ def _get_java_prompt_injection() -> str:
     parts.append("**MODE 2: DIFF_REPLACE** — Surgical substitution of specific lines INSIDE an entity body, or replacing standalone global variables.")
     parts.append("Required fields:")
     parts.append("• TARGET_FUNCTION or TARGET_CLASS + TARGET_METHOD — scope for search (optional but recommended)")
-    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern. PLAN PATTERN AND CODE TOGETHER: Treat the pattern and your replacement code as a single structural unit. If your replacement code introduces or retains closing elements (e.g., braces, brackets, terminators), those exact lines must also be included in your REPLACE_PATTERN. Otherwise, the original closing elements will remain and cause duplication and syntax errors.")
+    parts.append("Optional fields:")
+    parts.append("• REPLACE_PATTERN_LINE — The 1-indexed line number of the REPLACE_PATTERN in <existing_code>. If provided and the pattern matches this line, replacement is executed immediately, bypassing uniqueness search.")
     parts.append("")
     parts.append("🚨 ZERO AMBIGUITY RULE FOR DIFF_REPLACE:")
     parts.append("The REPLACE_PATTERN must be unique. LLMs cannot reliably count occurrences in a file. Therefore:")
@@ -6313,6 +6359,7 @@ def _get_java_prompt_injection() -> str:
     parts.append("If your target line is a HIGH-RISK pattern, or you have ANY doubt it is unique, you MUST do one of the following:")
     parts.append("1. Expand REPLACE_PATTERN to include 1-2 surrounding lines (copy exact indentation from <existing_code>).")
     parts.append("2. Switch to DIFF_REPLACE_TARGET and rewrite the ENTIRE function or method. (CRITICAL: When rewriting the entire entity, you MUST copy all unchanged lines from <existing_code> byte-for-byte. Do not lose any existing logic).")    
+    parts.append("3. Provide `REPLACE_PATTERN_LINE: <line_number>` (1-indexed, single-line patterns only). Whenever you know the exact line number from <existing_code>, providing it will execute the replacement immediately at that line if the pattern matches, bypassing the standard search. This is highly recommended to guarantee the exact location of the change and speed up the process.")
     parts.append("NEVER submit a short, generic REPLACE_PATTERN. NEVER use DIFF_REPLACE to replace an entire entity (use DIFF_REPLACE_TARGET instead).")
     parts.append("")    
     
@@ -6352,6 +6399,27 @@ def _get_java_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     parts.append("")
+   
+   
+    parts.append("**Example 1b: DIFF_REPLACE with REPLACE_PATTERN_LINE**")
+    parts.append("If a pattern is ambiguous, provide the 1-indexed line number from <existing_code> to bypass the uniqueness search.")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: src/main/java/com/app/service/UserService.java")
+    parts.append("MODE: DIFF_REPLACE")
+    parts.append("TARGET_CLASS: UserService")
+    parts.append("TARGET_METHOD: findById")
+    parts.append("REPLACE_PATTERN: return null;")
+    parts.append("REPLACE_PATTERN_LINE: 15")
+    parts.append("")
+    parts.append("```java")
+    parts.append("        throw new UserNotFoundException(\"User with id \" + id + \" not found\");")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")   
+   
+   
     parts.append("**Example 2: DIFF_INSERT — Add a new method to a Java class**")
     parts.append("```")
     parts.append("### CODE_BLOCK")
@@ -6478,6 +6546,12 @@ def _get_python_prompt_injection() -> str:
     parts.append("### END_CODE_BLOCK")
     parts.append("```")
     
+    parts.append("=" * 60)
+    parts.append("⚠️ STRUCTURAL SYMMETRY RULE")
+    parts.append("=" * 60)
+    parts.append("When using any mode with REPLACE_PATTERN, you must plan the pattern and your replacement code as a single structural unit. If your replacement code introduces or retains closing elements (e.g., brackets, braces, return statements, or block terminators), those exact lines must also be included in your REPLACE_PATTERN. This prevents duplication of existing structures and avoids syntax corruption.")
+    parts.append("")
+    
     
     parts.append("=" * 60)
     parts.append("MODE OPTIONS (Python Files)")
@@ -6500,8 +6574,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("| PATCH_METHOD | Insert lines INSIDE existing method | TARGET_CLASS (if in class), TARGET_METHOD, INSERT_AFTER or INSERT_BEFORE |")
     parts.append("| INSERT_IN_CLASS | Add a NEW ATTRIBUTE/FIELD to class body  | TARGET_CLASS, INSERT_AFTER |")
     parts.append("| REPLACE_IN_CLASS | Replace a class ATTRIBUTE/FIELD in class body | TARGET_CLASS, TARGET_ATTRIBUTE, REPLACE_PATTERN |")
-    parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional), INSERT_AFTER or INSERT_BEFORE (optional) |")
-    parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN, INSERT_AFTER or INSERT_BEFORE (optional) |")
+    parts.append("| REPLACE_IN_METHOD | Replace code lines inside a method's body | TARGET_METHOD, REPLACE_PATTERN, TARGET_CLASS (optional), INSERT_AFTER or INSERT_BEFORE (optional), REPLACE_PATTERN_LINE (optional) |")
+    parts.append("| REPLACE_IN_FUNCTION| Replace SPECIFIC LINES in function| TARGET_FUNCTION, REPLACE_PATTERN, INSERT_AFTER or INSERT_BEFORE (optional), REPLACE_PATTERN_LINE (optional) |")   
     parts.append("| INSERT_IN_FUNCTION | Insert lines INSIDE existing function | TARGET_FUNCTION, INSERT_AFTER or INSERT_BEFORE |")
     parts.append("| ADD_NEW_FUNCTION | Add new global function | (none) |")
     parts.append("")
@@ -6551,6 +6625,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("If your target line is a HIGH-RISK pattern, or you have ANY doubt it is unique, you MUST do one of the following:")
     parts.append("1. Expand REPLACE_PATTERN to include 1-2 surrounding lines (copy exact indentation byte-for-byte from <existing_code>).")
     parts.append("2. Switch to REPLACE_METHOD / REPLACE_FUNCTION and rewrite the ENTIRE entity. (CRITICAL: When rewriting the entire entity, you MUST copy all unchanged lines from <existing_code> byte-for-byte. Do not lose any existing logic).")    
+    parts.append("3. Provide `REPLACE_PATTERN_LINE: <line_number>` (1-indexed, single-line patterns only). Whenever you know the exact line number from <existing_code>, providing it will execute the replacement immediately at that line if the pattern matches, bypassing the standard search. This is highly recommended to guarantee the exact location of the change and speed up the process.")
     parts.append("")
     parts.append("NEVER submit a short, generic REPLACE_PATTERN. NEVER use REPLACE_IN_METHOD to replace an entire method body (use REPLACE_METHOD instead).")
     parts.append("")        
@@ -6737,9 +6812,6 @@ def _get_python_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     
-    
-    
-    
     parts.append("")    
     parts.append("=" * 60)
     parts.append("⚠️ INDENTATION RULES (CRITICAL)")
@@ -6771,12 +6843,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("")
     # новояз
  
- 
- 
- 
     parts.append("Remember: Your output is parsed automatically. Any text outside CODE_BLOCK is ignored.")    
-    
-    
     
 # Example 7: Multiple files (NEW)
     parts.append("**Example 7: Changes to multiple files**")
@@ -6867,7 +6934,6 @@ def _get_python_prompt_injection() -> str:
     parts.append("```")
     parts.append("### END_CODE_BLOCK")
     parts.append("")
-    
         
     # Example 10: Class Attributes (NEW)
     parts.append("**Example 10: Working with Class Attributes (Models/Schemas)**")
@@ -6942,7 +7008,23 @@ def _get_python_prompt_injection() -> str:
     parts.append("  (use REPLACE_METHOD instead)")
     parts.append("")
 
-
+    parts.append("**Example 11c: Using REPLACE_PATTERN_LINE for precise targeting**")
+    parts.append("If a pattern appears multiple times, or you want to guarantee a specific line is replaced without ambiguity, provide the 1-indexed line number from <existing_code>.")
+    parts.append("```")
+    parts.append("### CODE_BLOCK")
+    parts.append("FILE: app/core/config.py")
+    parts.append("MODE: REPLACE_IN_METHOD")
+    parts.append("TARGET_CLASS: Settings")
+    parts.append("TARGET_METHOD: assemble_db_connection")
+    parts.append("REPLACE_PATTERN: return None")
+    parts.append("REPLACE_PATTERN_LINE: 45")
+    parts.append("")
+    parts.append("```python")
+    parts.append("        return None  # This specific line at line 45 is replaced")
+    parts.append("```")
+    parts.append("### END_CODE_BLOCK")
+    parts.append("```")
+    parts.append("")
 
     parts.append("**Example 12: Surgical Replace inside Function (Module Scope)**")
     parts.append("If `REPLACE_PATTERN` is not unique, add `INSERT_AFTER` or `INSERT_BEFORE` to narrow the search scope and avoid 'Ambiguous replace_pattern' errors.")
@@ -7114,7 +7196,9 @@ def _get_sql_prompt_injection() -> str:
     parts.append("")
     parts.append("**MODE 2: DIFF_REPLACE** — Replace existing SQL statements")
     parts.append("Required fields:")
-    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern.")
+    parts.append("• REPLACE_PATTERN — The exact code block to be replaced. CRITICAL: You MUST include every single line you intend to replace. Never use a partial or truncated pattern. PLAN PATTERN AND CODE TOGETHER: Treat the pattern and your replacement code as a single structural unit. If your replacement code introduces or retains closing elements (e.g., braces, brackets, terminators), those exact lines must also be included in your REPLACE_PATTERN. Otherwise, the original closing elements will remain and cause duplication and syntax errors.")
+    parts.append("Optional fields:")
+    parts.append("• REPLACE_PATTERN_LINE — The 1-indexed line number of the REPLACE_PATTERN in <existing_code>. If provided and the pattern matches this line, replacement is executed immediately, bypassing uniqueness search.")
     parts.append("")
     parts.append("**MODE 3: DIFF_REPLACE_TARGET** — Completely replace an entire procedure or structure. **CRITICAL: Use this mode ONLY for replacing an entire entity, and you MUST use this mode (NOT DIFF_REPLACE) whenever you need to replace a full entity.**")
     parts.append("Required fields:")
