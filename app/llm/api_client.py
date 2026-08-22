@@ -19,7 +19,9 @@ import json
 import asyncio
 import logging
 import time
-from typing import List, Dict, Any, Optional
+import random
+import hashlib
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -43,13 +45,146 @@ REQUEST_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 REASONING_REQUEST_TIMEOUT = httpx.Timeout(900.0, connect=10.0)
 
 # HOTFIX (D): 8→4 + capped backoff to break the ~52min cascade.
-MAX_RETRIES = 4
+MAX_RETRIES = 2
 RETRY_BASE_DELAY = 2.0  # seconds
 RETRY_MAX_DELAY = 30.0  # Cap exponential backoff (was unbounded: 2^7=128s)
 # HOTFIX (C): Separate cap for timeout retries — retrying a timed-out generative
 # request is wasteful (server may have completed generation = billed).
 TIMEOUT_MAX_RETRIES = 2
 CONCURRENT_REQUESTS = 5
+
+RETRYABLE_5XX_STATUS_CODES = {500, 502, 503, 504, 520, 521, 522, 523, 524, 526}
+
+# ============== SHARED HTTP CLIENT POOL (Task 3) ==============
+# Module-level cache of shared httpx.AsyncClient instances per (base_url, api_key_hash).
+# Each provider gets ONE persistent pool with keep-alive — eliminates per-call TLS
+# handshake storms that triggered Cloudflare 5xx gate-keeping (cf-ray + cf-placement
+# remote-ORD responses with text/plain body, no JSON).
+#
+# Why httpx.AsyncClient and not AsyncOpenAI cache:
+#   - SDK's `http_client=` parameter accepts our shared pool directly (documented
+#     "Custom HTTP Clients" pattern in openai-python).
+#   - SDK wrapper itself is cheap (just config); the expensive resource is the
+#     underlying httpx pool with its TLS sessions + keep-alive.
+#   - One pool per provider = stable TLS sessions across retries + agent pipeline
+#     (Orchestrator → Generator → Validator) instead of fresh handshakes per call.
+_provider_clients: Dict[Tuple[str, str], httpx.AsyncClient] = {}
+
+
+def _client_cache_key(base_url: str, api_key: str) -> Tuple[str, str]:
+    """Build cache key with hashed api_key (no raw secret in logs/dicts).
+
+    Returns (base_url_stripped, api_key_sha256_prefix). Same api_key+base_url
+    always maps to the same key — stable across retries and agent calls.
+    """
+    normalized_url = (base_url or "").rstrip("/")
+    if api_key:
+        # Truncated sha256 — enough entropy for cache key, no PII leakage in logs.
+        api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    else:
+        api_key_hash = "empty"
+    return (normalized_url, api_key_hash)
+
+
+def _get_shared_http_client(base_url: str, api_key: str) -> httpx.AsyncClient:
+    """Return a shared httpx.AsyncClient for the (base_url, api_key) pair.
+
+    Single pool per provider. Reused across:
+      - All retries inside _execute_with_retry (same TLS session)
+      - All agent calls (Orchestrator/Generator/Validator share TLS sessions)
+      - Consecutive requests from same provider in the pipeline
+
+    HTTP/1.1 is preserved (h2 package intentionally not installed — Cloudflare
+    and OpenAI-compatible gateways fully support HTTP/1.1).
+    """
+    key = _client_cache_key(base_url, api_key)
+    client = _provider_clients.get(key)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                # Drop idle conns at 30s — well below Cloudflare's ~60s idle drop
+                # so our pool never hands out a half-closed socket.
+                keepalive_expiry=30.0,
+            ),
+            follow_redirects=True,
+        )
+        _provider_clients[key] = client
+        logger.debug(
+            f"Created shared httpx.AsyncClient pool: "
+            f"base_url={key[0]} api_key_hash={key[1]}"
+        )
+    return client
+
+
+async def close_all_clients() -> None:
+    """Close all cached shared HTTP clients. Safe to call multiple times.
+
+    Intended for shutdown paths (e.g. asyncio shutdown hook in main.py).
+    Not calling this is non-fatal — clients live until process exit, OS
+    reclaims sockets. No agent-side dependency on this being called.
+    """
+    closed = 0
+    for key, client in list(_provider_clients.items()):
+        try:
+            if not client.is_closed:
+                await client.aclose()
+            closed += 1
+        except Exception as e:
+            logger.warning(f"Error closing shared httpx client for {key[0]}: {e}")
+    _provider_clients.clear()
+    if closed:
+        logger.info(f"Closed {closed} shared HTTP client pool(s) on shutdown")
+
+
+def _extract_5xx_diagnostics(error: "openai_sdk.APIStatusError") -> Dict[str, Any]:
+    """Extract Cloudflare/server diagnostic fields from APIStatusError response.
+
+    Pulls: status_code, cf-ray, cf-placement, server, retry-after (parsed to
+    float seconds when numeric), and first 200 bytes of response body.
+
+    All extraction is defensive — missing/None fields are silently skipped.
+    Body bytes are decoded as utf-8 with errors='replace' to never raise on
+    binary/garbage payloads.
+    """
+    diag: Dict[str, Any] = {"status_code": getattr(error, "status_code", None)}
+    try:
+        response = getattr(error, "response", None)
+        if response is None:
+            return diag
+
+        # httpx.Headers is case-insensitive — both "cf-ray" and "CF-RAY" resolve.
+        headers = getattr(response, "headers", None) or {}
+        diag["cf-ray"] = headers.get("cf-ray")
+        diag["cf-placement"] = headers.get("cf-placement")
+        diag["server"] = headers.get("server")
+
+        retry_after_raw = headers.get("retry-after")
+        diag["retry-after"] = retry_after_raw
+        if retry_after_raw:
+            try:
+                # Numeric seconds (most common form). HTTP-date format is not
+                # supported here — caller falls back to exponential backoff.
+                diag["retry-after-seconds"] = float(retry_after_raw)
+            except (ValueError, TypeError):
+                diag["retry-after-seconds"] = None
+
+        # First 200 bytes of body for incident triage. Cloudflare's 75-byte
+        # text/plain error bodies (no JSON) land here for accurate diagnosis.
+        try:
+            body_bytes = response.content if hasattr(response, "content") else b""
+            if body_bytes:
+                diag["body_preview"] = body_bytes[:200].decode("utf-8", errors="replace")
+            else:
+                diag["body_preview"] = ""
+        except Exception:
+            diag["body_preview"] = "<unreadable>"
+    except Exception as ex:
+        logger.debug(f"Failed to extract 5xx diagnostics: {ex}")
+    return diag
+
 
 
 # Providers that accept `reasoning_effort` as a direct kwarg at the provider level
@@ -191,7 +326,7 @@ class LLMRequest:
     model: str
     # FIX: temperature сделан Optional, чтобы поддерживать None для thinking-моделей
     temperature: Optional[float] = 0.0
-    max_tokens: int = 4000
+    max_tokens: Optional[int] = 4000,
     top_p: float = 0.9
     tools: Optional[List[Dict]] = None
     tool_choice: Optional[str] = None
@@ -357,7 +492,7 @@ class LLMClient:
             model: str,
             messages: List[Dict[str, Any]],
             temperature: Optional[float] = 0.0,
-            max_tokens: int = 4000,
+            max_tokens: Optional[int] = 4000,
             top_p: float = 0.9,
             tools: Optional[List[Dict]] = None,
             tool_choice: Optional[str] = None,
@@ -444,7 +579,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: List[Dict],
         temperature: float = 0.0,
-        max_tokens: int = 4000,
+        max_tokens: Optional[int] = 4000,
         tool_choice: str = "auto",
         preferred_provider: Optional[str] = None,
         is_intermediate: bool = False,
@@ -477,8 +612,15 @@ class LLMClient:
         """Execute request with retry logic and comprehensive error handling"""
         async with self._semaphore:
             last_error = None
+            # Task 3: track whether the last error was a 5xx server overload.
+            # If so, raise ServerOverloadError instead of generic LLMAPIError
+            # after retries exhausted — agents catch it explicitly and continue
+            # with the same messages list (no mutation, no compression).
+            last_error_was_5xx = False
             rate_limit_retries = 0
             timeout_retries = 0  # HOTFIX (C): separate counter for timeout retries
+
+
 
             for attempt in range(MAX_RETRIES):
                 try:
@@ -572,16 +714,41 @@ class LLMClient:
                         )
 
                 except RetryableError as e:
-                    # Server errors (500, 502, 503) - retry with backoff
-                    # HOTFIX (D): Cap delay at RETRY_MAX_DELAY (was unbounded)
-                    delay = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
-                    # HOTFIX (F): warning → error for visibility in ai_errors_*.log
+                    # Task 3: Honour server's Retry-After if provided (Cloudflare
+                    # and origin sometimes return this header). Otherwise use
+                    # exponential backoff with jitter (0.5x..1.0x multiplier)
+                    # to avoid thundering herd of concurrent retries from the
+                    # agent pipeline (Orchestrator + Generator + Validator).
+                    status_code = getattr(e, "status_code", None)
+                    retry_after = getattr(e, "retry_after", None)
+
+                    if status_code in RETRYABLE_5XX_STATUS_CODES:
+                        last_error_was_5xx = True
+                    else:
+                        # Network errors have status_code=None — keep generic path.
+                        last_error_was_5xx = False
+
+                    if retry_after is not None and retry_after > 0:
+                        # Server explicitly told us to wait — honour it, but cap
+                        # to RETRY_MAX_DELAY so a malicious/huge Retry-After can't
+                        # stall the pipeline indefinitely.
+                        delay = min(float(retry_after), RETRY_MAX_DELAY)
+                    else:
+                        # HOTFIX (D): exponential backoff capped at RETRY_MAX_DELAY.
+                        base = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+                        # Jitter: 0.5x..1.0x — randomizes retry timing across
+                        # concurrent agents so they don't all retry at once.
+                        delay = base * (0.5 + random.random() * 0.5)
+
+                    # HOTFIX (F): error-level log for visibility in ai_errors_*.log
                     logger.error(
-                        f"Retryable error (attempt {attempt + 1}/{MAX_RETRIES}): {e}, "
-                        f"waiting {delay}s"
+                        f"Retryable error (attempt {attempt + 1}/{MAX_RETRIES}): "
+                        f"status={status_code} delay={delay:.1f}s "
+                        f"retry_after_hint={retry_after} error={e}"
                     )
                     await asyncio.sleep(delay)
                     last_error = e
+
 
                 except ContextOverflowError as e:
                     # НЕ retry - пробрасываем наверх для обработки через compression
@@ -598,11 +765,20 @@ class LLMClient:
                     logger.error(f"LLM API error (non-retryable): {e}")
                     raise
 
-            # All retries exhausted
+            # All retries exhausted.
+            # Task 3: distinguish 5xx server overload path from generic exhaustion
+            # so agents can catch ServerOverloadError explicitly and continue
+            # with the same messages (no mutation, no compression).
+            if last_error_was_5xx:
+                status_code = getattr(last_error, "status_code", None)
+                raise ServerOverloadError(
+                    f"Server overload after {MAX_RETRIES} retries "
+                    f"(last status={status_code}). Last error: {last_error}",
+                    status_code=status_code,
+                )
             raise LLMAPIError(
                 f"All {MAX_RETRIES} retries exhausted. Last error: {last_error}"
             )
-
 
     async def _make_request(
                 self,
@@ -624,27 +800,56 @@ class LLMClient:
                     base_url = endpoint.rsplit("/chat/completions", 1)[0] if "/chat/completions" in endpoint else endpoint
                     base_url = base_url.rsplit("/v1/chat/completions", 1)[0] if "/v1/chat/completions" in base_url else base_url
 
-                # Create OpenAI SDK client
-                # HOTFIX (B): max_retries=0 disables SDK's hidden retry loop
-                # (SDK default max_retries=2 was silently retrying timeouts,
-                #  compounding with our outer loop → 3×120s per external attempt)
+                # Create OpenAI SDK client using SHARED httpx.AsyncClient pool.
+                # Task 3: one pool per (base_url, api_key) — TLS sessions reused
+                # across retries and across agent pipeline, eliminating the
+                # per-call handshake burst that triggered Cloudflare 5xx gating.
+                # HOTFIX (B) preserved: max_retries=0 disables SDK's hidden retry
+                # loop (SDK default max_retries=2 was silently retrying timeouts,
+                # compounding with our outer loop → 3×120s per external attempt).
+                shared_http = _get_shared_http_client(base_url, api_key)
                 client = AsyncOpenAI(
                     api_key=api_key,
                     base_url=base_url,
+                    http_client=shared_http,
                     timeout=REQUEST_TIMEOUT,
                     max_retries=0,
                 )
 
+
                 # Build kwargs for chat.completions.create()
+                # Build kwargs for chat.completions.create()
+                # max_tokens НЕ включается сюда — добавляется условно ниже,
+                # чтобы None/<=0 действительно означало «параметр не отправлять».
                 kwargs: Dict[str, Any] = {
                     "model": api_model,
                     "messages": request.messages,
-                    "max_tokens": request.max_tokens,
                     "top_p": request.top_p,
                 }
 
                 if request.temperature is not None:
                     kwargs["temperature"] = request.temperature
+
+                # === max_tokens: значение пользователя приоритетно ===
+                # Семантика:
+                #   - None или <=0  → параметр НЕ отправляется (модель решает сама);
+                #   - положительное → отправляется, но если в MODEL_OUTPUT_LIMITS
+                #                     записано меньшее значение — снижается до него.
+                if request.max_tokens is not None and request.max_tokens > 0:
+                    effective_max_tokens = request.max_tokens
+                    try:
+                        from config.provider_models import get_model_output_limit
+                        limit = get_model_output_limit(request.model)
+                        if limit and effective_max_tokens > limit:
+                            logger.info(
+                                f"max_tokens for {request.model}: role requested "
+                                f"{effective_max_tokens}, applying user setting "
+                                f"from MODEL_OUTPUT_LIMITS: {limit}"
+                            )
+                            effective_max_tokens = limit
+                    except Exception as e:
+                        logger.debug(f"MODEL_OUTPUT_LIMITS lookup failed (non-fatal): {e}")
+                    kwargs["max_tokens"] = effective_max_tokens
 
                 # === Handle extra_params (thinking, reasoning_effort) ===
                 # Convert reasoning to extra_params if needed
@@ -822,8 +1027,38 @@ class LLMClient:
                     raise RetryableError(str(e))
 
                 except openai_sdk.APIStatusError as e:
-                    if e.status_code in (500, 502, 503):
-                        raise RetryableError(str(e))
+                    status_code = e.status_code
+
+                    # Task 3: status-code classification FIRST (before text
+                    # heuristics) — Cloudflare 520-526 and 504 were previously
+                    # misclassified as fatal because their text bodies
+                    # ("Origin Error", "Web server is down") didn't match
+                    # RETRYABLE_ERROR_PATTERNS.
+                    if status_code == 429:
+                        raise RateLimitError(str(e))
+
+                    if status_code in RETRYABLE_5XX_STATUS_CODES:
+                        diag = _extract_5xx_diagnostics(e)
+                        # Diagnostic logging for incident triage: cf-ray identifies
+                        # the exact CF edge node, cf-placement shows the PoP,
+                        # retry-after hints the backoff, body_preview shows the
+                        # actual upstream error (often text/plain, no JSON).
+                        logger.error(
+                            f"5xx retryable from provider: "
+                            f"status={status_code} "
+                            f"cf-ray={diag.get('cf-ray')} "
+                            f"cf-placement={diag.get('cf-placement')} "
+                            f"server={diag.get('server')} "
+                            f"retry-after={diag.get('retry-after')} "
+                            f"body_preview={diag.get('body_preview', '')!r}"
+                        )
+                        raise RetryableError(
+                            str(e),
+                            status_code=status_code,
+                            retry_after=diag.get("retry-after-seconds"),
+                        )
+
+                    # Non-5xx: fall back to text-based classification (unchanged)
                     error_text = str(e)
                     error_type = classify_error(error_text)
                     if error_type == "rate_limit":
@@ -837,7 +1072,6 @@ class LLMClient:
                     else:
                         raise LLMAPIError(error_text, error_type="fatal")
                 return response.model_dump()
-
 
     def _parse_response(
         self,
@@ -1025,7 +1259,7 @@ async def call_llm(
     model: str,
     messages: List[Dict[str, str]],
     temperature: float = 0.0,
-    max_tokens: int = 4000,
+    max_tokens: Optional[int] = 4000,
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
     **kwargs
@@ -1060,7 +1294,7 @@ async def call_llm_full(
     model: str,
     messages: List[Dict[str, str]],
     temperature: float = 0.0,
-    max_tokens: int = 4000,
+    max_tokens: Optional[int] = 4000,
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
     **kwargs
@@ -1102,7 +1336,7 @@ async def call_llm_with_tools(
     messages: List[Dict[str, str]],
     tools: List[Dict],
     temperature: float = 0.0,
-    max_tokens: int = 4000,
+    max_tokens: Optional[int] = 4000,
     tool_choice: str = "auto",
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
@@ -1247,9 +1481,42 @@ class RateLimitError(LLMAPIError):
 
 
 class RetryableError(LLMAPIError):
-    """Errors that can be retried (5xx, network issues)"""
-    def __init__(self, message: str):
+    """Errors that can be retried (5xx, network issues).
+
+    Carries optional status_code and retry_after hint so _execute_with_retry
+    can honour server's Retry-After header (Cloudflare/Origin) with jitter.
+    Both default to None for backward compatibility with existing callers
+    that raise RetryableError(str(e)) without these fields (network errors
+    have no status code).
+    """
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        retry_after: Optional[float] = None,
+    ):
         super().__init__(message, error_type="retryable")
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+class ServerOverloadError(LLMAPIError):
+    """5xx errors (incl. Cloudflare 520-526) after retries exhausted.
+
+    Subclass of LLMAPIError → existing `except Exception` handlers in agents
+    keep working unchanged. User-facing agents (orchestrator/code_generator/
+    tester/validator) catch this explicitly to continue with the SAME messages
+    list (no mutation, no compression — the compression contract stays intact:
+    only context_overflow triggers compression).
+
+    Raised ONLY from the 5xx retry-exhaustion path in _execute_with_retry;
+    timeout/rate_limit paths keep their own error types (LLMAPIError with
+    error_type="timeout"/"rate_limit").
+    """
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message, error_type="server_overload")
+        self.status_code = status_code
+
 
 class LLMTimeoutError(LLMAPIError):
     """API timeout — model was still generating on server side.

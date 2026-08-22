@@ -155,15 +155,20 @@ console_handler.setLevel(logging.WARNING)
 console_handler.setFormatter(log_formatter)
 
 # Корневой логгер
+# ai_error_handler добавлен сюда — теперь ЛЮБОЙ logger.error() из любого модуля
+# (api_client.py, orchestrator.py, code_generator.py, pre_filter.py, tester.py)
+# автоматически попадает и в agent_YYYYMMDD.log, и в ai_errors_YYYYMMDD.log.
 logging.basicConfig(
     level=logging.DEBUG,
-    handlers=[file_handler, console_handler]
+    handlers=[file_handler, console_handler, ai_error_handler]
 )
 
 # Специальный логгер для AI ошибок
 ai_logger = logging.getLogger('ai_errors')
 ai_logger.addHandler(ai_error_handler)
 ai_logger.setLevel(logging.ERROR)
+ai_logger.propagate = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -2306,6 +2311,7 @@ async def handle_validator_rejection(
     orchestrator_decision: Optional[Any],  # OrchestratorFeedbackDecision
     pipeline: 'AgentPipeline',
     history: List[Dict[str, str]],
+    on_user_decision: Optional[Callable] = None,
 ) -> Optional[str]:
     """
     Обрабатывает отклонение кода AI Validator.
@@ -2404,6 +2410,7 @@ async def handle_validator_rejection(
                 result = await pipeline.handle_user_feedback(
                     action="accept",
                     history=history,
+                    on_user_decision=on_user_decision,
                 )
                 if result and result.success:
                     return "continue"
@@ -2460,6 +2467,7 @@ async def handle_validator_rejection(
         result = await pipeline.handle_user_feedback(
             action="accept",
             history=history,
+            on_user_decision=on_user_decision,
         )
         if result and result.success:
             return "continue"
@@ -2475,6 +2483,7 @@ async def handle_validator_rejection(
         result = await pipeline.handle_user_feedback(
             action="override",
             history=history,
+            on_user_decision=on_user_decision,
         )
         if result and result.success:
             return "apply"
@@ -2493,7 +2502,7 @@ async def handle_validator_rejection(
     return None
 
 
-async def _get_user_custom_critique(pipeline: 'AgentPipeline', history: List[Dict[str, str]]) -> Optional[str]:
+async def _get_user_custom_critique(pipeline: 'AgentPipeline', history: List[Dict[str, str]], on_user_decision: Optional[Callable] = None,) -> Optional[str]:
     """
     Get custom critique from user and run FULL validation cycle.
     
@@ -2519,6 +2528,7 @@ async def _get_user_custom_critique(pipeline: 'AgentPipeline', history: List[Dic
     result = await pipeline.run_feedback_cycle(
         user_feedback=user_critique,
         history=history,
+        on_user_decision=on_user_decision,
     )
     
     if result and result.success and result.pending_changes:
@@ -6124,7 +6134,8 @@ async def handle_agent_mode(query: str):
                     
                     new_result = await state.pipeline.run_feedback_cycle(
                         user_feedback=user_feedback,
-                        history=history
+                        history=history,
+                        on_user_decision=on_user_decision_callback,
                     )
                     
                     if new_result and new_result.success:
@@ -6272,6 +6283,7 @@ async def handle_agent_mode(query: str):
                                     user_feedback=user_feedback,
                                     history=history,
                                     tester_report=report.original_report if attach_report else None,
+                                    on_user_decision=on_user_decision_callback, 
                                 )
                                 if new_result and new_result.success:
                                     result = new_result

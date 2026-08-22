@@ -21,10 +21,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Callable, Set  # ← добавить Set
-
+from typing import List, Dict, Any, Optional, Callable, Set
+import asyncio
 from config.settings import cfg
-from app.llm.api_client import call_llm_with_tools, call_llm
+from app.llm.api_client import call_llm_with_tools, call_llm, ServerOverloadError
 
 # Prompts (centralized)
 from app.llm.prompt_templates import (
@@ -419,6 +419,10 @@ async def orchestrate(
             )
             messages[0]["content"] = updated_prompts["system"]
             
+        except ServerOverloadError as e:
+            logger.warning(f"Orchestrator: Server overload (5xx). Retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
+            continue
         except Exception as e:
             logger.error(f"Orchestrator LLM error: {e}")
             return OrchestratorResult(
@@ -427,7 +431,7 @@ async def orchestrate(
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )
+            )    
     
     # =========================================================================
     # NEW: FORCED FINALIZATION - If no instruction section found after all iterations
@@ -747,7 +751,7 @@ async def orchestrate_new_project(
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
-                    max_tokens=20000,
+                    max_tokens=55000,
                     tool_choice="auto",
                     preferred_provider=preferred_provider,
                 )
@@ -757,7 +761,7 @@ async def orchestrate_new_project(
                     model=orchestrator_model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=20000,
+                    max_tokens=55000,
                     preferred_provider=preferred_provider,
                 )
                 response = {"content": response_content, "tool_calls": []}
@@ -818,6 +822,10 @@ async def orchestrate_new_project(
                     "content": tr["content"],
                 })
                 
+        except ServerOverloadError as e:
+            logger.warning(f"Orchestrator (new project): Server overload (5xx). Retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
+            continue
         except Exception as e:
             logger.error(f"Orchestrator error (new project): {e}")
             return OrchestratorResult(
@@ -826,7 +834,8 @@ async def orchestrate_new_project(
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )
+            )    
+    
     
     # =========================================================================
     # NEW: FORCED FINALIZATION - If no instruction section found after all iterations
@@ -854,7 +863,7 @@ async def orchestrate_new_project(
                 model=orchestrator_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=20000,
+                max_tokens=55000,
                 preferred_provider=preferred_provider,
             )
             content = final_content
@@ -1569,6 +1578,10 @@ class GeneralChatOrchestrator:
                 )
                 messages[0]["content"] = prompts["system"]
                 
+            except ServerOverloadError as e:
+                logger.warning(f"General Chat: Server overload (5xx). Retrying in 5s... ({e})")
+                await asyncio.sleep(5.0)
+                continue
             except Exception as e:
                 logger.error(f"General Chat LLM error: {e}")
                 return GeneralChatResult(
@@ -1576,7 +1589,8 @@ class GeneralChatOrchestrator:
                     raw_response=str(e),
                     tool_calls=all_tool_calls,
                     tool_usage=tool_usage,
-                )
+                )        
+        
         
         # Возвращаем финальный результат
         return GeneralChatResult(
@@ -1774,7 +1788,7 @@ async def orchestrate_agent(
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
-                    max_tokens=20000,
+                    max_tokens=55000,
                     tool_choice="auto",
                     preferred_provider=preferred_provider,
                 )
@@ -1791,7 +1805,7 @@ async def orchestrate_agent(
                         messages=messages,
                         tools=available_tools,
                         temperature=0,
-                        max_tokens=20000,
+                        max_tokens=55000,
                         tool_choice="auto",
                         preferred_provider=preferred_provider,
                     )
@@ -1947,6 +1961,10 @@ async def orchestrate_agent(
                 )
             messages[0]["content"] = updated_prompts["system"]
             
+        except ServerOverloadError as e:
+            logger.warning(f"Agent Mode: Server overload (5xx). Retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
+            continue
         except Exception as e:
             logger.error(f"Agent Mode error: {e}")
             return OrchestratorResult(
@@ -1955,8 +1973,8 @@ async def orchestrate_agent(
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )
-    
+            )    
+
     else:
         # while loop completed without break (hit iteration limit)
         logger.warning(f"Agent Mode: reached max iterations ({AGENT_MAX_ITERATIONS})")
@@ -1987,7 +2005,7 @@ async def orchestrate_agent(
                 model=orchestrator_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=20000,
+                max_tokens=55000,
                 preferred_provider=preferred_provider,
             )
             content = final_content
@@ -1999,7 +2017,7 @@ async def orchestrate_agent(
                     model=orchestrator_model,
                     messages=messages,
                     temperature=0,
-                    max_tokens=20000,
+                    max_tokens=55000,
                     preferred_provider=preferred_provider,
                 )
                 content = final_content

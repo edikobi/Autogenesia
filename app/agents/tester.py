@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable
 from pathlib import Path
 
-from app.llm.api_client import call_llm_with_tools
+from app.llm.api_client import call_llm_with_tools, ServerOverloadError
 from app.tools.tool_executor import parse_tool_call
 from app.tools.tester_tool_executor import TesterToolExecutor
 from app.tools.tester_tool_definitions import TESTER_TOOLS
@@ -266,6 +266,10 @@ class TesterAgent:
                     tool_choice="auto",
                     preferred_provider=self._model_provider,
                 )
+            except ServerOverloadError as e:
+                logger.warning(f"TesterAgent: Server overload (5xx) on iteration {iteration}. Retrying in 5s... ({e})")
+                await asyncio.sleep(5.0)
+                continue
             except Exception as e:
                 logger.error(f"TesterAgent LLM call error on iteration {iteration}: {e}", exc_info=True)
                 break
@@ -358,6 +362,11 @@ class TesterAgent:
                 tool_choice="auto",
                 preferred_provider=self._model_provider,
             )
+        except ServerOverloadError as e:
+            logger.warning(f"ask_followup: Server overload (5xx). Retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
+            self._messages.pop()
+            return {"response": f"Server overload: {e}", "is_new_report": False, "new_report": None}
         except Exception as e:
             logger.error(f"ask_followup LLM call error: {e}", exc_info=True)
             self._messages.pop()
@@ -416,6 +425,10 @@ class TesterAgent:
                 )
                 content = response.get("content", "") or ""
                 tool_calls = response.get("tool_calls") or []
+            except ServerOverloadError as e:
+                logger.warning(f"ask_followup tool loop: Server overload (5xx). Retrying in 5s... ({e})")
+                await asyncio.sleep(5.0)
+                continue
             except Exception as e:
                 logger.error(f"ask_followup LLM call error in tool loop: {e}", exc_info=True)
                 break

@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
 from config.settings import cfg
-from app.llm.api_client import call_llm, get_model_for_role
+from app.llm.api_client import call_llm, get_model_for_role, ServerOverloadError
 from app.llm.prompt_templates import format_code_generator_prompt
 
-# После существующих импортов добавить:
+
 import asyncio
 
 # Константы для retry (после других констант)
@@ -563,7 +563,7 @@ async def generate_code(
     target_file: Optional[str] = None,
     model: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 34000,
+    max_tokens: Optional[int] = None,
     preferred_provider: Optional[str] = None,
 ) -> CodeGeneratorResult:
     """
@@ -671,13 +671,20 @@ async def generate_code(
                 model_used=model,
             )
             
+        except ServerOverloadError as e:
+            logger.warning(f"Code Generator (ASK): Server overload (5xx). Retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
+            if attempt < VALIDATION_RETRIES:
+                continue
+            return CodeGeneratorResult(success=False, error=f"Server overload: {e}", model_used=model)
         except Exception as e:
             logger.error(f"Code Generator (ASK) error: {e}")
             return CodeGeneratorResult(
                 success=False,
                 error=str(e),
                 model_used=model,
-            )
+            )   
+   
     
     return CodeGeneratorResult(success=False, error="Unexpected error", model_used=model)
 
@@ -691,7 +698,7 @@ async def generate_code_agent_mode(
     file_contents: Dict[str, str],
     model: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 38500,
+    max_tokens: Optional[int] = 110000,
     preferred_provider: Optional[str] = None,
 ) -> tuple[List[ParsedCodeBlock], str]:
     """
@@ -809,12 +816,24 @@ async def generate_code_agent_mode(
             # Success - return results
             return blocks, response
             
+        except ServerOverloadError as e:
+            last_error = e
+            attempts_left = CODE_GENERATOR_MAX_RETRIES - attempt - 1
+            if attempts_left > 0:
+                delay = CODE_GENERATOR_RETRY_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"Code Generator (Agent Mode) server overload (attempt {attempt + 1}/{CODE_GENERATOR_MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay:.0f}s... ({attempts_left} attempts left)"
+                )
+                await asyncio.sleep(delay)
+                continue
+            else:
+                logger.error(f"Code Generator server overload: all {CODE_GENERATOR_MAX_RETRIES} retries exhausted.")
         except Exception as e:
             last_error = e
             
             # Check if it's a network error (retryable)
-            if _is_network_error(e):
-                attempts_left = CODE_GENERATOR_MAX_RETRIES - attempt - 1
+            if _is_network_error(e):                
                 
                 if attempts_left > 0:
                     # Calculate delay with exponential backoff
@@ -1552,8 +1571,20 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         insert_before_target = _extract_field(block_content, "INSERT_BEFORE_TARGET")
         replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
         
+        # ⭐ НОВОЕ: Извлекаем опциональный номер строки (1-indexed)
+        replace_pattern_line_str = _extract_field(block_content, "REPLACE_PATTERN_LINE")
+        replace_pattern_line = None
+        if replace_pattern_line_str:
+            try:
+                # Очищаем от возможных кавычек или пробелов и конвертируем в int
+                replace_pattern_line = int(replace_pattern_line_str.strip().strip('`"\''))
+            except ValueError:
+                logger.warning(f"Invalid REPLACE_PATTERN_LINE value: '{replace_pattern_line_str}' in CODE_BLOCK for {file_path}")
+                replace_pattern_line = None
+        
         # Извлекаем код из code fence
-        code, language = _extract_code_from_block(block_content)
+        code, language = _extract_code_from_block(block_content)        
+        
         
         # Валидация обязательных полей
         if not file_path:
@@ -1581,6 +1612,7 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             insert_after_target=insert_after_target,
             insert_before_target=insert_before_target,
             replace_pattern=replace_pattern,
+            replace_pattern_line=replace_pattern_line,
             language=language,
         ))
         
@@ -1598,7 +1630,45 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
     - FIELD: value
     - FIELD:value
     - **FIELD:** value (markdown bold)
+    
+    Для REPLACE_PATTERN дополнительно поддерживает многострочные значения:
+    захват продолжается до следующего поля или начала code fence.
     """
+    # === REPLACE_PATTERN: многострочный захват ===
+    if field_name.upper() == "REPLACE_PATTERN":
+        # Поля, которые могут следовать после REPLACE_PATTERN в CODE_BLOCK
+        _KNOWN_FIELDS = (
+            'FILE', 'MODE', 'TARGET_CLASS', 'TARGET_METHOD', 'TARGET_FUNCTION',
+            'TARGET_ATTRIBUTE', 'INSERT_AFTER', 'INSERT_BEFORE',
+            'INSERT_AFTER_TARGET', 'INSERT_BEFORE_TARGET',
+            'REPLACE_PATTERN_LINE',
+        )
+        _fields_alt = '|'.join(re.escape(f) for f in _KNOWN_FIELDS)
+        # Захватываем всё после "REPLACE_PATTERN:" до:
+        # - строки, начинающейся с известного поля и ":"
+        # - строки, начинающейся с ``` (code fence)
+        # - маркера ### END_CODE_BLOCK
+        # - конца блока
+        _ml_pattern = (
+            rf'^REPLACE_PATTERN:\s*'
+            rf'(.*?)'
+            rf'(?=\n(?:{_fields_alt})\s*:|\n```|\n###\s*END_CODE_BLOCK|\Z)'
+        )
+        _ml_match = re.search(
+            _ml_pattern, content, re.MULTILINE | re.IGNORECASE | re.DOTALL
+        )
+        if _ml_match:
+            _ml_value = _ml_match.group(1).strip()
+            _ml_value = _ml_value.strip('`')
+            # Декодируем литеральный \n (совместимость с однострочным форматом)
+            if '\\n' in _ml_value:
+                _ml_value = _ml_value.replace('\\n', '\n')
+            if _ml_value:
+                return _ml_value
+        # Если многострочный захват не дал результата,
+        # переходим к однострочным паттернам ниже (fallback)
+    
+    # === Общий случай: однострочный захват ===
     patterns = [
         rf'^{field_name}:\s*(.+?)$',
         rf'^\*\*{field_name}:\*\*\s*(.+?)$',
@@ -1614,11 +1684,10 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
             # Декодируем литеральный \n для многострочных паттернов
             if field_name.upper() == "REPLACE_PATTERN" and '\\n' in value:
                 value = value.replace('\\n', '\n')
-                
+            
             return value
     
     return None
-
 
 def _extract_code_from_block(content: str) -> Tuple[Optional[str], str]:
     """

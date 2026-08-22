@@ -133,6 +133,8 @@ class OrchestratorFeedbackDecision:
     reasoning: str
     new_instruction: Optional[str] = None  # Only if ACCEPT
     new_analysis: Optional[str] = None
+    
+    
 
 class PipelineStatus(Enum):
     """Current pipeline status"""
@@ -2482,6 +2484,7 @@ class AgentPipeline:
             user_feedback: str,
             history: List[Dict[str, str]],
             tester_report: Optional[str] = None,
+            on_user_decision: Optional[OnUserDecisionCallback] = None,
         ) -> PipelineResult:
         """
         Run a feedback cycle based on user critique.
@@ -3095,10 +3098,53 @@ Please analyze this feedback and provide a revised instruction.""",
                     # Continue to next iteration
                     continue
                 
-                # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
-                elif orchestrator_decision.decision == "OVERRIDE":
-                    logger.info("Orchestrator wants to override AI Validator")
+            # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
+            elif orchestrator_decision.decision == "OVERRIDE":
+                logger.info("Orchestrator wants to override AI Validator")
+                # ══════════════════════════════════════════════════════════
+                # FIX: Добавлен callback к пользователю (как в process_request)
+                # ══════════════════════════════════════════════════════════
+                if self._on_user_decision:
+                    user_choice = await self._on_user_decision(
+                        "orchestrator_override",
+                        {
+                            "ai_result": ai_result.to_dict(),
+                            "orchestrator_reasoning": orchestrator_decision.reasoning,
+                            "code_blocks": [
+                                {"file": b.file_path, "mode": b.mode}
+                                for b in code_blocks
+                            ],
+                        }
+                    )
+                    logger.info(f"User decision on override (feedback_cycle): {user_choice}")
+
+                    if user_choice == "cancel":
+                        await self.discard_pending_changes()
+                        result.status = PipelineStatus.CANCELLED
+                        result.errors.append("User cancelled request after orchestrator override")
+                        result.duration_ms = (time.time() - start_time) * 1000
+                        return result
+
+                    elif user_choice == "force_fix":
+                        # Пользователь считает критику обоснованной — заставляем исправить
+                        feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
+                        working_history.append({
+                            "role": "user",
+                            "content": f"[USER OVERRIDE - MUST FIX]\n{feedback_msg}",
+                        })
+                        continue  # ← Возврат к Оркестратору
+
+                    elif user_choice == "proceed":
+                        logger.info("User trusts Orchestrator override, proceeding to tests")
+                        self.feedback_loop.validator_overrides_count += 1
+
+                    else:
+                        logger.warning(f"Unknown user choice: {user_choice}, proceeding to tests")
+                        self.feedback_loop.validator_overrides_count += 1
+                else:
+                    logger.info("No user decision callback in feedback_cycle, auto-proceeding")
                     self.feedback_loop.validator_overrides_count += 1
+                # ══════════════════════════════════════════════════════════            
             
             # ==============================================================
             # STEP 6: TESTS + RUNTIME
@@ -4420,6 +4466,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             "insert_after": getattr(block, 'insert_after', None),
             "insert_before": getattr(block, 'insert_before', None),
             "replace_pattern": getattr(block, 'replace_pattern', None),
+            "replace_pattern_line": getattr(block, 'replace_pattern_line', None),  # ⭐ НОВОЕ
             "ai_fixed_code": ai_fixed_code,
             "ai_attempts": ai_attempts or [],
             "validation_errors": validation_errors or [],
@@ -5361,6 +5408,8 @@ Remember: You can override the validator if you believe the critique is incorrec
     🔴 MANDATORY RESPONSE FORMAT — FOLLOW EXACTLY
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+    Output clean plain text. Do not use JSON, code blocks, or any wrappers. Strictly preserve the requested headers.    
+    
     Your response MUST begin with this exact line:
 
     **My decision:** ACCEPT
@@ -5855,6 +5904,16 @@ Remember: You can override the validator if you believe the critique is incorrec
         
         logger.info(f"Parsing orchestrator decision, response length: {len(response)}")
         
+        #  явное логирование пустого ответа 
+        if not response or not response.strip():
+            logger.error(
+                "⚠️ Orchestrator returned EMPTY response to validator critique. "
+                "Likely cause: Orchestrator made tool calls (read_file, search_code) "
+                "but did not produce a final text answer. "
+                "Defaulting to OVERRIDE — user will NOT see this unless callback is present."
+            )
+        
+        
         # === Parse decision (English + Russian) ===
         decision_patterns = [
             (r'\*\*My decision:\*\*\s*(ACCEPT|OVERRIDE)', 'My decision'),
@@ -5865,6 +5924,10 @@ Remember: You can override the validator if you believe the critique is incorrec
             (r'My decision:\s*(ACCEPT|OVERRIDE)', 'My decision (no bold)'),
             (r'Мое решение:\s*(ACCEPT|OVERRIDE)', 'Мое решение (no bold)'),
             (r'Моё решение:\s*(ACCEPT|OVERRIDE)', 'Моё решение (no bold)'),
+            (r'(?:My\s+decision|Decision)\s*(?:is|:)\s*\*{0,2}(ACCEPT|OVERRIDE)\*{0,2}', 'Decision is'),
+            (r'(?:Мо[её]\s+решение|Решение)\s*[:\-—]\s*\*{0,2}(ACCEPT|OVERRIDE)\*{0,2}', 'Русское решение'),
+            (r'\b(ACCEPT|OVERRIDE)\b\s+(?:the\s+)?(?:validator|feedback|critique)', 'ACCEPT/OVERRIDE verb'),
+            (r'(?:принимаю|согласен)\s+(?:критику|с\s+валидатором).*?\b(ACCEPT)\b', 'Принимаю критику'),
         ]
         
         decision_found = False
@@ -5988,6 +6051,7 @@ Remember: You can override the validator if you believe the critique is incorrec
         action: str,
         user_message: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
+        on_user_decision: Optional[OnUserDecisionCallback] = None,
     ) -> Optional[PipelineResult]:
         """
         Handle user feedback on AI Validator rejection.
@@ -6070,6 +6134,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             return await self.run_feedback_cycle(
                 user_feedback=user_feedback_text,
                 history=history or [],
+                on_user_decision=on_user_decision,
             )
         elif action == "replace" and user_message:
             # User provides custom critique — delegate to run_feedback_cycle
@@ -6079,6 +6144,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             return await self.run_feedback_cycle(
                 user_feedback=user_message,
                 history=history or [],
+                on_user_decision=on_user_decision,
             )
         
         return None

@@ -25,7 +25,7 @@ from config.settings import cfg
 from app.llm.api_client import call_llm
 from app.llm.prompt_templates import format_ai_validator_prompt
 from app.utils.token_counter import TokenCounter
-from app.llm.api_client import call_llm_full, LLMAPIError
+from app.llm.api_client import call_llm_full, LLMAPIError, ServerOverloadError
 
 if TYPE_CHECKING:
     from app.agents.feedback_handler import ValidatorFeedback
@@ -313,7 +313,11 @@ class AIValidator:
             error_str = str(e).lower()
             should_fallback = any(pattern in error_str for pattern in self.FALLBACK_ERROR_PATTERNS)
             
-            if not should_fallback:
+            # Task 2: Server overload (5xx) should always trigger fallback to the next model
+            if isinstance(e, ServerOverloadError):
+                should_fallback = True
+                
+            if not should_fallback:                
                 # Ошибка без fallback — возвращаем ошибку сразу
                 duration_ms = (time.time() - start_time) * 1000
                 logger.error(f"AIValidator: Primary model error (no fallback): {e}")

@@ -557,6 +557,7 @@ class StagingErrorFeedback:
     insert_after: Optional[str] = None
     insert_before: Optional[str] = None
     replace_pattern: Optional[str] = None
+    replace_pattern_line: Optional[int] = None
     full_code: Optional[str] = None  # The code that failed to stage
     ai_fixed_code: Optional[str] = None  # AI-proposed fix that also failed
     validation_errors: List[Any] = field(default_factory=list)  # Structural validation error details
@@ -582,8 +583,13 @@ class StagingErrorFeedback:
             parts.append(f"Target Function: {self.target_function}")
         if self.insert_pattern:
             parts.append(f"Insert Pattern: {self.insert_pattern}")
+        if self.replace_pattern:
+            parts.append(f"Replace Pattern: {self.replace_pattern}")
+        if self.replace_pattern_line:
+            parts.append(f"Replace Pattern Line Hint: {self.replace_pattern_line}")
         
-        parts.append("")
+        parts.append("")        
+        
         
         # === CRITICAL: Show the SPECIFIC error message ===
         parts.append("🔴 SPECIFIC ERROR MESSAGE:")
@@ -1238,6 +1244,7 @@ class FeedbackHandler:
         insert_after: Optional[str] = None,
         insert_before: Optional[str] = None,
         replace_pattern: Optional[str] = None,
+        replace_pattern_line: Optional[int] = None,
         full_code: Optional[str] = None,
         ai_fixed_code: Optional[str] = None,
         validation_errors: Optional[List[Any]] = None,
@@ -1263,6 +1270,7 @@ class FeedbackHandler:
             insert_after=insert_after,
             insert_before=insert_before,
             replace_pattern=replace_pattern,
+            replace_pattern_line=replace_pattern_line,
             full_code=full_code,
             ai_fixed_code=ai_fixed_code,
             validation_errors=validation_errors or [],
