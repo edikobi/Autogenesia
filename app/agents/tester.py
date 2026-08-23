@@ -56,7 +56,8 @@ class TesterAgent:
         user_additional_input: str = "",
         project_python_path: Optional[str] = None,
         on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
-    ):
+            on_token: Optional[Callable[[str], None]] = None,
+        ):
         """
         Initialize TesterAgent.
 
@@ -95,6 +96,7 @@ class TesterAgent:
         self._user_additional_input = user_additional_input
         self._project_python_path = project_python_path
         self._on_tool_call = on_tool_call
+        self._on_token = on_token
         self._messages: List[Dict] = []
         self._cleaned_up: bool = False
         self._test_temp_dir = tempfile.mkdtemp(prefix="tester_")
@@ -258,14 +260,15 @@ class TesterAgent:
         for iteration in range(self._max_iterations):
             try:
                 response = await call_llm_with_tools(
-                    model=self._model,
-                    messages=messages,
-                    tools=TESTER_TOOLS,
-                    temperature=0,
-                    max_tokens=20000,
-                    tool_choice="auto",
-                    preferred_provider=self._model_provider,
-                )
+                                    model=self._model,
+                                    messages=messages,
+                                    tools=TESTER_TOOLS,
+                                    temperature=0,
+                                    max_tokens=20000,
+                                    tool_choice="auto",
+                                    preferred_provider=self._model_provider,
+                                    on_delta=self._on_token,
+                                )
             except ServerOverloadError as e:
                 logger.warning(f"TesterAgent: Server overload (5xx) on iteration {iteration}. Retrying in 5s... ({e})")
                 await asyncio.sleep(5.0)
@@ -361,6 +364,7 @@ class TesterAgent:
                 max_tokens=20000,
                 tool_choice="auto",
                 preferred_provider=self._model_provider,
+                on_delta=self._on_token,
             )
         except ServerOverloadError as e:
             logger.warning(f"ask_followup: Server overload (5xx). Retrying in 5s... ({e})")
@@ -422,6 +426,7 @@ class TesterAgent:
                     max_tokens=20000,
                     tool_choice="auto",
                     preferred_provider=self._model_provider,
+                    on_delta=self._on_token,
                 )
                 content = response.get("content", "") or ""
                 tool_calls = response.get("tool_calls") or []
@@ -444,6 +449,7 @@ class TesterAgent:
                     max_tokens=20000,
                     tool_choice="none",  # Запрещаем вызов инструментов, заставляем выдать текст
                     preferred_provider=self._model_provider,
+                    on_delta=self._on_token,
                 )
                 content = response.get("content", "") or ""
             except Exception as e:

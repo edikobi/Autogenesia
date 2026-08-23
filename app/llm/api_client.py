@@ -21,7 +21,7 @@ import logging
 import time
 import random
 import hashlib
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -326,7 +326,7 @@ class LLMRequest:
     model: str
     # FIX: temperature сделан Optional, чтобы поддерживать None для thinking-моделей
     temperature: Optional[float] = 0.0
-    max_tokens: Optional[int] = 4000,
+    max_tokens: Optional[int] = 4000
     top_p: float = 0.9
     tools: Optional[List[Dict]] = None
     tool_choice: Optional[str] = None
@@ -488,590 +488,637 @@ class LLMClient:
         self._total_cost = 0.0
 
     async def call(
-            self,
-            model: str,
-            messages: List[Dict[str, Any]],
-            temperature: Optional[float] = 0.0,
-            max_tokens: Optional[int] = 4000,
-            top_p: float = 0.9,
-            tools: Optional[List[Dict]] = None,
-            tool_choice: Optional[str] = None,
-            preferred_provider: Optional[str] = None,
-            extra_params_override: Optional[Dict] = None,
-            is_intermediate: bool = False,
-        ) -> LLMResponse:
-            """
-            Universal LLM call with automatic provider routing.
+                self,
+                model: str,
+                messages: List[Dict[str, Any]],
+                temperature: Optional[float] = 0.0,
+                max_tokens: Optional[int] = 4000,
+                top_p: float = 0.9,
+                tools: Optional[List[Dict]] = None,
+                tool_choice: Optional[str] = None,
+                preferred_provider: Optional[str] = None,
+                extra_params_override: Optional[Dict] = None,
+                is_intermediate: bool = False,
+                on_delta: Optional[Callable[[str], None]] = None,
+                on_reasoning_delta: Optional[Callable[[str], None]] = None,
+            ) -> LLMResponse:
+                """
+                Universal LLM call with automatic provider routing.
 
-            Args:
-                model: Model identifier (e.g., "deepseek-chat", "anthropic/claude-opus-4.5")
-                messages: List of message dicts with 'role' and 'content'
-                temperature: Sampling temperature (0.0 = deterministic)
-                max_tokens: Maximum tokens in response
-                top_p: Nucleus sampling parameter
-                tools: List of tool definitions (OpenAI format)
-                tool_choice: How to select tools ("auto", "none", or tool name)
-                preferred_provider: Optional preferred provider name. Forwarded to
-                    ModelRouter.get_connection_details to route the call through the
-                    user-selected provider (overrides JSON-order provider selection).
-                is_intermediate: If True, this call belongs to an intermediate AI agent
-                    (router, validator, compressor, etc.) and the user's global
-                    reasoning_effort is NOT applied. If False (default), the call is a
-                    user-facing role (Orchestrator / Pre-filter / Tester / Code Generator)
-                    and the global reasoning_effort IS applied (model is irrelevant).
+                Args:
+                    model: Model identifier (e.g., "deepseek-chat", "anthropic/claude-opus-4.5")
+                    messages: List of message dicts with 'role' and 'content'
+                    temperature: Sampling temperature (0.0 = deterministic)
+                    max_tokens: Maximum tokens in response
+                    top_p: Nucleus sampling parameter
+                    tools: List of tool definitions (OpenAI format)
+                    tool_choice: How to select tools ("auto", "none", or tool name)
+                    preferred_provider: Optional preferred provider name. Forwarded to
+                        ModelRouter.get_connection_details to route the call through the
+                        user-selected provider (overrides JSON-order provider selection).
+                    is_intermediate: If True, this call belongs to an intermediate AI agent
+                        (router, validator, compressor, etc.) and the user's global
+                        reasoning_effort is NOT applied. If False (default), the call is a
+                        user-facing role (Orchestrator / Pre-filter / Tester / Code Generator)
+                        and the global reasoning_effort IS applied (model is irrelevant).
+                    on_delta: Optional streaming callback invoked for each content delta.
+                    on_reasoning_delta: Optional streaming callback invoked for reasoning deltas.
 
-            Returns:
-                LLMResponse with content and metadata
+                Returns:
+                    LLMResponse with content and metadata
 
-            Raises:
-                LLMAPIError: On API errors after retries exhausted
-            """
-            # Determine provider and get connection details
-            conn_details = ModelRouter.get_connection_details(model, preferred_provider=preferred_provider)
-            provider = conn_details["provider"]
-            api_key = conn_details["api_key"]
-            extra_params = conn_details.get("extra_params", {})
-            if extra_params_override is not None:
-                extra_params = {**extra_params, **extra_params_override}
-            stripped_model = conn_details.get("stripped_model", model)
-            base_url = conn_details.get("base_url", "")
+                Raises:
+                    LLMAPIError: On API errors after retries exhausted
+                """
+                # Determine provider and get connection details
+                conn_details = ModelRouter.get_connection_details(model, preferred_provider=preferred_provider)
+                provider = conn_details["provider"]
+                api_key = conn_details["api_key"]
+                extra_params = conn_details.get("extra_params", {})
+                if extra_params_override is not None:
+                    extra_params = {**extra_params, **extra_params_override}
+                stripped_model = conn_details.get("stripped_model", model)
+                base_url = conn_details.get("base_url", "")
 
-            # FIX: Reset temperature for thinking/reasoning models
-            if extra_params and ("thinking" in extra_params or "reasoning_effort" in extra_params):
-                temperature = None
+                # FIX: Reset temperature for thinking/reasoning models
+                if extra_params and ("thinking" in extra_params or "reasoning_effort" in extra_params):
+                    temperature = None
 
-            # Construct endpoint (kept for backward compatibility / logging)
-            base = base_url.rstrip("/")
-            if provider == APIProvider.DEEPSEEK:
-                endpoint = f"{base}/v1/chat/completions"
-            else:
-                endpoint = f"{base}/chat/completions"
+                # Construct endpoint (kept for backward compatibility / logging)
+                base = base_url.rstrip("/")
+                if provider == APIProvider.DEEPSEEK:
+                    endpoint = f"{base}/v1/chat/completions"
+                else:
+                    endpoint = f"{base}/chat/completions"
 
-            if not api_key:
-                raise LLMAPIError(f"No API key configured for {provider.value}")
+                if not api_key:
+                    raise LLMAPIError(f"No API key configured for {provider.value}")
 
-            # Build request (original model for logging/display)
-            request = LLMRequest(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
+                # Build request (original model for logging/display)
+                request = LLMRequest(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
 
-            # Execute with retry (pass stripped_model and base_url for OpenAI SDK)
-            return await self._execute_with_retry(
-                request=request,
-                provider=provider,
-                endpoint=endpoint,
-                api_key=api_key,
-                extra_params=extra_params,
-                stripped_model=stripped_model,
-                base_url=base_url,
-                is_intermediate=is_intermediate,
-            )
+                # Execute with retry (pass stripped_model and base_url for OpenAI SDK)
+                return await self._execute_with_retry(
+                    request=request,
+                    provider=provider,
+                    endpoint=endpoint,
+                    api_key=api_key,
+                    extra_params=extra_params,
+                    stripped_model=stripped_model,
+                    base_url=base_url,
+                    is_intermediate=is_intermediate,
+                    on_delta=on_delta,
+                    on_reasoning_delta=on_reasoning_delta,
+                )
 
     async def call_with_tools(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict],
-        temperature: float = 0.0,
-        max_tokens: Optional[int] = 4000,
-        tool_choice: str = "auto",
-        preferred_provider: Optional[str] = None,
-        is_intermediate: bool = False,
-    ) -> LLMResponse:
-        """
-        LLM call with tool/function calling support.
-        """
-        return await self.call(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            tool_choice=tool_choice,
-            preferred_provider=preferred_provider,
-            is_intermediate=is_intermediate,
-        )
+                self,
+                model: str,
+                messages: List[Dict[str, Any]],
+                tools: List[Dict],
+                temperature: float = 0.0,
+                max_tokens: Optional[int] = 4000,
+                tool_choice: str = "auto",
+                preferred_provider: Optional[str] = None,
+                is_intermediate: bool = False,
+                on_delta: Optional[Callable[[str], None]] = None,
+                on_reasoning_delta: Optional[Callable[[str], None]] = None,
+            ) -> LLMResponse:
+                """
+                LLM call with tool/function calling support.
+                """
+                return await self.call(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    preferred_provider=preferred_provider,
+                    is_intermediate=is_intermediate,
+                    on_delta=on_delta,
+                    on_reasoning_delta=on_reasoning_delta,
+                )
 
     async def _execute_with_retry(
-        self,
-        request: LLMRequest,
-        provider: APIProvider,
-        endpoint: str,
-        api_key: str,
-        extra_params: Dict = None,
+            self,
+            request: LLMRequest,
+            provider: APIProvider,
+            endpoint: str,
+            api_key: str,
+            extra_params: Dict = None,
             stripped_model: str = None,
             base_url: str = None,
             is_intermediate: bool = False,
-    ) -> LLMResponse:
-        """Execute request with retry logic and comprehensive error handling"""
-        async with self._semaphore:
-            last_error = None
-            # Task 3: track whether the last error was a 5xx server overload.
-            # If so, raise ServerOverloadError instead of generic LLMAPIError
-            # after retries exhausted — agents catch it explicitly and continue
-            # with the same messages list (no mutation, no compression).
-            last_error_was_5xx = False
-            rate_limit_retries = 0
-            timeout_retries = 0  # HOTFIX (C): separate counter for timeout retries
+            on_delta: Optional[Callable[[str], None]] = None,
+            on_reasoning_delta: Optional[Callable[[str], None]] = None,
+        ) -> LLMResponse:
+            """Execute request with retry logic and comprehensive error handling.
 
+            When a streaming attempt fails mid-stream and is retried, the stream
+            restarts from the beginning. The deduplicating wrappers below suppress
+            the duplicate content/reasoning prefix that was already delivered to
+            the real callbacks, so UI callbacks never receive the same text twice.
+            """
+            async with self._semaphore:
+                last_error = None
+                # Task 3: track whether the last error was a 5xx server overload.
+                # If so, raise ServerOverloadError instead of generic LLMAPIError
+                # after retries exhausted — agents catch it explicitly and continue
+                # with the same messages list (no mutation, no compression).
+                last_error_was_5xx = False
+                rate_limit_retries = 0
+                timeout_retries = 0  # HOTFIX (C): separate counter for timeout retries
 
+                # Mid-stream retry deduplication state. These counters persist
+                # across all retry attempts so each new attempt knows how many
+                # characters were already delivered and can skip that prefix.
+                dedup_state = {
+                    "delivered_content": 0,
+                    "delivered_reasoning": 0,
+                    "skip_content": 0,
+                    "skip_reasoning": 0,
+                }
 
-            for attempt in range(MAX_RETRIES):
-                try:
-                    start_time = time.time()
-                    response = await self._make_request(
-                                            request=request,
-                                            provider=provider,
-                                            endpoint=endpoint,
-                                            api_key=api_key,
-                                            extra_params=extra_params,
-                                            stripped_model=stripped_model,
-                                            base_url=base_url,
-                                            is_intermediate=is_intermediate,
-                                        )
-                    latency_ms = (time.time() - start_time) * 1000
+                def _dedup_content_delta(piece: str) -> None:
+                    """Forward content delta, discarding the already-delivered retry prefix."""
+                    if not piece:
+                        return
+                    skip = dedup_state["skip_content"]
+                    if skip > 0:
+                        if len(piece) <= skip:
+                            dedup_state["skip_content"] = skip - len(piece)
+                            return
+                        piece = piece[skip:]
+                        dedup_state["skip_content"] = 0
+                    dedup_state["delivered_content"] += len(piece)
+                    if on_delta is not None:
+                        on_delta(piece)
 
-                    # Parse response
-                    result = self._parse_response(
-                        response=response,
-                        model=request.model,
-                        provider=provider,
-                        latency_ms=latency_ms,
-                    )
+                def _dedup_reasoning_delta(piece: str) -> None:
+                    """Forward reasoning delta with retry-prefix suppression.
 
-                    # Update stats
-                    self._request_count += 1
-                    self._total_tokens += result.total_tokens
-                    self._total_cost += result.cost_usd
-                    logger.info(
-                        f"LLM call success: model={request.model}, "
-                        f"tokens={result.total_tokens}, latency={latency_ms:.0f}ms"
-                    )
+                    This wrapper is a no-op when on_reasoning_delta is None.
+                    """
+                    if on_reasoning_delta is None or not piece:
+                        return
+                    skip = dedup_state["skip_reasoning"]
+                    if skip > 0:
+                        if len(piece) <= skip:
+                            dedup_state["skip_reasoning"] = skip - len(piece)
+                            return
+                        piece = piece[skip:]
+                        dedup_state["skip_reasoning"] = 0
+                    dedup_state["delivered_reasoning"] += len(piece)
+                    on_reasoning_delta(piece)
 
-                    return result
+                for attempt in range(MAX_RETRIES):
+                    # Reset the skip prefix to the current cumulative delivered
+                    # character count immediately before each streaming attempt.
+                    # On the first attempt the counts are zero, so every delta is
+                    # forwarded in full (original behavior is preserved exactly).
+                    dedup_state["skip_content"] = dedup_state["delivered_content"]
+                    dedup_state["skip_reasoning"] = dedup_state["delivered_reasoning"]
 
-                except RateLimitError as e:
-                    rate_limit_retries += 1
+                    try:
+                        start_time = time.time()
+                        api_model_for_stream = stripped_model if stripped_model else request.model
+                        if on_delta is not None and should_stream(provider, api_model_for_stream, request.tools is not None):
+                            response = await self._make_stream_request(
+                                request=request,
+                                provider=provider,
+                                endpoint=endpoint,
+                                api_key=api_key,
+                                extra_params=extra_params,
+                                stripped_model=stripped_model,
+                                base_url=base_url,
+                                is_intermediate=is_intermediate,
+                                on_delta=_dedup_content_delta,
+                                on_reasoning_delta=_dedup_reasoning_delta,
+                            )
+                        else:
+                            response = await self._make_request(
+                                request=request,
+                                provider=provider,
+                                endpoint=endpoint,
+                                api_key=api_key,
+                                extra_params=extra_params,
+                                stripped_model=stripped_model,
+                                base_url=base_url,
+                                is_intermediate=is_intermediate,
+                            )
+                        latency_ms = (time.time() - start_time) * 1000
 
-                    # Специальная логика для rate limit с большим количеством попыток
-                    if rate_limit_retries <= RATE_LIMIT_MAX_RETRIES:
-                        # Экспоненциальная задержка с максимумом
-                        delay = min(
-                            RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_retries - 1)),
-                            RATE_LIMIT_MAX_DELAY
+                        # Parse response
+                        result = self._parse_response(
+                            response=response,
+                            model=request.model,
+                            provider=provider,
+                            latency_ms=latency_ms,
                         )
 
-                        # Для Gemini добавляем дополнительное время
-                        if "gemini" in request.model.lower():
-                            delay = min(delay * 1.5, RATE_LIMIT_MAX_DELAY)
+                        # Update stats
+                        self._request_count += 1
+                        self._total_tokens += result.total_tokens
+                        self._total_cost += result.cost_usd
+                        logger.info(
+                            f"LLM call success: model={request.model}, "
+                            f"tokens={result.total_tokens}, latency={latency_ms:.0f}ms"
+                        )
 
-                        logger.warning(
-                            f"Rate limit hit (rate_limit_retry {rate_limit_retries}/{RATE_LIMIT_MAX_RETRIES}), "
-                            f"waiting {delay:.0f}s before retry"
+                        return result
+
+                    except RateLimitError as e:
+                        rate_limit_retries += 1
+
+                        # Специальная логика для rate limit с большим количеством попыток
+                        if rate_limit_retries <= RATE_LIMIT_MAX_RETRIES:
+                            # Экспоненциальная задержка с максимумом
+                            delay = min(
+                                RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_retries - 1)),
+                                RATE_LIMIT_MAX_DELAY
+                            )
+
+                            # Для Gemini добавляем дополнительное время
+                            if "gemini" in request.model.lower():
+                                delay = min(delay * 1.5, RATE_LIMIT_MAX_DELAY)
+
+                            logger.warning(
+                                f"Rate limit hit (rate_limit_retry {rate_limit_retries}/{RATE_LIMIT_MAX_RETRIES}), "
+                                f"waiting {delay:.0f}s before retry"
+                            )
+                            await asyncio.sleep(delay)
+                            last_error = e
+
+                            # Не считаем rate limit как обычную попытку
+                            # (позволяем продолжить основной цикл)
+                            continue
+                        else:
+                            # Исчерпали rate limit retries
+                            raise LLMAPIError(
+                                f"Rate limit retries exhausted ({RATE_LIMIT_MAX_RETRIES}). "
+                                f"Last error: {e}",
+                                error_type="rate_limit"
+                            )
+
+                    except LLMTimeoutError as e:
+                        # HOTFIX (C): Separate branch for timeouts.
+                        # Retry capped at TIMEOUT_MAX_RETRIES — each timed-out request
+                        # may have been billed (server completes generation regardless).
+                        timeout_retries += 1
+                        if timeout_retries <= TIMEOUT_MAX_RETRIES:
+                            logger.error(
+                                f"⏳ Таймаут {timeout_retries}/{TIMEOUT_MAX_RETRIES} "
+                                f"(attempt {attempt + 1}/{MAX_RETRIES}): "
+                                f"модель продолжала генерацию на сервере. {e}"
+                            )
+                            await asyncio.sleep(min(RETRY_BASE_DELAY, 5.0))
+                            last_error = e
+                            continue
+                        else:
+                            logger.error(
+                                f"⏳ Таймаут: исчерпано {TIMEOUT_MAX_RETRIES} попыток. {e}"
+                            )
+                            raise LLMAPIError(
+                                f"Timeout after {TIMEOUT_MAX_RETRIES} retries. "
+                                f"Model was still generating on server. Last error: {e}",
+                                error_type="timeout"
+                            )
+
+                    except RetryableError as e:
+                        # Task 3: Honour server's Retry-After if provided (Cloudflare
+                        # and origin sometimes return this header). Otherwise use
+                        # exponential backoff with jitter (0.5x..1.0x multiplier)
+                        # to avoid thundering herd of concurrent retries from the
+                        # agent pipeline (Orchestrator + Generator + Validator).
+                        status_code = getattr(e, "status_code", None)
+                        retry_after = getattr(e, "retry_after", None)
+
+                        if status_code in RETRYABLE_5XX_STATUS_CODES:
+                            last_error_was_5xx = True
+                        else:
+                            # Network errors have status_code=None — keep generic path.
+                            last_error_was_5xx = False
+
+                        if retry_after is not None and retry_after > 0:
+                            # Server explicitly told us to wait — honour it, but cap
+                            # to RETRY_MAX_DELAY so a malicious/huge Retry-After can't
+                            # stall the pipeline indefinitely.
+                            delay = min(float(retry_after), RETRY_MAX_DELAY)
+                        else:
+                            # HOTFIX (D): exponential backoff capped at RETRY_MAX_DELAY.
+                            base = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+                            # Jitter: 0.5x..1.0x — randomizes retry timing across
+                            # concurrent agents so they don't all retry at once.
+                            delay = base * (0.5 + random.random() * 0.5)
+
+                        # HOTFIX (F): error-level log for visibility in ai_errors_*.log
+                        logger.error(
+                            f"Retryable error (attempt {attempt + 1}/{MAX_RETRIES}): "
+                            f"status={status_code} delay={delay:.1f}s "
+                            f"retry_after_hint={retry_after} error={e}"
                         )
                         await asyncio.sleep(delay)
                         last_error = e
 
-                        # Не считаем rate limit как обычную попытку
-                        # (позволяем продолжить основной цикл)
-                        continue
-                    else:
-                        # Исчерпали rate limit retries
-                        raise LLMAPIError(
-                            f"Rate limit retries exhausted ({RATE_LIMIT_MAX_RETRIES}). "
-                            f"Last error: {e}",
-                            error_type="rate_limit"
-                        )
+                    except ContextOverflowError as e:
+                        # НЕ retry - пробрасываем наверх для обработки через compression
+                        logger.warning(f"Context overflow detected: {e}")
+                        raise
 
-                except LLMTimeoutError as e:
-                    # HOTFIX (C): Separate branch for timeouts.
-                    # Retry capped at TIMEOUT_MAX_RETRIES — each timed-out request
-                    # may have been billed (server completes generation regardless).
-                    timeout_retries += 1
-                    if timeout_retries <= TIMEOUT_MAX_RETRIES:
-                        logger.error(
-                            f"⏳ Таймаут {timeout_retries}/{TIMEOUT_MAX_RETRIES} "
-                            f"(attempt {attempt + 1}/{MAX_RETRIES}): "
-                            f"модель продолжала генерацию на сервере. {e}"
-                        )
-                        await asyncio.sleep(min(RETRY_BASE_DELAY, 5.0))
-                        last_error = e
-                        continue
-                    else:
-                        logger.error(
-                            f"⏳ Таймаут: исчерпано {TIMEOUT_MAX_RETRIES} попыток. {e}"
-                        )
-                        raise LLMAPIError(
-                            f"Timeout after {TIMEOUT_MAX_RETRIES} retries. "
-                            f"Model was still generating on server. Last error: {e}",
-                            error_type="timeout"
-                        )
+                    except MessageStructureError as e:
+                        # НЕ retry - пробрасываем наверх для исправления сообщений
+                        logger.error(f"Message structure error (not retryable): {e}")
+                        raise
 
-                except RetryableError as e:
-                    # Task 3: Honour server's Retry-After if provided (Cloudflare
-                    # and origin sometimes return this header). Otherwise use
-                    # exponential backoff with jitter (0.5x..1.0x multiplier)
-                    # to avoid thundering herd of concurrent retries from the
-                    # agent pipeline (Orchestrator + Generator + Validator).
-                    status_code = getattr(e, "status_code", None)
-                    retry_after = getattr(e, "retry_after", None)
+                    except LLMAPIError as e:
+                        # Non-retryable error
+                        logger.error(f"LLM API error (non-retryable): {e}")
+                        raise
 
-                    if status_code in RETRYABLE_5XX_STATUS_CODES:
-                        last_error_was_5xx = True
-                    else:
-                        # Network errors have status_code=None — keep generic path.
-                        last_error_was_5xx = False
-
-                    if retry_after is not None and retry_after > 0:
-                        # Server explicitly told us to wait — honour it, but cap
-                        # to RETRY_MAX_DELAY so a malicious/huge Retry-After can't
-                        # stall the pipeline indefinitely.
-                        delay = min(float(retry_after), RETRY_MAX_DELAY)
-                    else:
-                        # HOTFIX (D): exponential backoff capped at RETRY_MAX_DELAY.
-                        base = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
-                        # Jitter: 0.5x..1.0x — randomizes retry timing across
-                        # concurrent agents so they don't all retry at once.
-                        delay = base * (0.5 + random.random() * 0.5)
-
-                    # HOTFIX (F): error-level log for visibility in ai_errors_*.log
-                    logger.error(
-                        f"Retryable error (attempt {attempt + 1}/{MAX_RETRIES}): "
-                        f"status={status_code} delay={delay:.1f}s "
-                        f"retry_after_hint={retry_after} error={e}"
+                # All retries exhausted.
+                # Task 3: distinguish 5xx server overload path from generic exhaustion
+                # so agents can catch ServerOverloadError explicitly and continue
+                # with the same messages (no mutation, no compression).
+                if last_error_was_5xx:
+                    status_code = getattr(last_error, "status_code", None)
+                    raise ServerOverloadError(
+                        f"Server overload after {MAX_RETRIES} retries "
+                        f"(last status={status_code}). Last error: {last_error}",
+                        status_code=status_code,
                     )
-                    await asyncio.sleep(delay)
-                    last_error = e
-
-
-                except ContextOverflowError as e:
-                    # НЕ retry - пробрасываем наверх для обработки через compression
-                    logger.warning(f"Context overflow detected: {e}")
-                    raise
-
-                except MessageStructureError as e:
-                    # НЕ retry - пробрасываем наверх для исправления сообщений
-                    logger.error(f"Message structure error (not retryable): {e}")
-                    raise
-
-                except LLMAPIError as e:
-                    # Non-retryable error
-                    logger.error(f"LLM API error (non-retryable): {e}")
-                    raise
-
-            # All retries exhausted.
-            # Task 3: distinguish 5xx server overload path from generic exhaustion
-            # so agents can catch ServerOverloadError explicitly and continue
-            # with the same messages (no mutation, no compression).
-            if last_error_was_5xx:
-                status_code = getattr(last_error, "status_code", None)
-                raise ServerOverloadError(
-                    f"Server overload after {MAX_RETRIES} retries "
-                    f"(last status={status_code}). Last error: {last_error}",
-                    status_code=status_code,
+                raise LLMAPIError(
+                    f"All {MAX_RETRIES} retries exhausted. Last error: {last_error}"
                 )
-            raise LLMAPIError(
-                f"All {MAX_RETRIES} retries exhausted. Last error: {last_error}"
-            )
 
     async def _make_request(
-                self,
-                request: LLMRequest,
-                provider: APIProvider,
-                endpoint: str,
-                api_key: str,
-                extra_params: Dict = None,
-                stripped_model: str = None,
-                base_url: str = None,
-                is_intermediate: bool = False,
-            ) -> Dict:
-                """Make HTTP request to LLM API using OpenAI SDK."""
-                # Use stripped_model for API call, original model for logging
-                api_model = stripped_model if stripped_model else request.model
+            self,
+            request: LLMRequest,
+            provider: APIProvider,
+            endpoint: str,
+            api_key: str,
+            extra_params: Dict = None,
+            stripped_model: str = None,
+            base_url: str = None,
+            is_intermediate: bool = False,
+        ) -> Dict:
+            """Make HTTP request to LLM API using OpenAI SDK."""
+            # Use stripped_model for API call, original model for logging
+            api_model = stripped_model if stripped_model else request.model
 
-                # Determine base_url for OpenAI SDK client
-                if not base_url:
-                    base_url = endpoint.rsplit("/chat/completions", 1)[0] if "/chat/completions" in endpoint else endpoint
-                    base_url = base_url.rsplit("/v1/chat/completions", 1)[0] if "/v1/chat/completions" in base_url else base_url
+            # Determine base_url for OpenAI SDK client
+            if not base_url:
+                base_url = endpoint.rsplit("/chat/completions", 1)[0] if "/chat/completions" in endpoint else endpoint
+                base_url = base_url.rsplit("/v1/chat/completions", 1)[0] if "/v1/chat/completions" in base_url else base_url
 
-                # Create OpenAI SDK client using SHARED httpx.AsyncClient pool.
-                # Task 3: one pool per (base_url, api_key) — TLS sessions reused
-                # across retries and across agent pipeline, eliminating the
-                # per-call handshake burst that triggered Cloudflare 5xx gating.
-                # HOTFIX (B) preserved: max_retries=0 disables SDK's hidden retry
-                # loop (SDK default max_retries=2 was silently retrying timeouts,
-                # compounding with our outer loop → 3×120s per external attempt).
-                shared_http = _get_shared_http_client(base_url, api_key)
-                client = AsyncOpenAI(
+            # Create OpenAI SDK client using SHARED httpx.AsyncClient pool.
+            # Task 3: one pool per (base_url, api_key) — TLS sessions reused
+            # across retries and across agent pipeline, eliminating the
+            # per-call handshake burst that triggered Cloudflare 5xx gating.
+            # HOTFIX (B) preserved: max_retries=0 disables SDK's hidden retry
+            # loop (SDK default max_retries=2 was silently retrying timeouts,
+            # compounding with our outer loop → 3×120s per external attempt).
+            shared_http = _get_shared_http_client(base_url, api_key)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=shared_http,
+                timeout=REQUEST_TIMEOUT,
+                max_retries=0,
+            )
+
+            # All kwargs construction now lives in a dedicated helper.
+            kwargs = self._build_chat_kwargs(
+                request=request,
+                provider=provider,
+                api_model=api_model,
+                extra_params=extra_params,
+                is_intermediate=is_intermediate,
+            )
+
+            # HOTFIX (A): Use extended timeout for reasoning/thinking calls.
+            # We extract nested dicts safely: dict.get(key, {}) does NOT protect
+            # against explicit None values, so we use explicit isinstance checks.
+            _extra_body = kwargs.get("extra_body")
+            _thinking_cfg = _extra_body.get("thinking") if isinstance(_extra_body, dict) else None
+            _has_thinking = isinstance(_thinking_cfg, dict) and _thinking_cfg.get("type") == "enabled"
+            _uses_reasoning = "reasoning_effort" in kwargs or _has_thinking
+
+            if _uses_reasoning:
+                client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
+
+            # === Make API call using OpenAI SDK ===
+            try:
+                response = await client.chat.completions.create(**kwargs)
+            except openai_sdk.APIError as e:
+                raise self._map_sdk_exception(e)
+            return response.model_dump()
+
+    async def _make_stream_request(
+            self,
+            request: LLMRequest,
+            provider: APIProvider,
+            endpoint: str,
+            api_key: str,
+            extra_params: Dict = None,
+            stripped_model: str = None,
+            base_url: str = None,
+            is_intermediate: bool = False,
+            on_delta: Optional[Callable[[str], None]] = None,
+            on_reasoning_delta: Optional[Callable[[str], None]] = None,
+        ) -> Dict:
+            """Make an SSE streaming request and normalise it into the non-streaming schema."""
+            api_model = stripped_model if stripped_model else request.model
+
+            if not base_url:
+                base_url = endpoint.rsplit("/chat/completions", 1)[0] if "/chat/completions" in endpoint else endpoint
+                base_url = base_url.rsplit("/v1/chat/completions", 1)[0] if "/v1/chat/completions" in base_url else base_url
+
+            # Transparent fallback for models/tool combinations that must preserve reasoning signatures.
+            if not should_stream(provider, api_model, request.tools is not None):
+                logger.warning(
+                    f"Streaming disabled for {api_model} (provider={provider.value}) with tools present; "
+                    f"falling back to non-streaming request"
+                )
+                return await self._make_request(
+                    request=request,
+                    provider=provider,
+                    endpoint=endpoint,
                     api_key=api_key,
+                    extra_params=extra_params,
+                    stripped_model=stripped_model,
                     base_url=base_url,
-                    http_client=shared_http,
-                    timeout=REQUEST_TIMEOUT,
-                    max_retries=0,
+                    is_intermediate=is_intermediate,
                 )
 
+            shared_http = _get_shared_http_client(base_url, api_key)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=shared_http,
+                timeout=REQUEST_TIMEOUT,
+                max_retries=0,
+            )
 
-                # Build kwargs for chat.completions.create()
-                # Build kwargs for chat.completions.create()
-                # max_tokens НЕ включается сюда — добавляется условно ниже,
-                # чтобы None/<=0 действительно означало «параметр не отправлять».
-                kwargs: Dict[str, Any] = {
-                    "model": api_model,
-                    "messages": request.messages,
-                    "top_p": request.top_p,
-                }
+            kwargs = self._build_chat_kwargs(
+                request=request,
+                provider=provider,
+                api_model=api_model,
+                extra_params=extra_params,
+                is_intermediate=is_intermediate,
+            )
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
 
-                if request.temperature is not None:
-                    kwargs["temperature"] = request.temperature
+            _extra_body = kwargs.get("extra_body")
+            _thinking_cfg = _extra_body.get("thinking") if isinstance(_extra_body, dict) else None
+            _has_thinking = isinstance(_thinking_cfg, dict) and _thinking_cfg.get("type") == "enabled"
+            _uses_reasoning = "reasoning_effort" in kwargs or _has_thinking
+            if _uses_reasoning:
+                client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
 
-                # === max_tokens: значение пользователя приоритетно ===
-                # Семантика:
-                #   - None или <=0  → параметр НЕ отправляется (модель решает сама);
-                #   - положительное → отправляется, но если в MODEL_OUTPUT_LIMITS
-                #                     записано меньшее значение — снижается до него.
-                if request.max_tokens is not None and request.max_tokens > 0:
-                    effective_max_tokens = request.max_tokens
-                    try:
-                        from config.provider_models import get_model_output_limit
-                        limit = get_model_output_limit(request.model)
-                        if limit and effective_max_tokens > limit:
-                            logger.info(
-                                f"max_tokens for {request.model}: role requested "
-                                f"{effective_max_tokens}, applying user setting "
-                                f"from MODEL_OUTPUT_LIMITS: {limit}"
-                            )
-                            effective_max_tokens = limit
-                    except Exception as e:
-                        logger.debug(f"MODEL_OUTPUT_LIMITS lookup failed (non-fatal): {e}")
-                    kwargs["max_tokens"] = effective_max_tokens
+            stream_options_retried = False
 
-                # === Handle extra_params (thinking, reasoning_effort) ===
-                # Convert reasoning to extra_params if needed
-                if extra_params:
-                    extra_params = dict(extra_params)  # shallow copy
-                else:
-                    extra_params = {}
-                
-                if "reasoning_effort" not in extra_params:
-                    model_cfg = cfg.MODEL_CONFIGS.get(request.model, {})
-                    _reasoning_cfg = model_cfg.get("reasoning")
-                    if isinstance(_reasoning_cfg, dict):
-                        extra_params["reasoning_effort"] = _reasoning_cfg.get("effort")
-
-
-                # Resolve whether this (provider, model) supports reasoning_effort as direct kwarg
-                supports_re = _supports_reasoning_effort(provider, api_model)
-
-                if extra_params:
-                    if "thinking" in extra_params:
-                        existing = kwargs.get("extra_body") or {}
-                        kwargs["extra_body"] = {**existing, "thinking": extra_params["thinking"]}                        
-                        
-                        if "temperature" in kwargs:
-                            del kwargs["temperature"]
-                        if "top_p" in kwargs:
-                            del kwargs["top_p"]
-                        logger.debug(
-                            f"Extended thinking enabled for {request.model} "
-                            f"with budget_tokens={extra_params['thinking'].get('budget_tokens', 'unlimited')}"
-                        )
-
-                    if "reasoning_effort" in extra_params:
-                        if extra_params["reasoning_effort"] == "disabled":
-                            # Thinking explicitly disabled — inject extra_body for API
-                            existing_body = kwargs.get("extra_body") or {}
-                            kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
-                            
-                            
-                            logger.debug(f"Thinking explicitly disabled for {request.model}")
-                        elif supports_re:
-                            # Model supports reasoning_effort as a direct kwarg
-                            re_val = _resolve_reasoning_effort_value(
-                                extra_params["reasoning_effort"], provider, api_model
-                            )
-                            kwargs["reasoning_effort"] = re_val
-                            if "temperature" in kwargs:
-                                del kwargs["temperature"]
-                            if "top_p" in kwargs:
-                                del kwargs["top_p"]
-                            logger.debug(
-                                f"Reasoning effort set to '{re_val}' for {request.model} (provider={provider.value})"
-                            )
-                        else:
-                            # Model does NOT support reasoning_effort — do not pass it.
-                            # Do NOT remove temperature/top_p (model uses them normally).
-                            logger.debug(
-                                f"reasoning_effort='{extra_params['reasoning_effort']}' NOT supported "
-                                f"by {request.model} (provider={provider.value}); skipped"
-                            )
-
-    # === Handle user's global reasoning_effort ===
-                # Role-based: is_intermediate flag is passed by the caller.
-                # - Orchestrator / Pre-filter / Tester / Code Generator (is_intermediate=False)
-                #   → global reasoning_effort IS applied (model is irrelevant).
-                # - Other AI agents (is_intermediate=True) → global reasoning_effort is NOT
-                #   applied; agent's own "local" settings remain in effect.
+            while True:
+                # Re-initialize per-attempt accumulators at the start of every
+                # loop iteration so the stream_options-400 quiet retry always
+                # starts with a fresh accumulation state and can never produce
+                # duplicated fragments in the assembled result.
+                content_parts: List[str] = []
+                reasoning_parts: List[str] = []
+                tool_call_slots: Dict[int, Dict[str, Any]] = {}
+                finish_reason: Optional[str] = None
+                usage: Any = None
+                stream_started = False
                 try:
-                    user_reasoning_effort = cfg.get_user_reasoning_effort()
-                    if user_reasoning_effort and user_reasoning_effort != "none" and "reasoning_effort" not in (extra_params or {}):
-                        if not is_intermediate and supports_re:
-                            # Apply user's global reasoning_effort to user-facing roles only.
-                            re_val = _resolve_reasoning_effort_value(
-                                user_reasoning_effort, provider, api_model
-                            )
-                            kwargs["reasoning_effort"] = re_val
-                            if "temperature" in kwargs:
-                                del kwargs["temperature"]
-                            if "top_p" in kwargs:
-                                del kwargs["top_p"]
-                            logger.debug(f"User reasoning_effort '{re_val}' applied to {request.model} (provider={provider.value})")
-                        elif not is_intermediate and not supports_re:
-                            # Model does not support reasoning_effort; for glm-5-turbo, ensure thinking
-                            # stays enabled (default) so it can still reason when user wants max reasoning.
-                            logger.debug(
-                                f"User reasoning_effort '{user_reasoning_effort}' NOT supported by "
-                                f"{request.model} (provider={provider.value}); skipped"
-                            )
-                except Exception:
-                    pass
+                    async with await client.chat.completions.create(**kwargs) as stream:
+                        stream_started = True
+                        async for chunk in stream:
+                            if not chunk.choices:
+                                if getattr(chunk, "usage", None):
+                                    usage = chunk.usage
+                                continue
 
-                # === GLM glm-5-turbo thinking:disabled (for speed) when no reasoning_effort is active ===
-                # Per GLM docs: glm-5-turbo supports thinking disabled via extra_body.
-                # Apply only when no reasoning_effort was set (neither per-model nor global),
-                # to keep the fast path fast. If user wants max reasoning, thinking stays ON.
-                try:
-                    re_active = "reasoning_effort" in kwargs
-                    is_glm_turbo = api_model == "glm-5-turbo"
-                    if is_glm_turbo and not re_active:
-                        existing_body = kwargs.get("extra_body") or {}
-                        if "thinking" not in existing_body:
-                            kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
-                            logger.debug(f"GLM glm-5-turbo: thinking disabled (no reasoning_effort active) for {request.model}")
-                except Exception:
-                    pass
-                
-                # === Add tools if specified ===
-                if request.tools:
-                    kwargs["tools"] = request.tools
-                    if request.tool_choice:
-                        kwargs["tool_choice"] = request.tool_choice
+                            choice = chunk.choices[0]
+                            delta = getattr(choice, "delta", None)
+                            if delta is None:
+                                continue
 
-                # === OpenRouter-specific headers ===
-                if provider == APIProvider.OPENROUTER:
-                    kwargs["extra_headers"] = {
-                        "HTTP-Referer": "https://ai-code-agent.local",
-                        "X-Title": "AI Code Agent",
-                    }
+                            content_piece = getattr(delta, "content", None) or ""
+                            if content_piece:
+                                content_parts.append(content_piece)
+                                if on_delta is not None:
+                                    try:
+                                        on_delta(content_piece)
+                                    except Exception as cb_err:
+                                        logger.warning(f"on_delta callback failed: {cb_err}")
 
-                # === Preserve reasoning_details and thought_signature in assistant messages ===
-                for msg in kwargs.get("messages", []):
-                    if msg.get("role") == "assistant":
-                        if "reasoning_details" in msg:
-                            logger.debug(
-                                f"Preserving reasoning_details in assistant message "
-                                f"({len(msg['reasoning_details'])} items)"
-                            )
-                        if msg.get("tool_calls") and "thought_signature" in msg:
-                            logger.debug(
-                                f"Preserving thought_signature in assistant message with tool_calls"
-                            )
-                        if "tool_calls" in msg:
-                            for tc in msg["tool_calls"]:
-                                if "extra_content" in tc:
-                                    logger.debug(
-                                        f"Preserving extra_content in tool_call {tc.get('id', 'unknown')}"
-                                    )
+                            reasoning_piece = getattr(delta, "reasoning_content", None) or ""
+                            if reasoning_piece:
+                                reasoning_parts.append(reasoning_piece)
+                                if on_reasoning_delta is not None:
+                                    try:
+                                        on_reasoning_delta(reasoning_piece)
+                                    except Exception as cb_err:
+                                        logger.warning(f"on_reasoning_delta callback failed: {cb_err}")
 
-                # === DeepSeek-specific message handling ===
-                if provider == APIProvider.DEEPSEEK:
-                    for msg in kwargs.get("messages", []):
-                        if msg.get("role") == "assistant":
-                            if "reasoning_content" not in msg:
-                                msg["reasoning_content"] = msg.get("content") or ""
-                            if msg.get("content") is None:
-                                msg["content"] = ""
+                            for tc in getattr(delta, "tool_calls", []) or []:
+                                index = getattr(tc, "index", 0)
+                                slot = tool_call_slots.setdefault(
+                                    index,
+                                    {"id": None, "type": "function", "name": None, "arguments": []},
+                                )
+                                if getattr(tc, "id", None):
+                                    slot["id"] = tc.id
+                                if getattr(tc, "type", None):
+                                    slot["type"] = tc.type
+                                func = getattr(tc, "function", None)
+                                if func is not None:
+                                    if getattr(func, "name", None):
+                                        slot["name"] = func.name
+                                    if getattr(func, "arguments", None):
+                                        slot["arguments"].append(func.arguments)
 
-                # HOTFIX (A): Use extended timeout for reasoning/thinking calls.
-                # We extract nested dicts safely: dict.get(key, {}) does NOT protect
-                # against explicit None values, so we use explicit isinstance checks.
-                _extra_body = kwargs.get("extra_body")
-                _thinking_cfg = _extra_body.get("thinking") if isinstance(_extra_body, dict) else None
-                _has_thinking = isinstance(_thinking_cfg, dict) and _thinking_cfg.get("type") == "enabled"
-                _uses_reasoning = "reasoning_effort" in kwargs or _has_thinking
-                
-                if _uses_reasoning:
-                    client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
+                            if getattr(choice, "finish_reason", None):
+                                finish_reason = choice.finish_reason
 
-                # === Make API call using OpenAI SDK ===
-                try:
-                    response = await client.chat.completions.create(**kwargs)
-                    
-                    
-                except openai_sdk.RateLimitError as e:
-                    raise RateLimitError(str(e))
-
-                # HOTFIX (C): APITimeoutError is a SUBCLASS of APIConnectionError!
-                # Must be caught FIRST to route timeouts to LLMTimeoutError
-                # (separate retry cap = TIMEOUT_MAX_RETRIES) instead of generic
-                # RetryableError (which uses MAX_RETRIES = 4).
-                except openai_sdk.APITimeoutError as e:
-                    raise LLMTimeoutError(str(e))
-
-                except openai_sdk.APIConnectionError as e:
-                    raise RetryableError(str(e))
-
+                            if getattr(chunk, "usage", None):
+                                usage = chunk.usage
+                    break
                 except openai_sdk.APIStatusError as e:
-                    status_code = e.status_code
-
-                    # Task 3: status-code classification FIRST (before text
-                    # heuristics) — Cloudflare 520-526 and 504 were previously
-                    # misclassified as fatal because their text bodies
-                    # ("Origin Error", "Web server is down") didn't match
-                    # RETRYABLE_ERROR_PATTERNS.
-                    if status_code == 429:
-                        raise RateLimitError(str(e))
-
-                    if status_code in RETRYABLE_5XX_STATUS_CODES:
-                        diag = _extract_5xx_diagnostics(e)
-                        # Diagnostic logging for incident triage: cf-ray identifies
-                        # the exact CF edge node, cf-placement shows the PoP,
-                        # retry-after hints the backoff, body_preview shows the
-                        # actual upstream error (often text/plain, no JSON).
-                        logger.error(
-                            f"5xx retryable from provider: "
-                            f"status={status_code} "
-                            f"cf-ray={diag.get('cf-ray')} "
-                            f"cf-placement={diag.get('cf-placement')} "
-                            f"server={diag.get('server')} "
-                            f"retry-after={diag.get('retry-after')} "
-                            f"body_preview={diag.get('body_preview', '')!r}"
+                    if e.status_code == 400 and "stream_options" in str(e).lower() and not stream_options_retried:
+                        # One quiet retry without stream_options for providers that
+                        # do not recognise the parameter.
+                        kwargs.pop("stream_options", None)
+                        stream_options_retried = True
+                        continue
+                    if e.status_code == 400 and not stream_started:
+                        logger.warning(
+                            f"Streaming create failed with 400 for {api_model}, "
+                            f"falling back to non-streaming request: {e}"
                         )
-                        raise RetryableError(
-                            str(e),
-                            status_code=status_code,
-                            retry_after=diag.get("retry-after-seconds"),
+                        return await self._make_request(
+                            request=request,
+                            provider=provider,
+                            endpoint=endpoint,
+                            api_key=api_key,
+                            extra_params=extra_params,
+                            stripped_model=stripped_model,
+                            base_url=base_url,
+                            is_intermediate=is_intermediate,
                         )
+                    raise self._map_sdk_exception(e)
+                except openai_sdk.APIError as e:
+                    raise self._map_sdk_exception(e)
 
-                    # Non-5xx: fall back to text-based classification (unchanged)
-                    error_text = str(e)
-                    error_type = classify_error(error_text)
-                    if error_type == "rate_limit":
-                        raise RateLimitError(error_text)
-                    elif error_type == "context_overflow":
-                        raise ContextOverflowError(error_text)
-                    elif error_type == "message_structure":
-                        raise MessageStructureError(error_text)
-                    elif error_type == "retryable":
-                        raise RetryableError(error_text)
-                    else:
-                        raise LLMAPIError(error_text, error_type="fatal")
-                return response.model_dump()
+            content = "".join(content_parts)
+            assembled_tool_calls = []
+            for index in sorted(tool_call_slots):
+                slot = tool_call_slots[index]
+                if not slot.get("id"):
+                    continue
+                assembled_tool_calls.append({
+                    "id": slot["id"],
+                    "type": slot.get("type", "function"),
+                    "function": {
+                        "name": slot.get("name") or "",
+                        "arguments": "".join(slot["arguments"]),
+                    },
+                })
+
+            if usage is None:
+                usage_dump = None
+            elif isinstance(usage, dict):
+                usage_dump = usage
+            else:
+                try:
+                    usage_dump = usage.model_dump()
+                except Exception:
+                    usage_dump = None
+
+            message: Dict[str, Any] = {
+                "role": "assistant",
+                "content": content or "",
+            }
+            if assembled_tool_calls:
+                message["tool_calls"] = assembled_tool_calls
+            reasoning_content = "".join(reasoning_parts)
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
+
+            return {
+                "choices": [{"message": message, "finish_reason": finish_reason}],
+                "usage": usage_dump,
+                "model": api_model,
+            }
 
     def _parse_response(
         self,
@@ -1240,6 +1287,245 @@ class LLMClient:
             "total_cost_usd": round(self._total_cost, 4),
         }
 
+    def _build_chat_kwargs(
+            self,
+            request: LLMRequest,
+            provider: APIProvider,
+            api_model: str,
+            extra_params: Optional[Dict],
+            is_intermediate: bool,
+        ) -> Dict[str, Any]:
+            """Build kwargs for chat.completions.create().
+
+            This preserves the exact behaviour of the previous inline block:
+            model/messages/top_p, temperature, max_tokens, extra_params,
+            reasoning_effort, GLM thinking, tools/tool_choice, OpenRouter
+            headers, message preservation and DeepSeek normalisation.
+            """
+            # max_tokens НЕ включается сюда — добавляется условно ниже,
+            # чтобы None/<=0 действительно означало «параметр не отправлять».
+            kwargs: Dict[str, Any] = {
+                "model": api_model,
+                "messages": request.messages,
+                "top_p": request.top_p,
+            }
+
+            if request.temperature is not None:
+                kwargs["temperature"] = request.temperature
+
+            # === max_tokens: значение пользователя приоритетно ===
+            if request.max_tokens is not None and request.max_tokens > 0:
+                effective_max_tokens = request.max_tokens
+                try:
+                    from config.provider_models import get_model_output_limit
+                    limit = get_model_output_limit(request.model)
+                    if limit and effective_max_tokens > limit:
+                        logger.info(
+                            f"max_tokens for {request.model}: role requested "
+                            f"{effective_max_tokens}, applying user setting "
+                            f"from MODEL_OUTPUT_LIMITS: {limit}"
+                        )
+                        effective_max_tokens = limit
+                except Exception as e:
+                    logger.debug(f"MODEL_OUTPUT_LIMITS lookup failed (non-fatal): {e}")
+                kwargs["max_tokens"] = effective_max_tokens
+
+            # === Handle extra_params (thinking, reasoning_effort) ===
+            if extra_params:
+                extra_params = dict(extra_params)  # shallow copy
+            else:
+                extra_params = {}
+
+            if "reasoning_effort" not in extra_params:
+                model_cfg = cfg.MODEL_CONFIGS.get(request.model, {})
+                _reasoning_cfg = model_cfg.get("reasoning")
+                if isinstance(_reasoning_cfg, dict):
+                    extra_params["reasoning_effort"] = _reasoning_cfg.get("effort")
+
+            # Resolve whether this (provider, model) supports reasoning_effort as direct kwarg
+            supports_re = _supports_reasoning_effort(provider, api_model)
+
+            if extra_params:
+                if "thinking" in extra_params:
+                    existing = kwargs.get("extra_body") or {}
+                    kwargs["extra_body"] = {**existing, "thinking": extra_params["thinking"]}
+
+                    if "temperature" in kwargs:
+                        del kwargs["temperature"]
+                    if "top_p" in kwargs:
+                        del kwargs["top_p"]
+                    logger.debug(
+                        f"Extended thinking enabled for {request.model} "
+                        f"with budget_tokens={extra_params['thinking'].get('budget_tokens', 'unlimited')}"
+                    )
+
+                if "reasoning_effort" in extra_params:
+                    if extra_params["reasoning_effort"] == "disabled":
+                        # Thinking explicitly disabled — inject extra_body for API
+                        existing_body = kwargs.get("extra_body") or {}
+                        kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
+                        logger.debug(f"Thinking explicitly disabled for {request.model}")
+                    elif supports_re:
+                        # Model supports reasoning_effort as a direct kwarg
+                        re_val = _resolve_reasoning_effort_value(
+                            extra_params["reasoning_effort"], provider, api_model
+                        )
+                        kwargs["reasoning_effort"] = re_val
+                        if "temperature" in kwargs:
+                            del kwargs["temperature"]
+                        if "top_p" in kwargs:
+                            del kwargs["top_p"]
+                        logger.debug(
+                            f"Reasoning effort set to '{re_val}' for {request.model} (provider={provider.value})"
+                        )
+                    else:
+                        # Model does NOT support reasoning_effort — do not pass it.
+                        # Do NOT remove temperature/top_p (model uses them normally).
+                        logger.debug(
+                            f"reasoning_effort='{extra_params['reasoning_effort']}' NOT supported "
+                            f"by {request.model} (provider={provider.value}); skipped"
+                        )
+
+            # === Handle user's global reasoning_effort ===
+            try:
+                user_reasoning_effort = cfg.get_user_reasoning_effort()
+                if user_reasoning_effort and user_reasoning_effort != "none" and "reasoning_effort" not in extra_params:
+                    if not is_intermediate and supports_re:
+                        re_val = _resolve_reasoning_effort_value(
+                            user_reasoning_effort, provider, api_model
+                        )
+                        kwargs["reasoning_effort"] = re_val
+                        if "temperature" in kwargs:
+                            del kwargs["temperature"]
+                        if "top_p" in kwargs:
+                            del kwargs["top_p"]
+                        logger.debug(f"User reasoning_effort '{re_val}' applied to {request.model} (provider={provider.value})")
+                    elif not is_intermediate and not supports_re:
+                        logger.debug(
+                            f"User reasoning_effort '{user_reasoning_effort}' NOT supported by "
+                            f"{request.model} (provider={provider.value}); skipped"
+                        )
+            except Exception:
+                pass
+
+            # === GLM glm-5-turbo thinking:disabled (for speed) when no reasoning_effort is active ===
+            try:
+                re_active = "reasoning_effort" in kwargs
+                is_glm_turbo = api_model == "glm-5-turbo"
+                if is_glm_turbo and not re_active:
+                    existing_body = kwargs.get("extra_body") or {}
+                    if "thinking" not in existing_body:
+                        kwargs["extra_body"] = {**existing_body, "thinking": {"type": "disabled"}}
+                        logger.debug(f"GLM glm-5-turbo: thinking disabled (no reasoning_effort active) for {request.model}")
+            except Exception:
+                pass
+
+            # === Add tools if specified ===
+            if request.tools:
+                kwargs["tools"] = request.tools
+                if request.tool_choice:
+                    kwargs["tool_choice"] = request.tool_choice
+
+            # === OpenRouter-specific headers ===
+            if provider == APIProvider.OPENROUTER:
+                kwargs["extra_headers"] = {
+                    "HTTP-Referer": "https://ai-code-agent.local",
+                    "X-Title": "AI Code Agent",
+                }
+
+            # === Preserve reasoning_details and thought_signature in assistant messages ===
+            for msg in kwargs.get("messages", []):
+                if msg.get("role") == "assistant":
+                    if "reasoning_details" in msg:
+                        logger.debug(
+                            f"Preserving reasoning_details in assistant message "
+                            f"({len(msg['reasoning_details'])} items)"
+                        )
+                    if msg.get("tool_calls") and "thought_signature" in msg:
+                        logger.debug(
+                            f"Preserving thought_signature in assistant message with tool_calls"
+                        )
+                    if "tool_calls" in msg:
+                        for tc in msg["tool_calls"]:
+                            if "extra_content" in tc:
+                                logger.debug(
+                                    f"Preserving extra_content in tool_call {tc.get('id', 'unknown')}"
+                                )
+
+            # === DeepSeek-specific message handling ===
+            if provider == APIProvider.DEEPSEEK:
+                for msg in kwargs.get("messages", []):
+                    if msg.get("role") == "assistant":
+                        if "reasoning_content" not in msg:
+                            msg["reasoning_content"] = msg.get("content") or ""
+                        if msg.get("content") is None:
+                            msg["content"] = ""
+
+            return kwargs
+
+    def _map_sdk_exception(self, e: Exception) -> Exception:
+            """Map OpenAI SDK exceptions to the canonical retry/error hierarchy."""
+            # HOTFIX (C): APITimeoutError is a SUBCLASS of APIConnectionError!
+            # Must be caught FIRST to route timeouts to LLMTimeoutError
+            # (separate retry cap = TIMEOUT_MAX_RETRIES) instead of generic
+            # RetryableError (which uses MAX_RETRIES = 4).
+            if isinstance(e, openai_sdk.RateLimitError):
+                return RateLimitError(str(e))
+
+            if isinstance(e, openai_sdk.APITimeoutError):
+                return LLMTimeoutError(str(e))
+
+            if isinstance(e, openai_sdk.APIConnectionError):
+                return RetryableError(str(e))
+
+            if isinstance(e, openai_sdk.APIStatusError):
+                status_code = e.status_code
+
+                # Task 3: status-code classification FIRST (before text
+                # heuristics) — Cloudflare 520-526 and 504 were previously
+                # misclassified as fatal because their text bodies
+                # ("Origin Error", "Web server is down") didn't match
+                # RETRYABLE_ERROR_PATTERNS.
+                if status_code == 429:
+                    return RateLimitError(str(e))
+
+                if status_code in RETRYABLE_5XX_STATUS_CODES:
+                    diag = _extract_5xx_diagnostics(e)
+                    # Diagnostic logging for incident triage: cf-ray identifies
+                    # the exact CF edge node, cf-placement shows the PoP,
+                    # retry-after hints the backoff, body_preview shows the
+                    # actual upstream error (often text/plain, no JSON).
+                    logger.error(
+                        f"5xx retryable from provider: "
+                        f"status={status_code} "
+                        f"cf-ray={diag.get('cf-ray')} "
+                        f"cf-placement={diag.get('cf-placement')} "
+                        f"server={diag.get('server')} "
+                        f"retry-after={diag.get('retry-after')} "
+                        f"body_preview={diag.get('body_preview', '')!r}"
+                    )
+                    return RetryableError(
+                        str(e),
+                        status_code=status_code,
+                        retry_after=diag.get("retry-after-seconds"),
+                    )
+
+                # Non-5xx: fall back to text-based classification (unchanged)
+                error_text = str(e)
+                error_type = classify_error(error_text)
+                if error_type == "rate_limit":
+                    return RateLimitError(error_text)
+                elif error_type == "context_overflow":
+                    return ContextOverflowError(error_text)
+                elif error_type == "message_structure":
+                    return MessageStructureError(error_text)
+                elif error_type == "retryable":
+                    return RetryableError(error_text)
+                else:
+                    return LLMAPIError(error_text, error_type="fatal")
+
+            return LLMAPIError(str(e), error_type="fatal")
+
 
 
 # ============== CONVENIENCE FUNCTIONS =============
@@ -1262,6 +1548,8 @@ async def call_llm(
     max_tokens: Optional[int] = 4000,
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
+    on_delta: Optional[Callable[[str], None]] = None,
+    on_reasoning_delta: Optional[Callable[[str], None]] = None,
     **kwargs
 ) -> str:
     """
@@ -1273,6 +1561,8 @@ async def call_llm(
             compressor, etc.) and the user's global reasoning_effort is NOT applied.
             If False (default), this is a user-facing role (Orchestrator / Pre-filter /
             Tester / Code Generator) and the global reasoning_effort IS applied.
+        on_delta: Optional streaming callback invoked for each content delta.
+        on_reasoning_delta: Optional streaming callback invoked for reasoning deltas.
 
     Returns:
         Response content as string
@@ -1285,9 +1575,12 @@ async def call_llm(
         max_tokens=max_tokens,
         preferred_provider=preferred_provider,
         is_intermediate=is_intermediate,
+        on_delta=on_delta,
+        on_reasoning_delta=on_reasoning_delta,
         **kwargs
     )
     return response.content
+
 
 
 async def call_llm_full(
@@ -1297,6 +1590,8 @@ async def call_llm_full(
     max_tokens: Optional[int] = 4000,
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
+    on_delta: Optional[Callable[[str], None]] = None,
+    on_reasoning_delta: Optional[Callable[[str], None]] = None,
     **kwargs
 ) -> LLMResponse:
     """
@@ -1314,6 +1609,8 @@ async def call_llm_full(
     Args:
         preferred_provider: Optional preferred provider name forwarded to the client.
         is_intermediate: See call_llm() docstring.
+        on_delta: Optional streaming callback invoked for each content delta.
+        on_reasoning_delta: Optional streaming callback invoked for reasoning deltas.
 
     Returns:
         LLMResponse object with all metadata
@@ -1326,9 +1623,12 @@ async def call_llm_full(
         max_tokens=max_tokens,
         preferred_provider=preferred_provider,
         is_intermediate=is_intermediate,
+        on_delta=on_delta,
+        on_reasoning_delta=on_reasoning_delta,
         **kwargs
     )
     return response
+
 
 
 async def call_llm_with_tools(
@@ -1340,6 +1640,8 @@ async def call_llm_with_tools(
     tool_choice: str = "auto",
     preferred_provider: Optional[str] = None,
     is_intermediate: bool = False,
+    on_delta: Optional[Callable[[str], None]] = None,
+    on_reasoning_delta: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
     Call LLM with tool support.
@@ -1347,6 +1649,8 @@ async def call_llm_with_tools(
     Args:
         preferred_provider: Optional preferred provider name forwarded to the client.
         is_intermediate: See call_llm() docstring.
+        on_delta: Optional streaming callback invoked for each content delta.
+        on_reasoning_delta: Optional streaming callback invoked for reasoning deltas.
 
     Returns:
         Dict with 'content', 'tool_calls', 'reasoning_content',
@@ -1361,8 +1665,10 @@ async def call_llm_with_tools(
         max_tokens=max_tokens,
         tool_choice=tool_choice,
         preferred_provider=preferred_provider,
-        is_intermediate=is_intermediate,
-    )
+            is_intermediate=is_intermediate,
+            on_delta=on_delta,
+            on_reasoning_delta=on_reasoning_delta,
+            )
     return {
         "content": response.content,
         "tool_calls": response.tool_calls,
@@ -1371,6 +1677,7 @@ async def call_llm_with_tools(
         "reasoning_details": response.reasoning_details,
         "raw_response": response.raw_response,
     }
+
 
 
 # ============== MODEL HELPERS =============
@@ -1565,3 +1872,41 @@ def is_message_structure_error(error: Exception) -> bool:
         if pattern in error_str:
             return True
     return False
+
+
+# [MOVED] — the active copy of should_stream now lives directly above class LLMClient:.
+# def should_stream(provider, api_model, tools_present: bool) -> bool:
+#     """Determine whether an SSE streaming call is safe for the given model.
+#
+#     Gemini reasoning-signature models need the full non-streaming response so
+#     their ``thought_signature`` / ``reasoning_details`` round-trip is available
+#     when tools are used. Any None/empty inputs are treated as streamable.
+#     """
+#     if not tools_present:
+#         return True
+#     try:
+#         if api_model and cfg.is_model(api_model, cfg.MODEL_GEMINI_3_PRO):
+#             return False
+#     except Exception:
+#         # Defensive: if model matching is unavailable, prefer the streaming path.
+#         pass
+#     return True
+
+
+
+def should_stream(provider, api_model, tools_present: bool) -> bool:
+    """Determine whether an SSE streaming call is safe for the given model.
+
+    Gemini reasoning-signature models need the full non-streaming response so
+    their ``thought_signature`` / ``reasoning_details`` round-trip is available
+    when tools are used. Any None/empty inputs are treated as streamable.
+    """
+    if not tools_present:
+        return True
+    try:
+        if api_model and cfg.is_model(api_model, cfg.MODEL_GEMINI_3_PRO):
+            return False
+    except Exception:
+        # Defensive: if model matching is unavailable, prefer the streaming path.
+        pass
+    return True

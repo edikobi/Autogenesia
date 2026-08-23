@@ -1663,9 +1663,10 @@ async def orchestrate_agent(
     tool_executor: Optional[Callable] = None,
     is_new_project: bool = False,
     prefilter_advice: str = "",
-    preferred_provider: Optional[str] = None,
-    virtual_fs: Optional[Any] = None,
-) -> OrchestratorResult:
+        preferred_provider: Optional[str] = None,
+        virtual_fs: Optional[Any] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> OrchestratorResult:
     """
     Agent Mode orchestration with automatic context compression.
     
@@ -1781,7 +1782,7 @@ async def orchestrate_agent(
                     f"{compression_result.compressed_tokens} tokens"
                 )
             
-            # === LLM call with error handling ===
+# === LLM call with error handling ===
             try:
                 response = await call_llm_with_tools(
                     model=orchestrator_model,
@@ -1791,6 +1792,7 @@ async def orchestrate_agent(
                     max_tokens=55000,
                     tool_choice="auto",
                     preferred_provider=preferred_provider,
+                    on_delta=on_token,
                 )
             except Exception as e:
                 # Check for context overflow (reactive compression for all models)
@@ -1799,7 +1801,7 @@ async def orchestrate_agent(
                     messages, emergency_result = await compressor.emergency_compress(messages)
                     logger.info(f"Emergency: {emergency_result.original_tokens} → {emergency_result.compressed_tokens} tokens")
                     
-                    # Retry after compression
+# Retry after compression
                     response = await call_llm_with_tools(
                         model=orchestrator_model,
                         messages=messages,
@@ -1808,6 +1810,7 @@ async def orchestrate_agent(
                         max_tokens=55000,
                         tool_choice="auto",
                         preferred_provider=preferred_provider,
+                        on_delta=on_token,
                     )
                 else:
                     raise
@@ -2007,6 +2010,7 @@ async def orchestrate_agent(
                 temperature=0,
                 max_tokens=55000,
                 preferred_provider=preferred_provider,
+                on_delta=on_token,
             )
             content = final_content
             logger.info("Agent Mode: Received final response")
@@ -2019,6 +2023,7 @@ async def orchestrate_agent(
                     temperature=0,
                     max_tokens=55000,
                     preferred_provider=preferred_provider,
+                    on_delta=on_token,
                 )
                 content = final_content
             else:

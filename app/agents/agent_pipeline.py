@@ -712,6 +712,7 @@ class AgentPipeline:
         self._on_tool_call: Optional[OnToolCallCallback] = None
         self._on_validation: Optional[OnValidationCallback] = None
         self._on_status: Optional[OnStatusCallback] = None
+        self._on_token: Optional[Callable[[str], None]] = None
         
         self._on_stage: Optional[Callable] = None
         self._on_user_decision: Optional[Callable] = None
@@ -848,8 +849,9 @@ class AgentPipeline:
             on_status: Optional[OnStatusCallback] = None,
             on_stage: Optional[OnStageCallback] = None,
             on_user_decision: Optional[OnUserDecisionCallback] = None,
-            prefilter_advice: str = "",
-        ) -> PipelineResult:
+                on_token: Optional[Callable[[str], None]] = None,
+                prefilter_advice: str = "",
+            ) -> PipelineResult:
             """
             Process a user request through the complete pipeline with feedback loops.
         
@@ -880,6 +882,7 @@ class AgentPipeline:
             self._on_status = on_status
             self._on_stage = on_stage
             self._on_user_decision = on_user_decision
+            self._on_token = on_token
             self._prefilter_advice = prefilter_advice
         
             # Initialize result
@@ -3676,6 +3679,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             tester_model: Optional[str] = None,
             tester_provider: Optional[str] = None,
             on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
+            on_token: Optional[Callable[[str], None]] = None,
         ) -> Optional['TesterReport']:
             """
             Run the TesterAgent to independently verify the staged code changes.
@@ -3709,10 +3713,11 @@ Remember: You can override the validator if you believe the critique is incorrec
                     user_additional_input=user_additional_input,
                     project_python_path=self._project_python_path,
                     on_tool_call=on_tool_call,
+                    on_token=(on_token if on_token is not None else self._on_token),
                 )
 
                 self._tester_agent = agent
-                
+
                 # === Monkey-patch: перехватываем execute без изменения исходного класса ===
                 from app.tools.tester_tool_executor import TesterToolExecutor
                 _original_execute = TesterToolExecutor.execute
@@ -3873,9 +3878,10 @@ Remember: You can override the validator if you believe the critique is incorrec
             index=self.project_index,
             project_map=project_map,
             tool_executor=tool_executor_with_callbacks,
-            prefilter_advice=prefilter_advice,
-            preferred_provider=effective_provider,
-        )
+                prefilter_advice=prefilter_advice,
+                preferred_provider=effective_provider,
+                on_token=self._on_token,
+            )
         
         # Report thinking
         for tc in result.tool_calls:
@@ -3937,11 +3943,12 @@ Remember: You can override the validator if you believe the critique is incorrec
         
             # Initial call
             blocks, raw_response = await generate_code_agent_mode(
-                instruction=instruction,
-                file_contents=file_contents,
-                model=self._generator_model,
-                preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
-            )
+                            instruction=instruction,
+                            file_contents=file_contents,
+                            model=self._generator_model,
+                            preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
+                            on_token=self._on_token,
+                        )
         
             # NEW LOGIC: Retry if blocks are empty but instruction requires code
             if not blocks:
@@ -3967,11 +3974,12 @@ Remember: You can override the validator if you believe the critique is incorrec
                     
                         retry_instruction = instruction + "\n\n" + format_reminder
                         blocks, raw_response = await generate_code_agent_mode(
-                            instruction=retry_instruction,
-                            file_contents=file_contents,
-                            model=self._generator_model,
-                            preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
-                        )
+                                                    instruction=retry_instruction,
+                                                    file_contents=file_contents,
+                                                    model=self._generator_model,
+                                                    preferred_provider=self._generator_provider or cfg.get_selected_agent_provider(),
+                                                    on_token=self._on_token,
+                                                )
                     
                         if not blocks:
                             logger.error(f"Code Generator retry also returned no blocks. Instruction: {instruction[:100]}")

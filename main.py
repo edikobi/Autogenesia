@@ -156,7 +156,7 @@ console_handler.setFormatter(log_formatter)
 
 # Корневой логгер
 # ai_error_handler добавлен сюда — теперь ЛЮБОЙ logger.error() из любого модуля
-# (api_client.py, orchestrator.py, code_generator.py, pre_filter.py, tester.py)
+# (включая api_client.py с HTTP 500, orchestrator.py, code_generator.py)
 # автоматически попадает и в agent_YYYYMMDD.log, и в ai_errors_YYYYMMDD.log.
 logging.basicConfig(
     level=logging.DEBUG,
@@ -1394,6 +1394,7 @@ async def run_prefilter_analysis(
         
         llm_start = _time.time()
         
+        on_token_callback = make_on_token_callback("🔬 Pre-filter")
         with console.status(f"[bold cyan]🔬 Pre-filter анализ ({model_display})...[/]"):
             advice = await analyze_query(
                 user_query=user_query,
@@ -1407,7 +1408,8 @@ async def run_prefilter_analysis(
                 is_new_project=is_new_project,
                 on_tool_call=on_tool_call,
                 preferred_provider=resolved_provider,
-            )        
+                on_token=on_token_callback,
+            )
         llm_elapsed = _time.time() - llm_start
         
         # =====================================================================
@@ -5599,17 +5601,18 @@ async def handle_agent_mode(query: str):
         log_pipeline_stage("PIPELINE_RUN", "Starting pipeline")
         
         result = await state.pipeline.process_request(
-            user_request=query,
-            history=history,
-            mode=PipelineMode.AGENT,
-            on_thinking=on_thinking_callback,
-            on_tool_call=on_tool_call_callback,
-            on_validation=on_validation_callback,
-            on_status=on_status_callback,
-            on_stage=on_stage_callback,
-            on_user_decision=on_user_decision_callback,
-            prefilter_advice=prefilter_advice_str,
-        )
+                    user_request=query,
+                    history=history,
+                    mode=PipelineMode.AGENT,
+                    on_thinking=on_thinking_callback,
+                    on_tool_call=on_tool_call_callback,
+                    on_validation=on_validation_callback,
+                    on_status=on_status_callback,
+                    on_stage=on_stage_callback,
+                    on_user_decision=on_user_decision_callback,
+                    on_token=make_on_token_callback("🤖 Агент"),
+                    prefilter_advice=prefilter_advice_str,
+                )
         
         log_pipeline_stage("PIPELINE_RESULT", f"Completed: {result.status.value}", {
             "success": result.success,
@@ -6163,6 +6166,8 @@ async def handle_agent_mode(query: str):
                     tester_model=tester_model,
                     tester_provider=tester_provider,
                     on_tool_call=_tester_streaming_handler,
+
+                    on_token=make_on_token_callback("🧪 Тестировщик"),
                 )                
                 
                 if report and report.success and report.translated_report:
@@ -8167,6 +8172,30 @@ def _tester_streaming_handler(name: str, args: Dict[str, Any], result_preview: s
     console.print(f"   [cyan]🧪 Tester:[/] {icon} [bold]{name}[/]([dim]{args_str}[/]) -> {status}")
 
 
+
+
+
+def make_on_token_callback(prefix: str = "") -> Callable[[str], None]:
+    """Return a callback that renders SSE text deltas incrementally.
+
+    The callback is safe for non-TTY terminals and never lets a UI error
+    propagate back into the generation loop.
+    """
+    first_token = True
+
+    def _on_token(delta: str) -> None:
+        """Print a single streamed token delta."""
+        nonlocal first_token
+        try:
+            if first_token:
+                if prefix:
+                    console.print(f"\n[bold cyan]{prefix}[/] ", end="")
+                first_token = False
+            print(delta, end="", flush=True)
+        except Exception as e:
+            logger.warning(f"on_token callback error: {e}")
+
+    return _on_token
 
 
 if __name__ == "__main__":

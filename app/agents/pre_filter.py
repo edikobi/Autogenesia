@@ -272,8 +272,9 @@ async def analyze_query(
     is_planning: bool = False,
     is_new_project: bool = False,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
-    preferred_provider: Optional[str] = None,
-) -> PreFilterAdvice:
+        preferred_provider: Optional[str] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> PreFilterAdvice:
     """Анализирует запрос пользователя и готовит рекомендации для Оркестратора.
 
     Args:
@@ -337,12 +338,13 @@ async def analyze_query(
         if mode == PreFilterMode.NORMAL:
             # Обычный режим - без инструментов
             raw_response = await call_llm(
-                model=model,
-                messages=messages,
-                temperature=0,
-                max_tokens=30000,
-                preferred_provider=model_provider,
-            )
+                            model=model,
+                            messages=messages,
+                            temperature=0,
+                            max_tokens=30000,
+                            preferred_provider=model_provider,
+                            on_delta=on_token,
+                        )
             
             elapsed = time.time() - start_time
             logger.info(f"[PRE-FILTER] LLM response received in {elapsed:.1f}s, length={len(raw_response)} chars")
@@ -358,13 +360,14 @@ async def analyze_query(
             if is_planning:
                 # Режим планирования: используем run_planning_loop
                 final_response, tool_calls_made, final_model = await run_planning_loop(
-                    messages=messages,
-                    model=model,
-                    tool_executor=tool_executor,
-                    max_tool_calls=50,
-                    on_tool_call=on_tool_call,
-                    preferred_provider=model_provider,
-                )
+                                    messages=messages,
+                                    model=model,
+                                    tool_executor=tool_executor,
+                                    max_tool_calls=50,
+                                    on_tool_call=on_tool_call,
+                                    preferred_provider=model_provider,
+                                    on_token=on_token,
+                                )
                 elapsed = time.time() - start_time
                 logger.info(f"[PRE-FILTER] Planning mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
                 
@@ -386,12 +389,14 @@ async def analyze_query(
             else:
                 # Обычный продвинутый режим
                 final_response, tool_calls_made, final_model = await _run_advanced_prefilter(
-                    messages=messages,
-                    model=model,
-                    tool_executor=tool_executor,
-                    max_tool_calls=10,
-                    on_tool_call=on_tool_call,
-                )
+                                    messages=messages,
+                                    model=model,
+                                    tool_executor=tool_executor,
+                                    max_tool_calls=10,
+                                    on_tool_call=on_tool_call,
+                                    preferred_provider=model_provider,
+                                    on_token=on_token,
+                                )
                 
                 elapsed = time.time() - start_time
                 logger.info(f"[PRE-FILTER] Advanced mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
@@ -449,7 +454,9 @@ async def _run_advanced_prefilter(
     tool_executor: ToolExecutor,
     max_tool_calls: int = 10,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
-) -> tuple:
+        on_token: Optional[Callable[[str], None]] = None,
+        preferred_provider: Optional[str] = None,
+    ) -> tuple:
     """Запускает продвинутый режим Pre-filter с доступом к инструментам.
 
     Args:
@@ -473,13 +480,14 @@ async def _run_advanced_prefilter(
         while tool_calls_count < max_tool_calls:
             # Вызвать LLM с инструментами
             response = await call_llm_with_tools(
-                model=model,
-                messages=messages,
-                tools=available_tools,
-                temperature=0,
-                max_tokens=55000,
-                preferred_provider=model_provider,
-            )
+                            model=model,
+                            messages=messages,
+                            tools=available_tools,
+                            temperature=0,
+                            max_tokens=55000,
+                            preferred_provider=preferred_provider,
+                            on_delta=on_token,
+                        )
             
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
@@ -550,12 +558,13 @@ async def _run_advanced_prefilter(
         })
         
         final_response = await call_llm(
-            model=model,
-            messages=messages,
-            temperature=0,
-            max_tokens=55000,
-            preferred_provider=model_provider,
-        )
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=55000,
+                    preferred_provider=preferred_provider,
+                    on_delta=on_token,
+                )
         
         return final_response, tool_calls_count, model
     
@@ -598,8 +607,9 @@ async def run_planning_loop(
     tool_executor: ToolExecutor,
     max_tool_calls: int = 50,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
-    preferred_provider: Optional[str] = None,
-) -> tuple:
+        preferred_provider: Optional[str] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> tuple:
     """Запускает продвинутый цикл планирования с graceful degradation.
 
     Provider-aware model selection is used; no hardcoded fallback models.
@@ -618,13 +628,14 @@ async def run_planning_loop(
 
         while tool_calls_count < max_tool_calls:
             response = await call_llm_with_tools(
-                model=current_model,
-                messages=messages,
-                tools=available_tools,
-                temperature=0,
-                max_tokens=55000,
-                preferred_provider=preferred_provider,
-            )
+                            model=current_model,
+                            messages=messages,
+                            tools=available_tools,
+                            temperature=0,
+                            max_tokens=55000,
+                            preferred_provider=preferred_provider,
+                            on_delta=on_token,
+                        )
 
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
@@ -692,12 +703,13 @@ async def run_planning_loop(
         })
 
         final_response = await call_llm(
-            model=current_model,
-            messages=messages,
-            temperature=0,
-            max_tokens=55000,
-            preferred_provider=preferred_provider,
-        )
+                    model=current_model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=55000,
+                    preferred_provider=preferred_provider,
+                    on_delta=on_token,
+                )
 
         return (final_response, tool_calls_count, current_model)
 
@@ -753,7 +765,8 @@ async def pre_filter_chunks(
     # Forwarded to _call_prefilter_llm → get_orchestrator_model_for_agent.
     # None falls back to cfg.get_selected_agent_provider() (background default).
     preferred_provider: Optional[str] = None,
-) -> PreFilterResult:
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> PreFilterResult:
     """
     Selects top N most relevant AST chunks from project index.
     
@@ -947,12 +960,13 @@ async def pre_filter_chunks(
     
     # STEP 4: Call LLM with actual code
     selected_ids = await _call_prefilter_llm(
-        user_query=user_query,
-        chunks_with_code=chunks_for_llm,
-        project_map_str=project_map_str,
-        max_chunks=max_chunks,
-        preferred_provider=preferred_provider,
-    )
+            user_query=user_query,
+            chunks_with_code=chunks_for_llm,
+            project_map_str=project_map_str,
+            max_chunks=max_chunks,
+            preferred_provider=preferred_provider,
+            on_token=on_token,
+        )
     
     # STEP 5: If LLM selection failed, use fallback
     if not selected_ids:
@@ -1294,7 +1308,8 @@ async def _call_prefilter_llm(
     # [NEW] Per-role provider chosen together with the pre-filter model.
     # None falls back to cfg.get_selected_agent_provider() (background default).
     preferred_provider: Optional[str] = None,
-) -> List[Dict]:
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> List[Dict]:
     """
     Call Pre-filter LLM with actual code.
     
@@ -1328,12 +1343,13 @@ async def _call_prefilter_llm(
     
     try:
         response = await call_llm(
-            model=model,
-            messages=messages,
-            temperature=0,
-            max_tokens=55000,
-            preferred_provider=model_provider,
-        )
+                    model=model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=55000,
+                    preferred_provider=model_provider,
+                    on_delta=on_token,
+                )
         
         if not response or not response.strip():
             logger.warning("Pre-filter: empty LLM response")

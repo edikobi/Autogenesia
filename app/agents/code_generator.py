@@ -22,7 +22,7 @@ import logging
 import re
 from app.services.file_modifier import ParsedCodeBlock
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 from config.settings import cfg
 from app.llm.api_client import call_llm, get_model_for_role, ServerOverloadError
@@ -700,7 +700,8 @@ async def generate_code_agent_mode(
     temperature: float = 0.2,
     max_tokens: Optional[int] = 110000,
     preferred_provider: Optional[str] = None,
-) -> tuple[List[ParsedCodeBlock], str]:
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> tuple[List[ParsedCodeBlock], str]:
     """
     Generate code in Agent Mode with CODE_BLOCK output.
     
@@ -785,12 +786,13 @@ async def generate_code_agent_mode(
         try:
             # Call LLM
             response = await call_llm(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                preferred_provider=preferred_provider,
-            )
+                            model=model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            preferred_provider=preferred_provider,
+                            on_delta=on_token,
+                        )
             
             logger.info(f"Code Generator (Agent Mode): received response ({len(response)} chars)")
             
@@ -1631,26 +1633,31 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
     - FIELD:value
     - **FIELD:** value (markdown bold)
     
-    Для REPLACE_PATTERN дополнительно поддерживает многострочные значения:
-    захват продолжается до следующего поля или начала code fence.
+    Для REPLACE_PATTERN, INSERT_AFTER, INSERT_BEFORE дополнительно
+    поддерживает многострочные значения: захват продолжается до
+    следующего поля или начала code fence.
     """
-    # === REPLACE_PATTERN: многострочный захват ===
-    if field_name.upper() == "REPLACE_PATTERN":
-        # Поля, которые могут следовать после REPLACE_PATTERN в CODE_BLOCK
+    # Поля, которые могут быть многострочными
+    _MULTILINE_FIELDS = {'REPLACE_PATTERN', 'INSERT_AFTER', 'INSERT_BEFORE'}
+    
+    # === Многострочный захват для указанных полей ===
+    if field_name.upper() in _MULTILINE_FIELDS:
+        # Поля, которые могут следовать после данного в CODE_BLOCK
         _KNOWN_FIELDS = (
             'FILE', 'MODE', 'TARGET_CLASS', 'TARGET_METHOD', 'TARGET_FUNCTION',
             'TARGET_ATTRIBUTE', 'INSERT_AFTER', 'INSERT_BEFORE',
             'INSERT_AFTER_TARGET', 'INSERT_BEFORE_TARGET',
-            'REPLACE_PATTERN_LINE',
+            'REPLACE_PATTERN', 'REPLACE_PATTERN_LINE',
         )
         _fields_alt = '|'.join(re.escape(f) for f in _KNOWN_FIELDS)
-        # Захватываем всё после "REPLACE_PATTERN:" до:
+        # Захватываем всё после "FIELD:" до:
         # - строки, начинающейся с известного поля и ":"
         # - строки, начинающейся с ``` (code fence)
         # - маркера ### END_CODE_BLOCK
         # - конца блока
+        _escaped_field = re.escape(field_name)
         _ml_pattern = (
-            rf'^REPLACE_PATTERN:\s*'
+            rf'^{_escaped_field}:\s*'
             rf'(.*?)'
             rf'(?=\n(?:{_fields_alt})\s*:|\n```|\n###\s*END_CODE_BLOCK|\Z)'
         )
@@ -1681,8 +1688,8 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
             value = match.group(1).strip()
             value = value.strip('`')
             
-            # Декодируем литеральный \n для многострочных паттернов
-            if field_name.upper() == "REPLACE_PATTERN" and '\\n' in value:
+            # Декодируем литеральный \n для многострочных полей
+            if field_name.upper() in _MULTILINE_FIELDS and '\\n' in value:
                 value = value.replace('\\n', '\n')
             
             return value
