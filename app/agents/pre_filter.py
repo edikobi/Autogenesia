@@ -18,6 +18,7 @@ import logging
 import re
 import sys
 import time
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
@@ -509,7 +510,7 @@ async def _run_advanced_prefilter(
                 
                 try:
                     # ToolExecutor.execute() — СИНХРОННЫЙ метод
-                    result = _execute_prefilter_tool(tool_executor, func_name, func_args)
+                    result = await asyncio.to_thread(_execute_prefilter_tool, tool_executor, func_name, func_args)
                     tool_calls_count += 1
                     success = True
                 except Exception as e:
@@ -660,7 +661,7 @@ async def run_planning_loop(
                 func_name, func_args, tc_id = parse_tool_call(tc)
 
                 try:
-                    result = _execute_prefilter_tool(tool_executor, func_name, func_args)
+                    result = await asyncio.to_thread(_execute_prefilter_tool, tool_executor, func_name, func_args)
                     tool_calls_count += 1
                     success = True
                 except Exception as e:

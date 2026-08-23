@@ -21,6 +21,8 @@ import logging
 import time
 import random
 import hashlib
+import ssl
+import certifi
 from typing import Callable, List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,13 +38,36 @@ logger = logging.getLogger(__name__)
 
 # ============== CONSTANTS =============
 # HOTFIX (A): httpx.Timeout instead of float — float(120.0) was overriding ALL
+# Extended read timeout for reasoning/thinking calls (reasoning_effort=max
+# can take 300–700s on server side).
 # 4 phases (connect/read/write/pool) to 120s, causing ReadTimeout on reasoning
 # models that generate 300–700s. Now: read=600s covers normal generation,
 # connect=10s fails fast on network issues.
-REQUEST_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
-# Extended read timeout for reasoning/thinking calls (reasoning_effort=max
-# can take 300–700s on server side).
-REASONING_REQUEST_TIMEOUT = httpx.Timeout(900.0, connect=10.0)
+# ============== CONSTANTS =============
+# Явное разделение таймаутов по фазам:
+# - connect=30.0 : 30 сек на TCP+TLS рукопожатие с Cloudflare (хватит для любого региона).
+# - read=1200.0  : 20 минут ожидания между чанками (для моделей с reasoning_effort=max,
+#                  генерирующих огромный код или долго думающих перед первым токеном).
+# - write=120.0  : 2 минуты на отправку огромного промпта (1M контекст).
+# - pool=30.0    : 30 сек ожидания свободного сокета из пула.
+REQUEST_TIMEOUT = httpx.Timeout(
+    timeout=1200.0,
+    connect=30.0,
+    read=1200.0,
+    write=120.0,
+    pool=30.0
+)
+
+# Расширенный таймаут для reasoning/thinking моделей (до 30 минут ожидания данных).
+# reasoning_effort=max может уходить в глубокие размышления на 10-15 минут.
+REASONING_REQUEST_TIMEOUT = httpx.Timeout(
+    timeout=1800.0,
+    connect=30.0,
+    read=1800.0,
+    write=120.0,
+    pool=30.0
+)
+
 
 # HOTFIX (D): 8→4 + capped backoff to break the ~52min cascade.
 MAX_RETRIES = 2
@@ -87,27 +112,21 @@ def _client_cache_key(base_url: str, api_key: str) -> Tuple[str, str]:
 
 
 def _get_shared_http_client(base_url: str, api_key: str) -> httpx.AsyncClient:
-    """Return a shared httpx.AsyncClient for the (base_url, api_key) pair.
-
-    Single pool per provider. Reused across:
-      - All retries inside _execute_with_retry (same TLS session)
-      - All agent calls (Orchestrator/Generator/Validator share TLS sessions)
-      - Consecutive requests from same provider in the pipeline
-
-    HTTP/1.1 is preserved (h2 package intentionally not installed — Cloudflare
-    and OpenAI-compatible gateways fully support HTTP/1.1).
-    """
+    """Return a shared httpx.AsyncClient for the (base_url, api_key) pair."""
     key = _client_cache_key(base_url, api_key)
     client = _provider_clients.get(key)
     if client is None or client.is_closed:
+        # FIX: Возвращаем стандартное поведение httpx (без явного verify),
+        # чтобы использовать нативный SSLContext, как в старом коде.
         client = httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT,
             limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
-                # Drop idle conns at 30s — well below Cloudflare's ~60s idle drop
-                # so our pool never hands out a half-closed socket.
-                keepalive_expiry=30.0,
+                # FIX: Лимиты уменьшены до 5, чтобы совпадать с CONCURRENT_REQUESTS.
+                # Стриминг удерживает соединения минутами. Если пул попытается открыть
+                # больше 5 соединений, Cloudflare сбросит лишние (BrokenResourceError).
+                max_connections=5,
+                max_keepalive_connections=5,
+                keepalive_expiry=40.0,
             ),
             follow_redirects=True,
         )
@@ -769,11 +788,32 @@ class LLMClient:
                                 error_type="rate_limit"
                             )
 
+                    # Отступы надо лечить, дядя Вова нам поможет
                     except LLMTimeoutError as e:
                         # HOTFIX (C): Separate branch for timeouts.
                         # Retry capped at TIMEOUT_MAX_RETRIES — each timed-out request
                         # may have been billed (server completes generation regardless).
                         timeout_retries += 1
+
+                        # === FIX: Drop stale connection pool on timeout ===
+                        # ConnectTimeout means the socket in the pool is guaranteed
+                        # dead (server never completed TLS handshake).  ReadTimeout
+                        # may also leave the socket in an inconsistent state.
+                        # Removing the client from the pool forces the next retry
+                        # to create a fresh TCP+TLS connection (like curl does).
+                        client_key = _client_cache_key(base_url, api_key)
+                        stale_client = _provider_clients.pop(client_key, None)
+                        if stale_client is not None:
+                            try:
+                                await stale_client.aclose()
+                            except Exception:
+                                pass
+                            logger.warning(
+                                f"Dropped stale httpx pool for {client_key[0]} "
+                                f"(timeout recovery, timeout_retry {timeout_retries})"
+                            )
+                        # ================================================
+
                         if timeout_retries <= TIMEOUT_MAX_RETRIES:
                             logger.error(
                                 f"⏳ Таймаут {timeout_retries}/{TIMEOUT_MAX_RETRIES} "
@@ -792,7 +832,7 @@ class LLMClient:
                                 f"Model was still generating on server. Last error: {e}",
                                 error_type="timeout"
                             )
-
+                            
                     except RetryableError as e:
                         # Task 3: Honour server's Retry-After if provided (Cloudflare
                         # and origin sometimes return this header). Otherwise use
@@ -918,7 +958,7 @@ class LLMClient:
             # === Make API call using OpenAI SDK ===
             try:
                 response = await client.chat.completions.create(**kwargs)
-            except openai_sdk.APIError as e:
+            except (openai_sdk.APIError, httpx.HTTPError) as e:
                 raise self._map_sdk_exception(e)
             return response.model_dump()
 
@@ -976,7 +1016,7 @@ class LLMClient:
                 is_intermediate=is_intermediate,
             )
             kwargs["stream"] = True
-            kwargs["stream_options"] = {"include_usage": True}
+            # надо бы удалить kwargs["stream_options"] = {"include_usage": True}
 
             _extra_body = kwargs.get("extra_body")
             _thinking_cfg = _extra_body.get("thinking") if isinstance(_extra_body, dict) else None
@@ -985,101 +1025,170 @@ class LLMClient:
             if _uses_reasoning:
                 client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
 
-            stream_options_retried = False
+            # Отступы(
+           
+            # ==================================================================
+            # FIXED: Replaced `while True` + quiet retry with a linear
+            # two-attempt flow.  On stream_options 400 the stale pool is
+            # dropped FIRST so the retry uses a fresh TCP+TLS connection
+            # (prevents ConnectTimeout on a half-closed socket).
+            # ==================================================================
 
-            while True:
-                # Re-initialize per-attempt accumulators at the start of every
-                # loop iteration so the stream_options-400 quiet retry always
-                # starts with a fresh accumulation state and can never produce
-                # duplicated fragments in the assembled result.
-                content_parts: List[str] = []
-                reasoning_parts: List[str] = []
-                tool_call_slots: Dict[int, Dict[str, Any]] = {}
-                finish_reason: Optional[str] = None
-                usage: Any = None
-                stream_started = False
-                try:
-                    async with await client.chat.completions.create(**kwargs) as stream:
-                        stream_started = True
-                        async for chunk in stream:
-                            if not chunk.choices:
-                                if getattr(chunk, "usage", None):
-                                    usage = chunk.usage
-                                continue
+            content_parts: List[str] = []
+            reasoning_parts: List[str] = []
+            tool_call_slots: Dict[int, Dict[str, Any]] = {}
+            finish_reason: Optional[str] = None
+            usage: Any = None
+            stream_started = False
 
-                            choice = chunk.choices[0]
-                            delta = getattr(choice, "delta", None)
-                            if delta is None:
-                                continue
-
-                            content_piece = getattr(delta, "content", None) or ""
-                            if content_piece:
-                                content_parts.append(content_piece)
-                                if on_delta is not None:
-                                    try:
-                                        on_delta(content_piece)
-                                    except Exception as cb_err:
-                                        logger.warning(f"on_delta callback failed: {cb_err}")
-
-                            reasoning_piece = getattr(delta, "reasoning_content", None) or ""
-                            if reasoning_piece:
-                                reasoning_parts.append(reasoning_piece)
-                                if on_reasoning_delta is not None:
-                                    try:
-                                        on_reasoning_delta(reasoning_piece)
-                                    except Exception as cb_err:
-                                        logger.warning(f"on_reasoning_delta callback failed: {cb_err}")
-
-                            for tc in getattr(delta, "tool_calls", []) or []:
-                                index = getattr(tc, "index", 0)
-                                slot = tool_call_slots.setdefault(
-                                    index,
-                                    {"id": None, "type": "function", "name": None, "arguments": []},
-                                )
-                                if getattr(tc, "id", None):
-                                    slot["id"] = tc.id
-                                if getattr(tc, "type", None):
-                                    slot["type"] = tc.type
-                                func = getattr(tc, "function", None)
-                                if func is not None:
-                                    if getattr(func, "name", None):
-                                        slot["name"] = func.name
-                                    if getattr(func, "arguments", None):
-                                        slot["arguments"].append(func.arguments)
-
-                            if getattr(choice, "finish_reason", None):
-                                finish_reason = choice.finish_reason
-
-                            if getattr(chunk, "usage", None):
-                                usage = chunk.usage
-                    break
-                except openai_sdk.APIStatusError as e:
-                    if e.status_code == 400 and "stream_options" in str(e).lower() and not stream_options_retried:
-                        # One quiet retry without stream_options for providers that
-                        # do not recognise the parameter.
-                        kwargs.pop("stream_options", None)
-                        stream_options_retried = True
+            async def _consume_stream(stream_obj) -> None:
+                """Consume one SSE stream, populating outer-scope accumulators."""
+                nonlocal finish_reason, usage, stream_started
+                stream_started = True
+                async for chunk in stream_obj:
+                    if not chunk.choices:
+                        if getattr(chunk, "usage", None):
+                            usage = chunk.usage
                         continue
-                    if e.status_code == 400 and not stream_started:
-                        logger.warning(
-                            f"Streaming create failed with 400 for {api_model}, "
-                            f"falling back to non-streaming request: {e}"
+                    choice = chunk.choices[0]
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+
+                    content_piece = getattr(delta, "content", None) or ""
+                    if content_piece:
+                        content_parts.append(content_piece)
+                        if on_delta is not None:
+                            try:
+                                on_delta(content_piece)
+                            except Exception as cb_err:
+                                logger.warning(f"on_delta callback failed: {cb_err}")
+
+                    reasoning_piece = getattr(delta, "reasoning_content", None) or ""
+                    if reasoning_piece:
+                        reasoning_parts.append(reasoning_piece)
+                        if on_reasoning_delta is not None:
+                            try:
+                                on_reasoning_delta(reasoning_piece)
+                            except Exception as cb_err:
+                                logger.warning(f"on_reasoning_delta callback failed: {cb_err}")
+
+                    for tc in getattr(delta, "tool_calls", []) or []:
+                        index = getattr(tc, "index", 0)
+                        slot = tool_call_slots.setdefault(
+                            index,
+                            {"id": None, "type": "function", "name": None, "arguments": []},
                         )
-                        return await self._make_request(
-                            request=request,
-                            provider=provider,
-                            endpoint=endpoint,
-                            api_key=api_key,
-                            extra_params=extra_params,
-                            stripped_model=stripped_model,
-                            base_url=base_url,
-                            is_intermediate=is_intermediate,
-                        )
+                        if getattr(tc, "id", None):
+                            slot["id"] = tc.id
+                        if getattr(tc, "type", None):
+                            slot["type"] = tc.type
+                        func = getattr(tc, "function", None)
+                        if func is not None:
+                            if getattr(func, "name", None):
+                                slot["name"] = func.name
+                            if getattr(func, "arguments", None):
+                                slot["arguments"].append(func.arguments)
+
+                    if getattr(choice, "finish_reason", None):
+                        finish_reason = choice.finish_reason
+                    if getattr(chunk, "usage", None):
+                        usage = chunk.usage
+
+            # ---------- Attempt 1: normal streaming request ----------
+            try:
+                async with await client.chat.completions.create(**kwargs) as stream:
+                    await _consume_stream(stream)
+
+            except openai_sdk.APIStatusError as e:
+                if e.status_code == 400 and "stream_options" in str(e).lower():
+                    # Provider rejected stream_options.
+                    # 1) Drop the stale pool (the 400 may have left the socket
+                    #    half-closed → reusing it causes ConnectTimeout).
+                    # 2) Remove stream_options from kwargs.
+                    # 3) Create a FRESH client on a new connection.
+                    # 4) Retry ONCE (no loop).
+                    logger.warning(
+                        f"stream_options rejected by provider for {api_model}, "
+                        f"resetting pool and retrying without stream_options: {e}"
+                    )
+                    client_key = _client_cache_key(base_url, api_key)
+                    stale_client = _provider_clients.pop(client_key, None)
+                    if stale_client is not None:
+                        try:
+                            await stale_client.aclose()
+                        except Exception:
+                            pass
+
+                    kwargs.pop("stream_options", None)
+
+                    # Fresh client on a new TLS connection
+                    shared_http = _get_shared_http_client(base_url, api_key)
+                    client = AsyncOpenAI(
+                        api_key=api_key,
+                        base_url=base_url,
+                        http_client=shared_http,
+                        timeout=REQUEST_TIMEOUT,
+                        max_retries=0,
+                    )
+                    if _uses_reasoning:
+                        client = client.with_options(timeout=REASONING_REQUEST_TIMEOUT)
+
+                    # Reset accumulators for the clean retry
+                    content_parts.clear()
+                    reasoning_parts.clear()
+                    tool_call_slots.clear()
+                    finish_reason = None
+                    usage = None
+                    stream_started = False
+
+                    # ---------- Attempt 2: retry without stream_options ----------
+                    try:
+                        async with await client.chat.completions.create(**kwargs) as stream:
+                            await _consume_stream(stream)
+                    except openai_sdk.APIStatusError as e2:
+                        if e2.status_code == 400 and not stream_started:
+                            logger.warning(
+                                f"Streaming create failed with 400 for {api_model} "
+                                f"on retry, falling back to non-streaming: {e2}"
+                            )
+                            return await self._make_request(
+                                request=request,
+                                provider=provider,
+                                endpoint=endpoint,
+                                api_key=api_key,
+                                extra_params=extra_params,
+                                stripped_model=stripped_model,
+                                base_url=base_url,
+                                is_intermediate=is_intermediate,
+                            )
+                        raise self._map_sdk_exception(e2)
+                    except openai_sdk.APIError as e2:
+                        raise self._map_sdk_exception(e2)
+
+                elif e.status_code == 400 and not stream_started:
+                    logger.warning(
+                        f"Streaming create failed with 400 for {api_model}, "
+                        f"falling back to non-streaming request: {e}"
+                    )
+                    return await self._make_request(
+                        request=request,
+                        provider=provider,
+                        endpoint=endpoint,
+                        api_key=api_key,
+                        extra_params=extra_params,
+                        stripped_model=stripped_model,
+                        base_url=base_url,
+                        is_intermediate=is_intermediate,
+                    )
+                else:
                     raise self._map_sdk_exception(e)
-                except openai_sdk.APIError as e:
-                    raise self._map_sdk_exception(e)
+
+            except (openai_sdk.APIError, httpx.HTTPError) as e:
+                raise self._map_sdk_exception(e)
 
             content = "".join(content_parts)
+            
             assembled_tool_calls = []
             for index in sorted(tool_call_slots):
                 slot = tool_call_slots[index]
@@ -1524,8 +1633,17 @@ class LLMClient:
                 else:
                     return LLMAPIError(error_text, error_type="fatal")
 
-            return LLMAPIError(str(e), error_type="fatal")
+            # === FIX: Catch raw httpx network/transport errors that OpenAI SDK 
+            # fails to wrap during SSE streaming (e.g., Cloudflare drops idle conns) ===
+            if isinstance(e, httpx.TransportError):
+                if isinstance(e, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+                    return LLMTimeoutError(str(e))
+                return RetryableError(str(e))
 
+            if isinstance(e, httpx.HTTPError):
+                return RetryableError(str(e))
+
+            return LLMAPIError(str(e), error_type="fatal")
 
 
 # ============== CONVENIENCE FUNCTIONS =============

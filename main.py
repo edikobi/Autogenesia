@@ -1395,22 +1395,24 @@ async def run_prefilter_analysis(
         llm_start = _time.time()
         
         on_token_callback = make_on_token_callback("🔬 Pre-filter")
-        with console.status(f"[bold cyan]🔬 Pre-filter анализ ({model_display})...[/]"):
-            advice = await analyze_query(
-                user_query=user_query,
-                project_map=project_map,
-                compact_index=compact_index,
-                project_dir=project_dir,
-                index=project_index,
-                mode=prefilter_mode,
-                model=actual_model,
-                is_planning=is_planning,
-                is_new_project=is_new_project,
-                on_tool_call=on_tool_call,
-                preferred_provider=resolved_provider,
-                on_token=on_token_callback,
-            )
-        llm_elapsed = _time.time() - llm_start
+        # FIX: Убираем console.status (спиннер), так как он перерисовывает экран и ломает
+        # потоковый вывод токенов, вызывая хаотичные переносы строк.
+        console.print(f"\n[bold cyan]🔬 Pre-filter анализ ({model_display})...[/]")
+        advice = await analyze_query(
+            user_query=user_query,
+            project_map=project_map,
+            compact_index=compact_index,
+            project_dir=project_dir,
+            index=project_index,
+            mode=prefilter_mode,
+            model=actual_model,
+            is_planning=is_planning,
+            is_new_project=is_new_project,
+            on_tool_call=on_tool_call,
+            preferred_provider=resolved_provider,
+            on_token=on_token_callback,
+        )
+        llm_elapsed = _time.time() - llm_start        
         
         # =====================================================================
         # ЛОГИРОВАНИЕ РЕЗУЛЬТАТА
@@ -4491,6 +4493,8 @@ async def handle_ask_mode(query: str):
             
             console.print("\n[dim]⏳ Оркестратор анализирует запрос...[/]")
             
+            orchestrator_token_callback = make_on_token_callback("🤖 Оркестратор")
+            
             if use_agent_orchestrator:
                 orchestrator_result = await orchestrate_agent(
                     user_query=query,
@@ -4504,6 +4508,7 @@ async def handle_ask_mode(query: str):
                     is_new_project=state.is_new_project,
                     prefilter_advice=prefilter_advice_str,
                     preferred_provider=preferred_provider,
+                    on_token=orchestrator_token_callback,
                 )
             else:
                 orchestrator_result = await orchestrate(
@@ -4517,8 +4522,9 @@ async def handle_ask_mode(query: str):
                     project_map=project_map,
                     prefilter_advice=prefilter_advice_str,
                     preferred_provider=preferred_provider,
+                    on_token=orchestrator_token_callback,
                 )
-                            
+              
             trace_stage("ORCHESTRATOR_COMPLETE", {
                 "analysis_length": len(orchestrator_result.analysis) if orchestrator_result.analysis else 0,
                 "instruction_length": len(orchestrator_result.instruction) if orchestrator_result.instruction else 0,
@@ -6587,7 +6593,9 @@ async def handle_general_chat(query: str):
         )        
         
         
-        with console.status(f"[bold {COLORS['primary']}]🤖 Обрабатываю запрос...[/]"):
+        with console.status(f"[bold {COLORS['primary']}]🤖 Обрабатываю запрос...[/]"):    
+            
+            
             result = await orchestrator.orchestrate_general(
                 user_query=query,
                 user_files=user_files,  # Пустой — файлы в history
@@ -8175,28 +8183,44 @@ def _tester_streaming_handler(name: str, args: Dict[str, Any], result_preview: s
 
 
 
-def make_on_token_callback(prefix: str = "") -> Callable[[str], None]:
+def make_on_token_callback(prefix: str = "", max_console_chars: int = 15000) -> Callable[[str], None]:
     """Return a callback that renders SSE text deltas incrementally.
-
-    The callback is safe for non-TTY terminals and never lets a UI error
-    propagate back into the generation loop.
+    Uses fast sys.stdout.write to avoid blocking the async Event Loop with slow Rich console.print.
     """
     first_token = True
+    char_count = 0
+    truncation_announced = False
 
     def _on_token(delta: str) -> None:
         """Print a single streamed token delta."""
-        nonlocal first_token
+        nonlocal first_token, char_count, truncation_announced
         try:
+            if char_count >= max_console_chars:
+                if not truncation_announced:
+                    sys.stdout.write(f"\n... [вывод мыслей в терминал сокращен: превышен лимит в {max_console_chars} символов. Полный текст передан агенту]\n")
+                    sys.stdout.flush()
+                    truncation_announced = True
+                return
+
             if first_token:
                 if prefix:
-                    console.print(f"\n[bold cyan]{prefix}[/] ", end="")
+                    # Используем ANSI коды для цвета, это работает в 100 раз быстрее, чем Rich
+                    sys.stdout.write(f"\n\033[96m\033[1m{prefix}\033[0m ")
                 first_token = False
-            print(delta, end="", flush=True)
+
+            remaining_space = max_console_chars - char_count
+            display_delta = delta[:remaining_space]
+            
+            if display_delta:
+                # Прямой запись в stdout максимально быстрая, не блокирует Event Loop
+                sys.stdout.write(display_delta)
+                sys.stdout.flush()
+                char_count += len(display_delta)
+                
         except Exception as e:
             logger.warning(f"on_token callback error: {e}")
 
     return _on_token
-
 
 if __name__ == "__main__":
     # Обрабатываем Ctrl+C gracefully

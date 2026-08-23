@@ -56,7 +56,7 @@ class TesterAgent:
         user_additional_input: str = "",
         project_python_path: Optional[str] = None,
         on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
-            on_token: Optional[Callable[[str], None]] = None,
+        on_token: Optional[Callable[[str], None]] = None,
         ):
         """
         Initialize TesterAgent.

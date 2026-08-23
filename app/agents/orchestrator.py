@@ -290,7 +290,7 @@ async def orchestrate(
             if _should_use_batch_limit(orchestrator_model):
                 logger.info(f"Orchestrator: applying batch file limit for {cfg.get_model_display_name(orchestrator_model)}")
                 
-                batch_tool_calls, assistant_tool_calls, tool_results = _process_file_tools_with_batch_limit(
+                batch_tool_calls, assistant_tool_calls, tool_results = await _process_file_tools_with_batch_limit(
                     tool_calls=tool_calls,
                     tool_executor=tool_executor,
                     tool_usage=tool_usage,
@@ -337,7 +337,7 @@ async def orchestrate(
                         success = False
                     else:
                         # Execute tool
-                        tool_result = tool_executor(func_name, func_args)
+                        tool_result = await asyncio.to_thread(tool_executor, func_name, func_args)
                         success = not tool_result.startswith("<!-- ERROR")
                         tool_usage.increment(func_name)
                     
@@ -499,7 +499,7 @@ Focus on fixing the identified issues before requesting more tests.
 </test_result>"""
 
 
-def _process_file_tools_with_batch_limit(
+async def _process_file_tools_with_batch_limit(
     tool_calls: List[Dict[str, Any]],
     tool_executor: Callable,
     tool_usage: ToolUsageStats,
@@ -566,7 +566,7 @@ def _process_file_tools_with_batch_limit(
             tool_result = _format_test_run_limit_error(tool_usage)
             success = False
         else:
-            tool_result = tool_executor(func_name, func_args)
+            tool_result = await asyncio.to_thread(tool_executor, func_name, func_args)
             success = not tool_result.startswith("<!-- ERROR")
             tool_usage.increment(func_name)
         
@@ -606,7 +606,7 @@ def _process_file_tools_with_batch_limit(
             )
         else:
             # Execute the file read
-            tool_result = tool_executor(func_name, func_args)
+            tool_result = await asyncio.to_thread(tool_executor, func_name, func_args)
             success = not tool_result.startswith("<!-- ERROR")
             tool_usage.increment(func_name)
             
@@ -786,7 +786,7 @@ async def orchestrate_new_project(
                     tool_result = _format_web_search_limit_error(tool_usage)
                     success = False
                 else:
-                    tool_result = executor_instance.execute(func_name, func_args)
+                    tool_result = await asyncio.to_thread(tool_executor, func_name, func_args)
                     success = not tool_result.startswith("<!-- ERROR")
                     tool_usage.increment(func_name)
                 
@@ -1839,7 +1839,7 @@ async def orchestrate_agent(
             if _should_use_batch_limit(orchestrator_model):
                 logger.info(f"Agent Mode: applying batch file limit for {cfg.get_model_display_name(orchestrator_model)}")
                 
-                batch_tool_calls, assistant_tool_calls, tool_results = _process_file_tools_with_batch_limit(
+                batch_tool_calls, assistant_tool_calls, tool_results = await _process_file_tools_with_batch_limit(
                     tool_calls=tool_calls,
                     tool_executor=tool_executor,
                     tool_usage=tool_usage,
@@ -1884,7 +1884,7 @@ async def orchestrate_agent(
                         tool_result = _format_test_run_limit_error(tool_usage)
                         success = False
                     else:
-                        tool_result = tool_executor(func_name, func_args)
+                        tool_result = await asyncio.to_thread(tool_executor, func_name, func_args)
                         success = not tool_result.startswith("<!-- ERROR")
                         tool_usage.increment(func_name)
                     
