@@ -1,13 +1,15 @@
 
-```markdown
+
 <div align="center">
   <h1>🤖 Autogenesia</h1>
   <p><strong>Мультиагентная система на базе LLM для автономной генерации, рефакторинга и валидации кода</strong></p>
   
-  ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
-  ![OpenAI SDK](https://img.shields.io/badge/OpenAI%20SDK-✓-success?logo=openai&logoColor=white)
-  ![Languages](https://img.shields.io/badge/Поддержка-Python%20%7C%20JS%2FTS%20%7C%20Java%20%7C%20Go-green)
-  ![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-red)
+  <p>
+    <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
+    <img src="https://img.shields.io/badge/OpenAI_SDK-Supported-success?logo=openai&logoColor=white" alt="OpenAI SDK">
+    <img src="https://img.shields.io/badge/Languages-Python%20%7C%20JS%2FTS%20%7C%20Java%20%7C%20Go-green" alt="Languages">
+    <img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial-red" alt="License">
+  </p>
   
   <p>
     <a href="#-установка">Установка</a> •
@@ -17,6 +19,7 @@
   </p>
 </div>
 
+---
 ---
 
 ## 📖 Описание
