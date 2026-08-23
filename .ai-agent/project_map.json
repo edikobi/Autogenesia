@@ -1,9 +1,9 @@
 {
-  "root": "C:\\Users\\Admin\\AI_Assistant_Pro",
+  "root": "C:\\Users\\Admin\\AI_Assistant_Pro (te.)",
   "created_at": "",
-  "updated_at": "2026-01-12T12:47:18.611774Z",
-  "total_files": 206,
-  "total_tokens": 994362,
+  "updated_at": "2026-07-12T00:09:47.814412Z",
+  "total_files": 228,
+  "total_tokens": 1296965,
   "files": [
     {
       "path": "__init__.py",
@@ -35,20 +35,20 @@
     {
       "path": "app\\advice\\advice_catalog.json",
       "type": "data/json",
-      "hash": "0e3c2a5b8663b9b619d8c39cb277885a",
-      "tokens": 2060,
-      "description": "This JSON file serves as a structured catalog of methodological thinking frameworks for the AI Orchestrator's Agent Mode. It organizes advice into three categories (General Methodologies, Existing Project Patterns, New Project Architecture) with specific applicability to different operational modes (ASK or NEW_PROJECT). Each advice entry includes an ID, name, description, and clear \"when_to_use\" guidance, providing systematic approaches for tasks like bug hunting, feature integration, refactoring, security audits, and architectural design. The catalog is loaded by the `advice_loader.py` module to supply context-aware prompts and structured guidance during AI-driven code generation and analysis workflows.",
+      "hash": "0445f60f25420090374dc498a54b22f1",
+      "tokens": 2239,
+      "description": "This JSON file serves as a structured catalog of methodological thinking frameworks for the AI Orchestrator Agent. It organizes advice into three categories (General, Existing Project, New Project) with specific applicability to different task modes like \"ask\" or \"new_project\". Each advice entry includes an ID, name, description, and \"when_to_use\" guidance, providing systematic approaches for scenarios such as bug hunting, refactoring, security audits, and feature integration. This catalog is loaded by the `advice_loader.py` module to supply context-aware guidance during AI-driven code generation and analysis workflows.",
       "is_code": false,
-      "last_updated": "2026-01-12T12:25:48.763789Z"
+      "last_updated": "2026-03-15T12:06:02.359545Z"
     },
     {
       "path": "app\\advice\\advice_content.json",
       "type": "data/json",
-      "hash": "5fd89bfca310f8f700259b58c35df8c2",
-      "tokens": 14724,
-      "description": "This file is a structured knowledge base containing expert advice for AI-assisted code development, organized into numbered guidelines with detailed frameworks. It provides systematic thinking processes for various development scenarios like bug hunting, feature integration, refactoring, security auditing, and performance optimization. The advice is designed to guide AI agents (particularly the orchestrator and generator) through complex coding tasks by offering step-by-step methodologies, tool usage priorities, and anti-pattern warnings. It serves as a reference library that the advice_loader.py module loads and caches to inject structured guidance into AI prompts during code generation and validation workflows.",
+      "hash": "3b1f991496dbd3a55c7a91b6efaf7e27",
+      "tokens": 16352,
+      "description": "This JSON file serves as a structured knowledge base containing expert advice for AI agents working on code generation and analysis tasks. It provides 19 detailed methodologies (ADV-G01 through ADV-E07) covering critical software engineering workflows like bug hunting, feature integration, safe refactoring, security auditing, dependency analysis, error recovery, and GUI development. Each advice entry includes a core principle, a multi-phase thinking framework, and anti-patterns to avoid, designed to guide the AI's reasoning process during complex coding operations. This content is loaded by the `advice_loader.py` module to provide contextual guidance and improve the quality of AI-driven code generation and problem-solving within the agent pipeline.",
       "is_code": false,
-      "last_updated": "2026-01-12T12:25:48.763789Z"
+      "last_updated": "2026-03-15T12:06:02.359545Z"
     },
     {
       "path": "app\\advice\\advice_loader.py",
@@ -71,83 +71,92 @@
     {
       "path": "app\\agents\\agent_pipeline.py",
       "type": "code/python",
-      "hash": "d77f7265c880abf1eb288cc1036de380",
-      "tokens": 37526,
+      "hash": "40879fa23b653a69bd04f3118a6034d4",
+      "tokens": 60102,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-12T12:25:48.763789Z"
+      "last_updated": "2026-07-11T17:02:12.858457Z"
     },
     {
       "path": "app\\agents\\code_generator.py",
       "type": "code/python",
-      "hash": "7f505cc577f0bb21571b34b422a77fcb",
-      "tokens": 13760,
+      "hash": "41e0ace52f76813cf28ef324b7f5c2e5",
+      "tokens": 13845,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T20:07:23.152921Z"
+      "last_updated": "2026-07-07T23:00:19.355437Z"
     },
     {
       "path": "app\\agents\\feedback_handler.py",
       "type": "code/python",
-      "hash": "d3795f9530622b855dd4a8ed434a42ef",
-      "tokens": 9584,
+      "hash": "d158375b9061bccfd6a853f59a41330a",
+      "tokens": 12936,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-09T07:17:51.758890Z"
+      "last_updated": "2026-07-11T17:02:12.858457Z"
     },
     {
       "path": "app\\agents\\feedback_loop.py",
       "type": "code/python",
-      "hash": "ed419f5dc40766e09e368a66efa78ebc",
-      "tokens": 4905,
+      "hash": "41b5d560cb76bf4c26f27fd14ccb129b",
+      "tokens": 5560,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-06T19:10:54.403636Z"
     },
     {
       "path": "app\\agents\\feedback_prompt_loader.py",
       "type": "code/python",
-      "hash": "13c4757f0ea4b779e48964901a5a6805",
-      "tokens": 3131,
+      "hash": "1eb1b76e2818860815733a829caf2a7e",
+      "tokens": 3728,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-08T23:54:50.399100Z"
+      "last_updated": "2026-07-05T13:00:17.940162Z"
     },
     {
       "path": "app\\agents\\orchestrator.py",
       "type": "code/python",
-      "hash": "be847e1687148e21095a3c9c48d814a2",
-      "tokens": 16013,
+      "hash": "04b4f416b9d3a60840f0e6da6bc90648",
+      "tokens": 16462,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-04T02:03:47.086993Z"
+      "last_updated": "2026-06-08T19:45:44.415197Z"
     },
     {
       "path": "app\\agents\\pre_filter.py",
       "type": "code/python",
-      "hash": "dbef13baaad5730b21748c8919c0ff33",
-      "tokens": 7312,
+      "hash": "3f1f7217b25a348b2669bf1d37eca2e1",
+      "tokens": 12868,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-07T23:00:19.355437Z"
     },
     {
       "path": "app\\agents\\router.py",
       "type": "code/python",
-      "hash": "5e755396f2ce1b9f54f5da66420f1cb3",
-      "tokens": 6524,
+      "hash": "ad5333ff17d62a55b704f35a5b018935",
+      "tokens": 6562,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-05T01:24:14.552078Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
+    },
+    {
+      "path": "app\\agents\\tester.py",
+      "type": "code/python",
+      "hash": "2d65b0ca8c8b2968a89e14871e3c2b8b",
+      "tokens": 3509,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-11T12:16:17.701324Z"
     },
     {
       "path": "app\\agents\\validator.py",
       "type": "code/python",
-      "hash": "efc7e3fe2207356defa08188c17cd3e0",
-      "tokens": 3581,
+      "hash": "5e34ce13a1fdbd8365a71aa3554f0db2",
+      "tokens": 6340,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\builders\\__init__.py",
@@ -161,11 +170,11 @@
     {
       "path": "app\\builders\\semantic_index_builder.py",
       "type": "code/python",
-      "hash": "933820adb23fcb82cb35df0b6d0b1200",
-      "tokens": 19793,
+      "hash": "262da70fc618849575b6d5e36f6da7a3",
+      "tokens": 21602,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\core\\__init__.py",
@@ -188,29 +197,29 @@
     {
       "path": "app\\history\\compressor.py",
       "type": "code/python",
-      "hash": "a10b57d14eeb71f069cf0651822420ce",
-      "tokens": 2757,
+      "hash": "3c5ee1874c2b193f49ab8ed9867f7492",
+      "tokens": 3057,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-04T22:17:45.714207Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\history\\context_manager.py",
       "type": "code/python",
-      "hash": "e2d16f67247c2e33e27b98c5eaf5c79c",
-      "tokens": 5589,
+      "hash": "1c7d8c58cc76e57382511c66430d2a06",
+      "tokens": 5627,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\history\\manager.py",
       "type": "code/python",
-      "hash": "c78f57675883ebd9da3e587a1276497d",
-      "tokens": 5356,
+      "hash": "a2696a82736ebd16763de311e8770929",
+      "tokens": 5617,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-04T22:38:00.423254Z"
+      "last_updated": "2026-02-01T21:15:35.002560Z"
     },
     {
       "path": "app\\history\\orchestrator_trace.py",
@@ -224,11 +233,11 @@
     {
       "path": "app\\history\\storage.py",
       "type": "code/python",
-      "hash": "a40611c1351ba16100fc7a7651fca4f5",
-      "tokens": 5674,
+      "hash": "543c9e95d9046c355a2d2204bcb8a3a7",
+      "tokens": 6146,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-02-01T21:15:35.002560Z"
     },
     {
       "path": "app\\llm\\__init__.py",
@@ -242,20 +251,20 @@
     {
       "path": "app\\llm\\api_client.py",
       "type": "code/python",
-      "hash": "a521c206f6ef1f2b64cde72903f28f97",
-      "tokens": 7439,
+      "hash": "77b4130fecd8a957c1a369b071098f00",
+      "tokens": 7995,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T20:07:23.152921Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\llm\\prompt_templates.py",
       "type": "code/python",
-      "hash": "b9e5090797056e7a260523c3ce9affa4",
-      "tokens": 64131,
+      "hash": "c59e131119809cf35493613725ef0a8c",
+      "tokens": 90875,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-12T12:25:48.763789Z"
+      "last_updated": "2026-07-11T19:40:26.081215Z"
     },
     {
       "path": "app\\services\\__init__.py",
@@ -264,16 +273,16 @@
       "tokens": 40,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-05-30T13:59:59.011348Z"
     },
     {
-      "path": "app\\services\\ai_client.py",
+      "path": "app\\services\\ast_grep_applier.py",
       "type": "code/python",
-      "hash": "47ce18fe417364ce1276128f81a36c47",
-      "tokens": 1355,
+      "hash": "82a5e18df5097ef71a29c3f122a41269",
+      "tokens": 2251,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-05-29T21:30:28.221646Z"
     },
     {
       "path": "app\\services\\backup_manager.py",
@@ -287,11 +296,20 @@
     {
       "path": "app\\services\\change_validator.py",
       "type": "code/python",
-      "hash": "4510c6a22168a8d2a3c3908e93379144",
-      "tokens": 13441,
+      "hash": "a5b7c453eb41a9afdb242b0f49068bd3",
+      "tokens": 21505,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-08T05:06:28.354432Z"
+      "last_updated": "2026-07-05T13:00:17.940162Z"
+    },
+    {
+      "path": "app\\services\\code_commenter.py",
+      "type": "code/python",
+      "hash": "ca71ead69c29e370614cd5705f13fc9b",
+      "tokens": 1865,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-06-05T19:50:49.988230Z"
     },
     {
       "path": "app\\services\\file_io_tools.py",
@@ -305,11 +323,20 @@
     {
       "path": "app\\services\\file_modifier.py",
       "type": "code/python",
-      "hash": "6fd48a29866307d82d98d0c3a5294496",
-      "tokens": 15103,
+      "hash": "d5029da00736a33179b741f3049e2efa",
+      "tokens": 65482,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-10T06:22:40.987473Z"
+      "last_updated": "2026-07-11T17:02:12.858457Z"
+    },
+    {
+      "path": "app\\services\\go_adapter.py",
+      "type": "code/python",
+      "hash": "35969eef12bc5923ef3769f67fea246f",
+      "tokens": 8170,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-04-28T17:47:50.744300Z"
     },
     {
       "path": "app\\services\\go_chunker.py",
@@ -318,7 +345,7 @@
       "tokens": 2757,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-03-15T00:22:40.827665Z"
     },
     {
       "path": "app\\services\\index_manager.py",
@@ -341,11 +368,29 @@
     {
       "path": "app\\services\\index_updater.py",
       "type": "code/python",
-      "hash": "7e8f2772cc91e6c699aff8be7a4fad14",
-      "tokens": 2492,
+      "hash": "94bbd05f0791f862680e91c066ddc672",
+      "tokens": 2134,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
+    },
+    {
+      "path": "app\\services\\java_adapter.py",
+      "type": "code/python",
+      "hash": "7ed6d4e312ea1b831e628a85135e538b",
+      "tokens": 6413,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-03-19T21:35:54.464736Z"
+    },
+    {
+      "path": "app\\services\\js_ts_adapter.py",
+      "type": "code/python",
+      "hash": "237eca5894566b4a79b66941db8d07bb",
+      "tokens": 6686,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-03-19T19:18:30.425865Z"
     },
     {
       "path": "app\\services\\json_chunker.py",
@@ -354,16 +399,25 @@
       "tokens": 2107,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-03-15T00:22:40.827665Z"
+    },
+    {
+      "path": "app\\services\\language_adapter.py",
+      "type": "code/python",
+      "hash": "bf6064ca13f04ea524c7d17ca8e9e909",
+      "tokens": 3647,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-03-19T18:35:16.917534Z"
     },
     {
       "path": "app\\services\\project_map_builder.py",
       "type": "code/python",
-      "hash": "22a36161b70d19972ad237df5401e3f3",
-      "tokens": 6437,
+      "hash": "ba7c7af70f3a178bed964c733ffe2c07",
+      "tokens": 6473,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\services\\project_scanner.py",
@@ -386,11 +440,11 @@
     {
       "path": "app\\services\\runtime_tester.py",
       "type": "code/python",
-      "hash": "e9ff9e24e567c550ccd40c387e3ff459",
-      "tokens": 25018,
+      "hash": "3e4b00f680bfc1fd4a265cf1db3d279f",
+      "tokens": 38240,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-12T12:47:18.611774Z"
+      "last_updated": "2026-06-27T10:07:34.456616Z"
     },
     {
       "path": "app\\services\\sql_chunker.py",
@@ -399,34 +453,43 @@
       "tokens": 2257,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-03-15T00:22:40.827665Z"
     },
     {
       "path": "app\\services\\syntax_checker.py",
       "type": "code/python",
-      "hash": "551431eb5e361e11186ecf6312842618",
-      "tokens": 5104,
+      "hash": "7f303ec6d102e9cc784637a892d24ed1",
+      "tokens": 16348,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-06T13:29:18.175073Z"
+      "last_updated": "2026-04-28T17:47:50.744300Z"
+    },
+    {
+      "path": "app\\services\\syntax_fixer_agent.py",
+      "type": "code/python",
+      "hash": "da2b9479f09978319e0ddc25ab972181",
+      "tokens": 6697,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\services\\tree_sitter_parser.py",
       "type": "code/python",
-      "hash": "021aeac805f8004959dbe64a84ff6d0f",
-      "tokens": 4331,
+      "hash": "bef1238554c04de094c44e2c41e2c951",
+      "tokens": 11346,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-10T06:22:40.987473Z"
+      "last_updated": "2026-06-28T17:53:36.522810Z"
     },
     {
       "path": "app\\services\\virtual_fs.py",
       "type": "code/python",
-      "hash": "51777306643810028ae888f2c2a781f9",
-      "tokens": 13685,
+      "hash": "485529775533eef28d597e736239135f",
+      "tokens": 14343,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-07T21:54:35.846843Z"
+      "last_updated": "2026-04-14T19:03:31.908545Z"
     },
     {
       "path": "app\\tools\\__init__.py",
@@ -440,20 +503,20 @@
     {
       "path": "app\\tools\\dependency_manager.py",
       "type": "code/python",
-      "hash": "147a03a0eace930349ee32e7fe5c445a",
-      "tokens": 6988,
+      "hash": "3366b89d9f822bec8e27f31d08cd3431",
+      "tokens": 23117,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-05T13:20:41.364698Z"
+      "last_updated": "2026-06-27T10:07:34.456616Z"
     },
     {
       "path": "app\\tools\\file_relations.py",
       "type": "code/python",
-      "hash": "95b075bf22abaa41bc9ecc605c48731b",
-      "tokens": 2925,
+      "hash": "ff1ac0a3c0097f8533419595aadeee84",
+      "tokens": 5604,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-09T03:15:30.975323Z"
+      "last_updated": "2026-04-28T17:47:50.744300Z"
     },
     {
       "path": "app\\tools\\general_web_search.py",
@@ -467,29 +530,38 @@
     {
       "path": "app\\tools\\grep_search.py",
       "type": "code/python",
-      "hash": "5ae506716e19da509536972f567ff717",
-      "tokens": 2525,
+      "hash": "d586b290e8a715db92f4459343b6fcee",
+      "tokens": 4576,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-08T04:08:43.968392Z"
+      "last_updated": "2026-04-12T22:14:22.043648Z"
+    },
+    {
+      "path": "app\\tools\\list_files.py",
+      "type": "code/python",
+      "hash": "c9c303bde4866379ddd700f728c712bc",
+      "tokens": 1415,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-04-28T17:47:50.744300Z"
     },
     {
       "path": "app\\tools\\read_file.py",
       "type": "code/python",
-      "hash": "0f42a44c76b0966ee927423b25baf004",
-      "tokens": 1701,
+      "hash": "a5b78f645fe19f9a257bc55002e34e20",
+      "tokens": 2440,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-04-28T17:47:50.744300Z"
     },
     {
-      "path": "app\\tools\\run_project_tests.py",
+      "path": "app\\tools\\read_line_context.py",
       "type": "code/python",
-      "hash": "950dc840b1ff3029166000d0eb8aa8b1",
-      "tokens": 9124,
+      "hash": "bb1bc2b370afeaca7d060426df1ae891",
+      "tokens": 1214,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-05T02:19:48.899011Z"
+      "last_updated": "2026-05-09T17:56:28.918074Z"
     },
     {
       "path": "app\\tools\\search_code.py",
@@ -501,22 +573,40 @@
       "last_updated": "2026-01-08T02:49:41.744160Z"
     },
     {
-      "path": "app\\tools\\tool_definitions.py",
+      "path": "app\\tools\\tester_tool_definitions.py",
       "type": "code/python",
-      "hash": "324b82683f5117c34e57eeaed6127e46",
-      "tokens": 4087,
+      "hash": "6c853e74e3b4a40944c9a5433429c21d",
+      "tokens": 1841,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-09T03:15:30.975323Z"
+      "last_updated": "2026-07-05T17:54:51.836452Z"
+    },
+    {
+      "path": "app\\tools\\tester_tool_executor.py",
+      "type": "code/python",
+      "hash": "be2ce76760f5a69caf6df51ef623a4e9",
+      "tokens": 4314,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-05T17:54:51.836452Z"
+    },
+    {
+      "path": "app\\tools\\tool_definitions.py",
+      "type": "code/python",
+      "hash": "4d4d4f981d5df57aedaba6209891e39b",
+      "tokens": 6614,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-05T17:54:51.836452Z"
     },
     {
       "path": "app\\tools\\tool_executor.py",
       "type": "code/python",
-      "hash": "31fc2b33f06d4cb552f32fb702e2b5ba",
-      "tokens": 3335,
+      "hash": "0d04f9734283b001818b6c5c43a78490",
+      "tokens": 3745,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-09T03:15:30.975323Z"
+      "last_updated": "2026-05-29T19:06:13.708189Z"
     },
     {
       "path": "app\\tools\\web_search.py",
@@ -526,6 +616,15 @@
       "description": "Code file (no description available)",
       "is_code": true,
       "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "app\\tools\\web_tools.py",
+      "type": "code/python",
+      "hash": "5368f0feb82de53415c25a17a6fb10ee",
+      "tokens": 3569,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-04-28T17:47:50.744300Z"
     },
     {
       "path": "app\\utils\\__init__.py",
@@ -557,20 +656,29 @@
     {
       "path": "app\\utils\\file_types.py",
       "type": "code/python",
-      "hash": "d2eda19dfdef0a1346d62481532bec9b",
-      "tokens": 517,
+      "hash": "b9a2356457374d4cfd9efc04d670da97",
+      "tokens": 562,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-03-07T19:12:59.327962Z"
     },
     {
       "path": "app\\utils\\pipeline_trace_logger.py",
       "type": "code/python",
-      "hash": "6e6f432e394c3d383bf8830a16a1eee8",
-      "tokens": 3200,
+      "hash": "3bb9f1e7ec3ce9ec2313171a8547cfb3",
+      "tokens": 4070,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-06-27T10:07:34.456616Z"
+    },
+    {
+      "path": "app\\utils\\tester_translator.py",
+      "type": "code/python",
+      "hash": "8b97f81291760ab32677fb41960a93bd",
+      "tokens": 670,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\utils\\token_counter.py",
@@ -584,11 +692,11 @@
     {
       "path": "app\\utils\\translator.py",
       "type": "code/python",
-      "hash": "2d1570c7406f5f0c6865b80d9bc14296",
-      "tokens": 3334,
+      "hash": "49ff30b9a3f845c52d3fbd55280af1c1",
+      "tokens": 3425,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "app\\utils\\validation_logger.py",
@@ -602,11 +710,11 @@
     {
       "path": "app\\utils\\xml_parser.py",
       "type": "code/python",
-      "hash": "e10a20ce27e072974d800bf723aeaac8",
-      "tokens": 3770,
+      "hash": "a02f7b215f739733878e12d1b22ce39c",
+      "tokens": 4039,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-03-07T19:12:59.327962Z"
     },
     {
       "path": "app\\utils\\xml_wrapper.py",
@@ -665,20 +773,47 @@
     {
       "path": "config\\framework_registry.json",
       "type": "data/json",
-      "hash": "37106f7fee5c7ede1d2f5a613bb8c8ff",
-      "tokens": 1847,
-      "description": "This file is a comprehensive registry of Python frameworks and libraries organized by category, serving as a reference for the AI assistant's code generation and analysis capabilities. It maps import names to human-readable descriptions across categories including GUI, TUI, database, network, web, daemon, CLI, testing, data science, and miscellaneous utilities. This registry helps the system identify and properly handle different types of dependencies when analyzing codebases or generating new code with appropriate framework integrations.",
+      "hash": "8afa61c873277d2742f84cf8ae9e1829",
+      "tokens": 1876,
+      "description": "This file is a comprehensive registry of Python frameworks and libraries categorized by their primary use cases (GUI, TUI, database, network, web, etc.). It serves as a reference catalog for the AI assistant project, likely used by the code generation or analysis components to understand available technologies and their typical applications. The structured JSON format with descriptive labels enables the system to map import statements to framework types, supporting tasks like dependency analysis, project scaffolding, or technology recommendations.",
       "is_code": false,
-      "last_updated": "2026-01-06T22:27:05.440831Z"
+      "last_updated": "2026-02-08T16:28:19.277719Z"
+    },
+    {
+      "path": "config\\intermediate_agent_models.py",
+      "type": "code/python",
+      "hash": "c0d2e2ca37ed7e7e07c73ce6c2095c18",
+      "tokens": 3212,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-11T22:28:41.433665Z"
+    },
+    {
+      "path": "config\\provider_keys.json",
+      "type": "data/json",
+      "hash": "cd796dbaea5df6b7b979ffa6df3f4a17",
+      "tokens": 382,
+      "description": "This is a JSON configuration file that stores API credentials and routing settings for multiple AI model providers used in the project. It contains API keys and base URLs for services like OpenRouter, DeepSeek, and OpenCode, along with provider priority configuration through `provider_entry_order` and `disabled_providers` arrays. The file also specifies a `selected_agent_provider` (currently OpenCode) and a `reasoning_effort` setting, which are used by the central configuration module (`config/settings.py`) to manage provider selection and API routing across the application's multi-provider AI orchestration system.",
+      "is_code": false,
+      "last_updated": "2026-07-11T22:52:14.071750Z"
+    },
+    {
+      "path": "config\\provider_models.py",
+      "type": "code/python",
+      "hash": "05e644173b42cc2d7a4a52c57cc44491",
+      "tokens": 3494,
+      "description": "Code file (no description available)",
+      "is_code": true,
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "config\\settings.py",
       "type": "code/python",
-      "hash": "16b504d33f84eec718793f4f573e4d7f",
-      "tokens": 6598,
+      "hash": "1d7a307c3195d438b3858f196a531396",
+      "tokens": 11478,
       "description": "Code file (no description available)",
       "is_code": true,
-      "last_updated": "2026-01-12T12:25:48.763789Z"
+      "last_updated": "2026-07-11T22:28:41.433665Z"
     },
     {
       "path": "debug_cert.py",
@@ -715,6 +850,168 @@
       "description": "Code file (no description available)",
       "is_code": true,
       "last_updated": "2026-01-03T03:08:28.474128Z"
+    },
+    {
+      "path": "implementation_plan.md",
+      "type": "text/md",
+      "hash": "a85521514bdbba61f05b8917701db42f",
+      "tokens": 621,
+      "description": "This file is an implementation plan for version 18.9 of the project, specifically addressing a bug in error classification within the validation process. It details a problem where syntax errors are incorrectly reported as \"Targeting-First Error\" due to the order of checks in the agent pipeline, causing misrouted repair attempts. The plan proposes modifying the `_check_tree_structure_broken` method in `agent_pipeline.py` to prioritize syntax checking before target method validation, ensuring proper error categorization and handling. It also outlines a verification strategy using existing test suites to confirm the fix and maintain system integrity.",
+      "is_code": false,
+      "last_updated": "2026-04-15T21:42:19.409560Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_results_20260123_233440.json",
+      "type": "data/json",
+      "hash": "e7414a01e7f3c2ca53f8c3aae77b03da",
+      "tokens": 10081,
+      "description": "This JSON file is a test results log from a generator mode evaluation suite that benchmarks multiple AI models on code generation tasks. It contains detailed performance metrics for five models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash, GPT-5.1-Codex-Mini) across 11 different code modification modes like REPLACE_FILE, ADD_METHOD, and INSERT_IMPORT. The log includes comprehensive statistics (pass/fail counts, error types, durations) and individual test case results with generated code previews, providing comparative analysis data for the project's code generation agent system.",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:46:23.385589Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_results_20260124_001242.json",
+      "type": "data/json",
+      "hash": "1795afb91316fa9879b68579f12cc691",
+      "tokens": 9031,
+      "description": "This JSON file contains test results from evaluating multiple AI models on code generation tasks. It records performance metrics for five models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash, GPT-5.1-Codex-Mini) across 11 test cases covering different modification modes like REPLACE_FILE, ADD_METHOD, and REPLACE_FUNCTION. The file provides detailed summaries including pass/fail counts, error types (staging, syntax, validation), execution durations, and code previews for each test run, serving as a comprehensive benchmark for comparing model capabilities in the project's code generation system.",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_results_20260124_003549.json",
+      "type": "data/json",
+      "hash": "a02edb20a9990e247e18ab164183eca7",
+      "tokens": 9107,
+      "description": "This JSON file contains test results from evaluating multiple AI models on code generation tasks. It records performance metrics for five models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash, GPT-5.1-Codex-Mini) across 11 test cases covering different modification modes like REPLACE_FILE, ADD_METHOD, and PATCH_METHOD. The results include detailed per-test outcomes with statuses (passed/failed/errors), execution times, error messages, and code previews, providing comparative analysis data for the project's code generation capabilities.",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_results_20260124_005746.json",
+      "type": "data/json",
+      "hash": "b59efd4af7be41decb168c08e1c4664c",
+      "tokens": 9085,
+      "description": "This JSON file contains test results from evaluating multiple AI models on code generation tasks. It records performance metrics for five models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash, GPT-5.1-Codex-Mini) across 11 test cases covering different modification modes like REPLACE_FILE, ADD_METHOD, and PATCH_METHOD. The file includes detailed summaries of pass/fail rates, error types (staging, syntax, validation), execution durations, and code previews for each test run, serving as a comprehensive benchmark for comparing model capabilities in the project's code generation system.",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_results_20260124_011846.json",
+      "type": "data/json",
+      "hash": "1f2cc24c99a36afa365eaf1d0a97cc58",
+      "tokens": 9090,
+      "description": "This JSON file stores test results from a comparative evaluation of multiple AI models (DeepSeek Chat, GLM 4.7, Claude Haiku 4.5, Gemini 3.0 Flash, GPT-5.1-Codex-Mini) on code generation tasks. It records performance metrics across 11 test cases covering different modification modes (REPLACE_FILE, REPLACE_METHOD, ADD_METHOD, etc.), including pass/fail counts, error types (syntax, staging, validation), execution durations, and generated code previews. The file serves as a structured log for benchmarking the code generation capabilities of various AI models within the project's testing framework, providing detailed comparative data for analysis and model selection decisions.",
+      "is_code": false,
+      "last_updated": "2026-01-23T23:41:59.689367Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_230853.log",
+      "type": "other",
+      "hash": "a60e801b543ed8b943bcf220394c47ad",
+      "tokens": 510,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:12:38.651097Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_231847.log",
+      "type": "other",
+      "hash": "255a544f6bdb9d689ba4e5d451a6a837",
+      "tokens": 418,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:20:34.889599Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_231933.log",
+      "type": "other",
+      "hash": "f010f8c77d584deb81a37978e01a072d",
+      "tokens": 103,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:20:34.889599Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_232602.log",
+      "type": "other",
+      "hash": "d14824253a4c0f055421f7943eb4a8db",
+      "tokens": 2361,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:29:38.492762Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_233440.log",
+      "type": "other",
+      "hash": "54ddacd4794373226709615a3280f739",
+      "tokens": 4024,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T20:46:23.385589Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260123_235930.log",
+      "type": "other",
+      "hash": "5dec94d5274baa2739450e2741bc044a",
+      "tokens": 250,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T21:00:20.947769Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_000550.log",
+      "type": "other",
+      "hash": "bd1c285a60e277fa9b528681f6f4ce93",
+      "tokens": 93,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T21:07:27.303898Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_001242.log",
+      "type": "other",
+      "hash": "d1ac84f31da5305479e8d52cadfdd117",
+      "tokens": 3497,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_003549.log",
+      "type": "other",
+      "hash": "81af6822193786a4eacb79ca1b9b33d4",
+      "tokens": 3519,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_005125.log",
+      "type": "other",
+      "hash": "26dcfc2a5da5212049a8bdfaf72ca8e3",
+      "tokens": 415,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_005746.log",
+      "type": "other",
+      "hash": "a91f15269e8fe67f60f3c9444f5ae529",
+      "tokens": 3536,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T22:12:03.944731Z"
+    },
+    {
+      "path": "logs\\generator_mode_tests\\mode_test_20260124_011846.log",
+      "type": "other",
+      "hash": "1a576d025153d916ab181433dc2516ff",
+      "tokens": 3483,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-23T23:41:59.689367Z"
     },
     {
       "path": "logs\\generator_tests\\generator_results_20260103_204321.json",
@@ -1527,6 +1824,42 @@
       "last_updated": "2026-01-03T21:02:42.607811Z"
     },
     {
+      "path": "logs\\index_test_20260116_124702.log",
+      "type": "other",
+      "hash": "ac0258f3ea375857049b7329cd56e714",
+      "tokens": 945,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-16T09:47:40.155708Z"
+    },
+    {
+      "path": "logs\\index_test_20260116_124740.log",
+      "type": "other",
+      "hash": "574267b7116df58a51af24c66a15a99c",
+      "tokens": 945,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-16T09:48:17.306982Z"
+    },
+    {
+      "path": "logs\\index_test_20260116_124817.log",
+      "type": "other",
+      "hash": "1c6ad6680a07b2cf226d166faf2f0572",
+      "tokens": 945,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-16T09:49:32.212374Z"
+    },
+    {
+      "path": "logs\\index_test_20260116_124932.log",
+      "type": "other",
+      "hash": "05e8bd9f019dda70a7fe2dee5aa4aec5",
+      "tokens": 945,
+      "description": "",
+      "is_code": false,
+      "last_updated": "2026-01-16T10:10:23.304011Z"
+    },
+    {
       "path": "logs\\test_run_20251210_200903.log",
       "type": "other",
       "hash": "f39ef6cdb795fe7bc809bf6c0d926c45",
@@ -1538,11 +1871,11 @@
     {
       "path": "main.py",
       "type": "code/python",
-      "hash": "3e5447aced98265d8d3033a993b534cc",
-      "tokens": 61829,
-      "description": "CLI application framework with custom navigation exceptions and structured logging, integrating state management and user input handling for menu-driven workflows.",
+      "hash": "2b75482607610466921b83e8ff4624d1",
+      "tokens": 79156,
+      "description": "Centralized application entry point for multi-mode AI orchestration with custom exception handling, logging, and state management.",
       "is_code": true,
-      "last_updated": "2026-01-10T05:57:58.533575Z"
+      "last_updated": "2026-07-11T19:40:26.081215Z"
     },
     {
       "path": "mainsertif.py",
@@ -1563,202 +1896,67 @@
       "last_updated": "2026-01-03T03:08:28.474128Z"
     },
     {
+      "path": "plan.md",
+      "type": "text/md",
+      "hash": "760d69b758ed74d44078c9014562e59d",
+      "tokens": 3631,
+      "description": "This is a detailed implementation plan for refactoring the user feedback handling system in an AI-powered code generation pipeline. It addresses a critical bug where user feedback cycles would prematurely fail due to accumulated iteration limits, and where the `handle_user_feedback` method would discard previously generated code by clearing the Virtual File System (VFS). The plan proposes adding a `reset_iteration_limits()` method to `FeedbackLoopState`, modifying `run_feedback_cycle` to reset limits at the start of each cycle, and refactoring `handle_user_feedback` to delegate to `run_feedback_cycle` for \"accept\" and \"replace\" actions, preserving VFS state and enabling full validation loops. It also specifies which files to modify (`feedback_loop.py`, `agent_pipeline.py`) and confirms that `main.py` requires no changes, ensuring continuous, unlimited user-driven iterations with proper code preservation and validation.",
+      "is_code": false,
+      "last_updated": "2026-07-06T17:09:49.318866Z"
+    },
+    {
+      "path": "pyrightconfig.json",
+      "type": "data/json",
+      "hash": "3bc5861ce3fd9ccbbe7314b4ecf9c0df",
+      "tokens": 995,
+      "description": "Pyright configuration file for static type checking in the AI Assistant Pro project. It specifies that Pyright should analyze the `app` and `tests` directories while excluding common directories like `node_modules`, `__pycache__`, and virtual environments. The configuration sets type checking to \"standard\" mode with extensive diagnostic severity overrides, treating most type-related issues as warnings (e.g., missing imports, optional type issues, unused code) while keeping syntax errors as errors and disabling certain checks like `reportSelfClsParameterName` and `reportAssertAlwaysTrue`. This ensures consistent type checking across the project's codebase.",
+      "is_code": false,
+      "last_updated": "2026-06-10T18:48:19.053984Z"
+    },
+    {
       "path": "requirements.txt",
       "type": "text/txt",
-      "hash": "2b51d89fdf3a6c0ab99ee1ff970b2282",
-      "tokens": 267,
-      "description": "This file is the project's Python dependency manifest (`requirements.txt`) that specifies all third-party packages needed for the AI assistant system. It configures the runtime environment with libraries for AI model integration (OpenAI, GigaChat), token counting (tiktoken), configuration management (pydantic, python-dotenv), console output formatting (rich), HTTP clients (httpx, aiohttp), file processing (pypdf, python-docx, pandas), code analysis (tree-sitter, mypy, autopep8), and asynchronous operations. The dependencies enable core functionalities like multi-provider LLM communication, structured data validation, semantic code parsing, document handling, and rich user interfaces across the application modules.",
+      "hash": "5f324710d1cff32e9f738f8b97441fd0",
+      "tokens": 188,
+      "description": "This is the project's dependency specification file (requirements.txt) that lists all Python packages required to run the AI Assistant Pro application. It includes core dependencies for HTTP communication (httpx), AI/LLM integration (openai), code parsing and analysis (tree-sitter with language-specific parsers for Python, JavaScript, TypeScript, Go, and Java), code formatting and linting (autopep8, black, isort, yapf, mypy, pyright, ruff), file processing (pypdf, python-docx, openpyxl, pandas), web scraping (beautifulsoup4), and utility libraries (aiofiles, watchdog, markdown, nest_asyncio). The file ensures all necessary packages are installed for the project's multi-language code analysis, AI agent functionality, and file I/O operations.",
       "is_code": false,
-      "last_updated": "2026-01-04T01:44:52.263845Z"
+      "last_updated": "2026-07-07T17:33:36.074881Z"
     },
     {
-      "path": "scripts\\test_advice_system — копия.py",
-      "type": "code/python",
-      "hash": "412081432a2e8a3d4b3eb875e1f164be",
-      "tokens": 5612,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_advice_system.py",
-      "type": "code/python",
-      "hash": "75f4bf9e7ac120509acfb42d7508de53",
-      "tokens": 6150,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_agent_foundation.py",
-      "type": "code/python",
-      "hash": "c9af79eed774c418f83968bc2926182c",
-      "tokens": 17710,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_agent_stage2.py",
-      "type": "code/python",
-      "hash": "d2b6e844332093d7f897ea688df66142",
-      "tokens": 17273,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_agent_stage3.py",
-      "type": "code/python",
-      "hash": "b5b2538cc2a75ce102fc027dc7a39fc9",
-      "tokens": 8181,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_agents.py",
-      "type": "code/python",
-      "hash": "3c718d9d56ff6e2a5c3f13cc130fe0a2",
-      "tokens": 16428,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_context_compression.py",
-      "type": "code/python",
-      "hash": "bbe67bb69915f96d41e2251a65fbdc96",
-      "tokens": 6064,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_deepseek_wrapper.py",
-      "type": "code/python",
-      "hash": "b49629eb2e4af20e966b635428631337",
-      "tokens": 1417,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_file_modifier_indentation.py",
-      "type": "code/python",
-      "hash": "5150fec7560da9f153a3df9b8fb9d232",
-      "tokens": 22879,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_general_chat.py",
-      "type": "code/python",
-      "hash": "f323a15cb3de6d0e73a8b6b872141170",
-      "tokens": 1872,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_general_chat_with_history.py",
-      "type": "code/python",
-      "hash": "e5073ccc1fbd34cd5c914996df4aa6fa",
-      "tokens": 8280,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_generator_models.py",
-      "type": "code/python",
-      "hash": "faf36966cfb09d633a272b6e7866dd2d",
-      "tokens": 9621,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T21:02:42.607811Z"
-    },
-    {
-      "path": "scripts\\test_history_manager.py",
-      "type": "code/python",
-      "hash": "4aa37047644d177b4e6debcaad277a39",
-      "tokens": 5294,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_indent_normalization.py",
-      "type": "code/python",
-      "hash": "c0b6f709359ccca822da9cf8c7d375e4",
-      "tokens": 14743,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_index_manager.py",
-      "type": "code/python",
-      "hash": "366be78f30aae56473dfd180c1a41ee5",
-      "tokens": 8339,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_orchestrator_raw.py",
-      "type": "code/python",
-      "hash": "2a1907d0e7b23ecb5f4134bcd02b241d",
-      "tokens": 6154,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_run_project_tests.py",
-      "type": "code/python",
-      "hash": "96049772c993f09c37629e9a5d074d4d",
-      "tokens": 11022,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_runtime_tester_integration.py",
-      "type": "code/python",
-      "hash": "c9521d28ab3c98a8174e581d1525c5f5",
-      "tokens": 8636,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_semantic_index.py",
-      "type": "code/python",
-      "hash": "c7ae9a67fca127964a6f3b9690394017",
-      "tokens": 10118,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\test_validation_pipeline.py",
-      "type": "code/python",
-      "hash": "d5fad40892353335022d74093179e7cf",
-      "tokens": 3945,
-      "description": "Code file (no description available)",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "scripts\\Проанализируй файл answer_generator.py.md",
-      "type": "text/md",
-      "hash": "7a2a993eae497a3767e4b3cb94ba2f47",
-      "tokens": 108,
-      "description": "This is a task specification file (in Russian) that provides instructions for analyzing the `answer_generator.py` file and related files in a different project directory. It requests an implementation of asynchronous text filtering for articles while preserving the existing filtering logic, asking for both code and explanations. The file serves as a development directive or analysis request rather than containing functional code within the current project.",
+      "path": "session_20260709_010815_session-.log",
+      "type": "other",
+      "hash": "76a863d8fc7b1bc978f5cefbf0dfe421",
+      "tokens": 10656,
+      "description": "",
       "is_code": false,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-10T21:10:43.019502Z"
+    },
+    {
+      "path": "staging_error_20260711_181337_124335.json",
+      "type": "data/json",
+      "hash": "b1f4cc95fe3337a3d139286206e55688",
+      "tokens": 91989,
+      "description": "File exceeds 30000 tokens",
+      "is_code": false,
+      "last_updated": "2026-07-11T15:23:43.527475Z"
+    },
+    {
+      "path": "staging_error_20260711_181337_127335.json",
+      "type": "data/json",
+      "hash": "5d6908256788d4dde7c7317a7aa2a6f5",
+      "tokens": 9351,
+      "description": "This is a diagnostic error log file that records a failed AI code modification attempt on `app/llm/api_client.py`. It captures a specific `AI_CASCADE_FAILED` error where both primary and fallback AI models failed structural validation during a `REPLACE_IN_METHOD` operation targeting the `_make_request` method of the `LLMClient` class. The file contains the complete backup of the original file content (the full `api_client.py` source code), the attempted replacement pattern (`try:`), and the specific validation error (`unindent does not match any outer indentation level` at line 526). This log serves as a debugging artifact for the project's AI-driven code modification pipeline, preserving the exact state and error context for post-mortem analysis and potential manual recovery.",
+      "is_code": false,
+      "last_updated": "2026-07-11T15:23:43.527475Z"
+    },
+    {
+      "path": "staging_error_20260711_181805_653318.json",
+      "type": "data/json",
+      "hash": "0f688b8ca025d4c8e3c8053a4ac2356e",
+      "tokens": 9491,
+      "description": "This is a JSON error log file generated by the AI Assistant Pro's code modification pipeline when an AI-driven code change fails structural validation. It records a failed attempt to modify `app/llm/api_client.py` (specifically the `_make_request` method of `LLMClient`) where both AI models (Model A and Model B) produced invalid syntax at line 537. The file captures the full error context including the target file, the attempted replacement pattern, the backup content of the original file, and the specific validation error (\"invalid syntax\") that prevented the change from being applied. This log is used for debugging AI code generation failures and tracking the system's error recovery behavior.",
+      "is_code": false,
+      "last_updated": "2026-07-11T15:23:43.527475Z"
     },
     {
       "path": "temp_test.py",
@@ -1770,85 +1968,85 @@
       "last_updated": "2026-01-03T03:08:28.474128Z"
     },
     {
-      "path": "test.py",
+      "path": "test_staging_bug.py",
       "type": "code/python",
-      "hash": "6cc1e843e60469d084d601254d3c0620",
-      "tokens": 2468,
-      "description": "Asynchronous test suite for OpenRouter AI model availability and performance, integrating httpx for HTTP requests and asyncio for concurrency and delay management.",
+      "hash": "c4aa79922f20111617835c6cff35b186",
+      "tokens": 6008,
+      "description": "Test suite for staging bug detection, validating code state transitions and mutation analysis through mocked AI validation and virtual file system integration.",
       "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-05T09:56:49.490449Z"
     },
     {
-      "path": "test_all_chunkers.py",
-      "type": "code/python",
-      "hash": "3022e25771b920f673ce3d0e1fbf7bfa",
-      "tokens": 1372,
-      "description": "Unit test suite for validating language-specific code chunkers (Python, Go, SQL) using SmartChunker classes and Rich library for structured console output.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "test_cache_logic.py",
-      "type": "code/python",
-      "hash": "aa8e6f8cb7f37e84dfd32cd3238d7803",
-      "tokens": 375,
-      "description": "Unit test suite validating response caching behavior for AI tool interactions, specifically verifying cache_control integration for Claude models processing resource-intensive operations.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "test_caching_real.py",
-      "type": "code/python",
-      "hash": "886d81ff0afdeab1b3a02a5cb5f8edff",
-      "tokens": 701,
-      "description": "Unit test for caching behavior in LLM tool calls, integrating with orchestration and tool-calling frameworks to validate cache control interception and cleanup.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "test_deepseek_direct.py",
-      "type": "code/python",
-      "hash": "aaaab9a3cd1f257c218afed18ff97257",
-      "tokens": 165,
-      "description": "Unit test for DeepSeek API integration, validating configuration and response parsing for the 'pre_filter' role.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "test_index_builder.py",
-      "type": "code/python",
-      "hash": "a7dbdddd394a70445cb37af3ab8cec00",
-      "tokens": 5828,
-      "description": "Unit test suite for validating the project index builder's core functions, including directory selection, project creation, structure verification, and JSON metadata generation.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "test_prefilter_minimal.py",
-      "type": "code/python",
-      "hash": "3d2ee5a84c83aa8cd879afc31eb88c6f",
-      "tokens": 429,
-      "description": "Unit test for a minimal LLM pre-filter workflow, validating model configuration and JSON response generation via call_llm with performance timing.",
-      "is_code": true,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
-    },
-    {
-      "path": "token_stats.json",
+      "path": "trace_20260711_172549_20260711.json",
       "type": "data/json",
-      "hash": "566ef13044ad359086b8db0015fee68a",
-      "tokens": 177,
-      "description": "This JSON file stores aggregated token statistics for the entire project, providing a quantitative overview of codebase composition. It tracks total files and tokens broken down by language (Python vs. non-Python) and by specific file types (code, text, data). The statistics help monitor project size and distribution, likely used for context management, token budgeting, or performance analysis within the AI-assisted development system.",
+      "hash": "3049243aeaa9140ca401115390e8bad8",
+      "tokens": 11537,
+      "description": "This is a detailed trace log from the AI Assistant Pro orchestrator, documenting a single failed iteration of an automated code fix attempt. It captures a user request about provider migration issues, the orchestrator's instruction to fix a SyntaxError in main.py and remove a duplicate check in api_client.py, and the full set of generated code patches across multiple files (config/settings.py, config/provider_models.py, config/intermediate_agent_models.py, app/llm/api_client.py, main.py, and config/provider_keys.json). The trace records that while technical validation passed and the AI validator approved the changes, runtime testing failed because the SyntaxError in main.py was not properly resolved, and it logs 10 staging errors where AI cascade validation failed on structural checks. This file serves as a debugging and audit record for understanding why an automated fix attempt failed, showing the exact code changes proposed, validation results, and the specific errors encountered.",
       "is_code": false,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-11T15:23:43.527475Z"
     },
     {
-      "path": "validation_test.log",
-      "type": "other",
-      "hash": "26ff302aabc19f17f81b674e657c20da",
-      "tokens": 2147,
-      "description": "",
+      "path": "План внедрения тестировщика.md",
+      "type": "text/md",
+      "hash": "1bdca32ee8854af82f0995916f9ebcaf",
+      "tokens": 9077,
+      "description": "This is a detailed implementation plan for integrating a new **TesterAgent** into the project's AI pipeline. It specifies the creation of four new files (tool definitions, executor, translator, and the agent itself) and modifications to three existing files (`tool_definitions.py`, `agent_pipeline.py`, `main.py`). The plan defines the agent's architecture as an isolated LLM with read-only access to the Virtual File System (VFS), a set of unique testing tools (Ruff, compilation, code execution, git diff), and a strict workflow where it is invoked after all other validations pass. It also outlines the report generation and translation process, and how the tester's feedback can be injected into the orchestrator's feedback cycle for code revisions.",
       "is_code": false,
-      "last_updated": "2026-01-03T03:08:28.474128Z"
+      "last_updated": "2026-07-04T18:57:03.261321Z"
+    },
+    {
+      "path": "План по исправлению проблем с отступами.md",
+      "type": "text/md",
+      "hash": "7fcec06c37f3776d68877c4af6d295e1",
+      "tokens": 5842,
+      "description": "This is a diagnostic and remediation plan document (in Russian) that identifies and prescribes fixes for six specific indentation bugs in `app/services/file_modifier.py`. It provides a detailed analysis of each error, including the root cause, affected code lines, and exact replacement code for four critical changes in methods like `_strip_code_block_to_zero_base`, `_find_container_indent_at_insertion`, and `_patch_method`. The document serves as a technical specification for developers to correct indentation handling in the file modification system, ensuring proper tab expansion, block header detection, and zero-base stripping for code blocks.",
+      "is_code": false,
+      "last_updated": "2026-07-03T13:55:07.381615Z"
+    },
+    {
+      "path": "План по рефакторингу нормализации.md",
+      "type": "text/md",
+      "hash": "760ed46430163eca1795dcc259804260",
+      "tokens": 1030,
+      "description": "This is a technical analysis document outlining a refactoring plan for the code normalization system in the project. It identifies six specific defects in the indentation normalization pipeline, including issues with zero-base stripping, Tree-sitter parsing with incorrect column offsets, missing dedentation before parsing, incomplete idempotency handling for block headers, tab character vulnerabilities, and incomplete fallback coverage for clause keywords. The document serves as a bug report and refactoring specification for the file_modifier.py component, providing detailed root cause analysis and proposed fixes for each identified issue.",
+      "is_code": false,
+      "last_updated": "2026-07-03T13:55:07.381615Z"
+    },
+    {
+      "path": "План по улучшении миграции на OpenAI SDK.md",
+      "type": "text/md",
+      "hash": "0cea89821a270ff42a665b65f76d0abd",
+      "tokens": 3591,
+      "description": "This is a detailed implementation plan for improving the OpenAI SDK migration and fixing multi-provider issues in an AI coding assistant project. It identifies four specific problems: stripped model names not being propagated to API calls, potential regression for OpenRouter/RouterAI providers, hardcoded model values overriding provider-aware selection, and the need for separate orchestrator and generator model lists. The document provides concrete code changes for six files (settings.py, api_client.py, validator.py, syntax_fixer_agent.py, provider_models.py, main.py) with exact line numbers, helper function designs, and execution order. It serves as a technical specification for developers to implement targeted fixes that ensure correct model prefix handling, preserve existing provider behavior, and properly separate model roles without reducing functionality.",
+      "is_code": false,
+      "last_updated": "2026-07-07T19:08:16.488241Z"
+    },
+    {
+      "path": "Прошлый запрос по провайдерам.md",
+      "type": "text/md",
+      "hash": "0d5a2a128323c6e67e58bcfa30307173",
+      "tokens": 8630,
+      "description": "This is a detailed implementation plan document in Russian that diagnoses and proposes fixes for multiple interconnected bugs in an AI coding assistant project. It identifies four root problem areas: provider configuration errors (400 errors, NoneType issues), unprotected intermediate agents from reasoning_effort parameters, broken user provider selection with multiple API keys, and missing provider-to-model visibility in the UI. The document provides specific code changes across six files (settings.py, provider_models.py, intermediate_agent_models.py, api_client.py, main.py, provider_keys.json) with corrected logic for API key resolution, model ID updates for DeepSeek V4, proper handling of OpenAI SDK contracts, and UI improvements for provider selection and display. It serves as a comprehensive technical specification for a developer to systematically fix provider management, agent routing, and user interface issues in the project.",
+      "is_code": false,
+      "last_updated": "2026-07-08T22:05:05.827953Z"
+    },
+    {
+      "path": "блок 12.md",
+      "type": "text/md",
+      "hash": "20eb102b94f610c9e238c7bc5d072405",
+      "tokens": 73,
+      "description": "This file contains a structured code modification instruction targeting the `main.py` file, specifying a `REPLACE_IN_METHOD` operation to update a user choice prompt. It defines a specific code snippet that replaces an existing prompt with a new `prompt_with_navigation` call offering four numbered options (1-4) with a default of `None`. This appears to be a patch or change request for the core application controller, likely part of a staged modification or AI-generated code update within the project's agent pipeline.",
+      "is_code": false,
+      "last_updated": "2026-07-05T13:00:17.940162Z"
+    },
+    {
+      "path": "внедрение новых языков программирования.md",
+      "type": "text/md",
+      "hash": "2216028d646f68b13b26a3a2e72ac6e7",
+      "tokens": 6055,
+      "description": "This file is a detailed implementation plan for adding multi-language support (JavaScript/TypeScript, Go, Java) to the project's AI-assisted code validation system. It outlines the architectural approach, specifying new abstract and concrete language adapter classes, integration points with the existing ChangeValidator and DependencyManager, and required external tool installations. The plan focuses on enabling syntax linting, automatic error fixing, formatting, and basic runtime testing for these languages, mirroring the existing Python support. It serves as a comprehensive technical specification for developers to implement the feature.",
+      "is_code": false,
+      "last_updated": "2026-03-07T18:32:50.649609Z"
     },
     {
       "path": "современная структура.md",
