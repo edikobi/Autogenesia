@@ -71,7 +71,7 @@ pip install -r requirements.txt
 # 3. Настроить API ключи
 cp .env.example .env
 # Отредактируйте .env файл, добавив ключи от провайдеров
-```
+
 
 ### 🔑 Настройка провайдеров LLM
 
