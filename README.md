@@ -1,5 +1,5 @@
 
-```markdown
+```
 <div align="center">
   <h1>🤖 Autogenesia</h1>
   <p><strong>Мультиагентная система на базе LLM для автономной генерации, рефакторинга и валидации кода</strong></p>
