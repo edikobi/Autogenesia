@@ -4,7 +4,7 @@
   <h1>🤖 Autogenesia</h1>
   <p><strong>Мультиагентная система на базе LLM для автономной генерации, рефакторинга и валидации кода</strong></p>
   
-<img width="109" height="20" alt="image" src="https://github.com/user-attachments/assets/a01c0882-5eb4-4504-9a11-ae31102fbb22" />
+
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
   ![OpenAI SDK](https://img.shields.io/badge/OpenAI%20SDK-✓-success?logo=openai&logoColor=white)
