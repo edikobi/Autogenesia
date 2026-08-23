@@ -1382,7 +1382,7 @@ class AgentPipeline:
                     
                         continue
                 
-    # ==============================================================
+                    # ==============================================================
                     # STEP 3.5: PRE-INSTALL REQUIREMENTS.TXT DEPENDENCIES
                     # ==============================================================
                     try:
@@ -1838,6 +1838,7 @@ class AgentPipeline:
                         else:
                             logger.warning(f"Unknown orchestrator decision: {orchestrator_decision.decision}, proceeding to tests")
                             self.feedback_loop.validator_overrides_count += 1
+                   
                         
                     # ==============================================================
                     # STEP 6: TESTS + RUNTIME
@@ -3033,6 +3034,7 @@ Please analyze this feedback and provide a revised instruction.""",
             )
             
             # ==============================================================
+            # ==============================================================
             # STEP 5.5: ORCHESTRATOR DECISION (if AI rejected)
             # ==============================================================
             
@@ -3101,53 +3103,60 @@ Please analyze this feedback and provide a revised instruction.""",
                     # Continue to next iteration
                     continue
                 
-            # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
-            elif orchestrator_decision.decision == "OVERRIDE":
-                logger.info("Orchestrator wants to override AI Validator")
-                # ══════════════════════════════════════════════════════════
-                # FIX: Добавлен callback к пользователю (как в process_request)
-                # ══════════════════════════════════════════════════════════
-                if self._on_user_decision:
-                    user_choice = await self._on_user_decision(
-                        "orchestrator_override",
-                        {
-                            "ai_result": ai_result.to_dict(),
-                            "orchestrator_reasoning": orchestrator_decision.reasoning,
-                            "code_blocks": [
-                                {"file": b.file_path, "mode": b.mode}
-                                for b in code_blocks
-                            ],
-                        }
-                    )
-                    logger.info(f"User decision on override (feedback_cycle): {user_choice}")
+                # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
+                elif orchestrator_decision.decision == "OVERRIDE":
+                    logger.info("Orchestrator wants to override AI Validator")
+                    # ══════════════════════════════════════════════════════════
+                    # FIX: Добавлен callback к пользователю (как в process_request)
+                    # ══════════════════════════════════════════════════════════
+                    if self._on_user_decision:
+                        user_choice = await self._on_user_decision(
+                            "orchestrator_override",
+                            {
+                                "ai_result": ai_result.to_dict(),
+                                "orchestrator_reasoning": orchestrator_decision.reasoning,
+                                "code_blocks": [
+                                    {"file": b.file_path, "mode": b.mode}
+                                    for b in code_blocks
+                                ],
+                            }
+                        )
+                        logger.info(f"User decision on override (feedback_cycle): {user_choice}")
 
-                    if user_choice == "cancel":
-                        await self.discard_pending_changes()
-                        result.status = PipelineStatus.CANCELLED
-                        result.errors.append("User cancelled request after orchestrator override")
-                        result.duration_ms = (time.time() - start_time) * 1000
-                        return result
+                        if user_choice == "cancel":
+                            await self.discard_pending_changes()
+                            result.status = PipelineStatus.CANCELLED
+                            result.errors.append("User cancelled request after orchestrator override")
+                            result.duration_ms = (time.time() - start_time) * 1000
+                            return result
 
-                    elif user_choice == "force_fix":
-                        # Пользователь считает критику обоснованной — заставляем исправить
-                        feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
-                        working_history.append({
-                            "role": "user",
-                            "content": f"[USER OVERRIDE - MUST FIX]\n{feedback_msg}",
-                        })
-                        continue  # ← Возврат к Оркестратору
+                        elif user_choice == "force_fix":
+                            # Пользователь считает критику обоснованной — заставляем исправить
+                            feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
+                            working_history.append({
+                                "role": "user",
+                                "content": f"[USER OVERRIDE - MUST FIX]\n{feedback_msg}",
+                            })
+                            continue  # ← Возврат к Оркестратору
 
-                    elif user_choice == "proceed":
-                        logger.info("User trusts Orchestrator override, proceeding to tests")
-                        self.feedback_loop.validator_overrides_count += 1
+                        elif user_choice == "proceed":
+                            logger.info("User trusts Orchestrator override, proceeding to tests")
+                            self.feedback_loop.validator_overrides_count += 1
 
+                        else:
+                            logger.warning(f"Unknown user choice: {user_choice}, proceeding to tests")
+                            self.feedback_loop.validator_overrides_count += 1
                     else:
-                        logger.warning(f"Unknown user choice: {user_choice}, proceeding to tests")
+                        logger.info("No user decision callback in feedback_cycle, auto-proceeding")
                         self.feedback_loop.validator_overrides_count += 1
+                    # ══════════════════════════════════════════════════════════
+                
                 else:
-                    logger.info("No user decision callback in feedback_cycle, auto-proceeding")
+                    logger.warning(
+                        f"Unknown orchestrator decision: {orchestrator_decision.decision}, "
+                        f"proceeding to tests"
+                    )
                     self.feedback_loop.validator_overrides_count += 1
-                # ══════════════════════════════════════════════════════════            
             
             # ==============================================================
             # STEP 6: TESTS + RUNTIME
@@ -4303,7 +4312,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                 )
 
                 if fixed_snippet and fixed_snippet != block.code:
-                    print(f"🤖 [DEBUG] Model A proposed code:\n{fixed_snippet}\n" + "-"*40)
+                    print(f"\n🤖 [DEBUG] Model A proposed code:\n{fixed_snippet}\n" + "-"*40)
                     temp_block = copy.copy(block)
                     temp_block.code = fixed_snippet
                     temp_res = self.file_modifier.apply_code_block(current_vfs_content, temp_block)
@@ -4335,7 +4344,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                     )
 
                     if fixed_snippet and fixed_snippet != block.code:
-                        print(f"🤖 [DEBUG] Model B (Fallback) proposed code:\n{fixed_snippet}\n" + "-"*40)
+                        print(f"\n🤖 [DEBUG] Model B (Fallback) proposed code:\n{fixed_snippet}\n" + "-"*40)
                         temp_block = copy.copy(block)
                         temp_block.code = fixed_snippet
                         temp_res = self.file_modifier.apply_code_block(snapshot_content, temp_block)
