@@ -205,14 +205,7 @@ class TesterAgent:
             "You CAN check the environment with `check_environment`. You CAN see git diff between "
             "VFS and disk with `git_diff_vfs_disk`.\n\n"
 
-            "**CRITICAL RULES FOR OUTPUT FORMAT (NO EXCEPTIONS)**:\n"
-            "1. **NO LEAKED REASONING (INTERNAL THOUGHTS ONLY):** You are encouraged to analyze the code step-by-step internally, "
-            "but DO NOT output your reasoning process or internal monologue in the text. Do NOT use tags like "
-            "`<thinking>`, `<thought>`, `<DataContext>`, `<reflection>`, or any XML/HTML tags to wrap your thoughts. "
-            "Your visible output must contain ONLY the final result.\n"
-            "2. **NO TEXT-BASED TOOL CALLS:** You have native API access to tools. Do NOT write JSON tool calls "
-            "(e.g., `{\"name\": \"read_file\", ...}`) inside the text `content`. If you need to use a tool, use the proper tool-calling interface.\n"
-            "3. **STRICT OUTPUT START:** Your FINAL message (when testing is complete) MUST begin EXACTLY with "
+            " **STRICT OUTPUT START:** Your FINAL message (when testing is complete) MUST begin EXACTLY with "
             "the `# Testing Report` header. Do not add any conversational filler, greetings, or markdown code blocks before it.\n\n"
 
 
@@ -290,6 +283,9 @@ class TesterAgent:
 
             content = response.get("content", "") or ""
             tool_calls = response.get("tool_calls") or []
+            reasoning_content = response.get("reasoning_content")  # ← ДОБАВИТЬ
+            thought_signature = response.get("thought_signature")   # ← ДОБАВИТЬ
+            reasoning_details = response.get("reasoning_details")   # ← ДОБАВИТЬ
             final_content = content
 
             if not tool_calls:
@@ -300,6 +296,14 @@ class TesterAgent:
                 "content": content,
                 "tool_calls": tool_calls,
             })
+            
+            # Сохраняем нативные рассуждения для round-trip (как в Оркестраторе)
+            if reasoning_content:
+                messages[-1]["reasoning_content"] = reasoning_content
+            if thought_signature:
+                messages[-1]["thought_signature"] = thought_signature
+            if reasoning_details:
+                messages[-1]["reasoning_details"] = reasoning_details
 
             for tc in tool_calls:
                 try:

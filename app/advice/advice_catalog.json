@@ -146,6 +146,23 @@
     },
 
     {
+      "id": "ADV-G17",
+      "name": "UX/UI Design Principles & Visual Hierarchy",
+      "category": "general",
+      "description": "Framework for designing intuitive and accessible user interfaces. Guides you to establish visual hierarchy, manage cognitive load using whitespace, ensure clear affordances, and design for edge states (empty, loading, error) and accessibility.",
+      "when_to_use": "When designing a new screen, creating UI components, styling forms, or when the generated interface looks cluttered, confusing, or lacks visual hierarchy."
+    },
+
+    {
+      "id": "ADV-G18",
+      "name": "Responsive & Layout Engineering Strategy",
+      "category": "general",
+      "description": "Methodology for building fluid, robust layouts. Covers mobile-first design, selecting the right layout engine (Flexbox vs Grid), defining reflow logic for breakpoints, and preventing layout breakage from edge cases like long text or missing assets.",
+      "when_to_use": "When structuring page layouts, building responsive components, fixing UI overflow issues, or adapting a desktop design for mobile screens."
+    },
+
+
+    {
       "id": "ADV-E01",
       "name": "Caching Strategy Design",
       "category": "existing_project",
