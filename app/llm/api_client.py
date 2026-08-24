@@ -349,6 +349,7 @@ class LLMRequest:
     top_p: float = 0.9
     tools: Optional[List[Dict]] = None
     tool_choice: Optional[str] = None
+    reasoning_effort: Optional[str] = None
 
 
 
@@ -520,6 +521,7 @@ class LLMClient:
                 is_intermediate: bool = False,
                 on_delta: Optional[Callable[[str], None]] = None,
                 on_reasoning_delta: Optional[Callable[[str], None]] = None,
+                reasoning_effort: Optional[str] = None,
             ) -> LLMResponse:
                 """
                 Universal LLM call with automatic provider routing.
@@ -582,6 +584,7 @@ class LLMClient:
                     top_p=top_p,
                     tools=tools,
                     tool_choice=tool_choice,
+                    reasoning_effort=reasoning_effort,
                 )
 
                 # Execute with retry (pass stripped_model and base_url for OpenAI SDK)
