@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> 303e0edee6e91e3dfaf077a4e6bbca0b7bec6afa
 <div align="center">
   <h1>🤖 Autogenesia</h1>
   <p><strong>Мультиагентная система на базе LLM для автономной генерации, рефакторинга и валидации кода</strong></p>
@@ -71,8 +74,13 @@ pip install -r requirements.txt
 # 3. Настроить API ключи
 cp .env.example .env
 # Отредактируйте .env файл, добавив ключи от провайдеров
+<<<<<<< HEAD
 
 
+=======
+```bash
+```
+>>>>>>> 303e0edee6e91e3dfaf077a4e6bbca0b7bec6afa
 ### 🔑 Настройка провайдеров LLM
 
 Проект использует универсальный клиент на базе OpenAI SDK. В `.env` файле вы можете указать ключи для следующих провайдеров:
@@ -208,5 +216,3 @@ PolyForm Noncommercial License 1.0.0. Проект можно бесплатно
 **Автор:** Обиди Эдвард
 - GitHub: [@edikobi](https://github.com/edikobi)
 - Email: obidi@yandex.ru
-```
-
