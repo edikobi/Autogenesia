@@ -35,11 +35,11 @@ RUFF_TOOL: Dict[str, Any] = {
     "function": {
         "name": "run_ruff",
         "description": (
-            "Run the ruff linter on a PYTHON file (.py) from VFS (staged version). "
+            "Run the ruff linter on a PYTHON file (.py) from VFS (staged version)."
             "Ruff is a Python-only linter."
-            "The file is executed in the workspace context. "
+            "The file is executed in the workspace context."
             "Returns linting results in JSON format. "
-            "Use this to check code quality, style violations, and potential bugs. "
+            "Use this to check code quality, style violations, and potential bugs."
             "Supports custom rule selection, ignore rules, auto-fix mode, and TOML config override."
         ),
         "parameters": {
