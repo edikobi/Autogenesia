@@ -153,7 +153,24 @@ def analyze_webpage_tool(
         for href, text in links:
             links_xml += f'  <link href="{_xml_escape(href)}">{_xml_escape(text)}</link>\n'
 
+    # НОВЫЙ БЛОК: Извлечение RSS/Atom лент из тегов <link>
+    rss_xml = ""
+    if extract_links:
+        for link in soup.find_all("link"):
+            rel_attr = link.get("rel", [])
+            # В BeautifulSoup 'rel' возвращается как список, например ['alternate']
+            if isinstance(rel_attr, list):
+                rel_attr = " ".join(rel_attr)
+            
+            link_type = link.get("type", "").lower()
+            href = link.get("href", "")
+            
+            if "alternate" in rel_attr and ("rss" in link_type or "atom" in link_type):
+                abs_href = _absolutize_url(href, url)
+                rss_xml += f'  <rss_feed type="{_xml_escape(link_type)}">{_xml_escape(abs_href)}</rss_feed>\n'
+
     forms_xml = ""
+    
     if extract_forms:
         for form in soup.find_all("form"):
             action = form.get("action", "")
@@ -211,6 +228,8 @@ def analyze_webpage_tool(
 {metadata_xml}</metadata>
 <links count="{links_count}">
 {links_xml}</links>
+<rss_feeds>
+{rss_xml}</rss_feeds>
 <forms>
 {forms_xml}</forms>
 <media>
@@ -218,6 +237,7 @@ def analyze_webpage_tool(
 <technologies>
 {tech_xml}</technologies>
 </webpage_analysis>"""
+
 
 def check_security_tool(url: str, check_certificate: bool = True, follow_redirects: bool = True) -> str:
     """Evaluate basic security posture of a website."""
