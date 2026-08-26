@@ -1,6 +1,5 @@
 # app/utils/translator.py
 """
-Модуль перевода текста на русский язык через Gemini 2.0 Flash.
 
 Используется для перевода:
 - Мыслей (thinking) Оркестратора
@@ -11,7 +10,7 @@
 Преимущества использования LLM вместо внешних библиотек:
 - Уже настроен и доступен
 - Понимает технический контекст
-- Стоимость ничтожна (~$0.001 за сессию)
+- Стоимость ничтожна (~$0.001 за сессию) - хахахах
 - Сохраняет код и технические термины на английском
 """
 
@@ -279,7 +278,10 @@ def translate_sync(text: str, context: str = "AI agent reasoning") -> str:
             loop = None
         
         if loop and loop.is_running():
-            # Event loop уже запущен — создаём новый loop в отдельном потоке
+            # Event loop уже запущен — создаём новый loop в отдельном потоке.
+            # ВАЖНО: НЕ используем `with` — его __exit__ вызывает
+            # pool.shutdown(wait=True), что блокирует до завершения потока,
+            # обнуляя таймаут. Вместо этого — явный shutdown(wait=False).
             import concurrent.futures
             
             def run_in_new_loop():
@@ -291,15 +293,17 @@ def translate_sync(text: str, context: str = "AI agent reasoning") -> str:
                     )
                 finally:
                     new_loop.close()
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(run_in_new_loop)
-                try:
-                    result = future.result(timeout=20)  # 20 секунд таймаут
-                    return result if result else text
-                except concurrent.futures.TimeoutError:
-                    logger.warning("Translation timed out (20s)")
-                    return text
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(run_in_new_loop)
+            try:
+                result = future.result(timeout=10)  # 10 секунд таймаут
+                return result if result else text
+            except concurrent.futures.TimeoutError:
+                logger.warning("Translation timed out (10s)")
+                return text
+            finally:
+                pool.shutdown(wait=False)  # НЕ ждать завершения потока        
+        
         else:
             # Нет запущенного loop — просто запускаем
             return asyncio.run(translate_to_russian(text, context))

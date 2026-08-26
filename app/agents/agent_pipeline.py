@@ -1112,10 +1112,18 @@ class AgentPipeline:
                     # === Trace: log instruction ===
                     trace.set_instruction(orchestrator_result.instruction or "[No instruction]")
                 
-                    # Report thinking
+                    # Report only the LAST thinking block, non-blocking
+                    last_thinking = None
                     for tc in orchestrator_result.tool_calls:
-                        if tc.thinking and self._on_thinking:
-                            self._on_thinking(tc.thinking)
+                        if tc.thinking:
+                            last_thinking = tc.thinking
+                    if last_thinking and self._on_thinking:
+                        threading.Thread(
+                            target=self._on_thinking,
+                            args=(last_thinking,),
+                            daemon=True,
+                            name="thinking-display",
+                        ).start()                
                 
                     if orchestrator_result.instruction:
                         self._notify_stage("INSTRUCTION", "Инструкция для Code Generator", {
@@ -3892,13 +3900,23 @@ Remember: You can override the validator if you believe the critique is incorrec
                 on_token=self._on_token,
             )
         
-        # Report thinking
+        # Report only the LAST thinking block, non-blocking.
+        # Ранее: цикл по ВСЕМ tool_calls, каждый вызов on_thinking
+        # блокировал на 20-54 сек (перевод). Теперь: только последний
+        # блок, в фоновом потоке — пайплайн не ждёт.
+        last_thinking = None
         for tc in result.tool_calls:
-            if tc.thinking and self._on_thinking:
-                self._on_thinking(tc.thinking)
-        
-        return result
-    
+            if tc.thinking:
+                last_thinking = tc.thinking
+        if last_thinking and self._on_thinking:
+            threading.Thread(
+                target=self._on_thinking,
+                args=(last_thinking,),
+                daemon=True,
+                name="thinking-display",
+            ).start()
+
+        return result    
     
     
     # ========================================================================

@@ -81,49 +81,58 @@ CONCURRENT_REQUESTS = 5
 RETRYABLE_5XX_STATUS_CODES = {500, 502, 503, 504, 520, 521, 522, 523, 524, 526}
 
 # ============== SHARED HTTP CLIENT POOL (Task 3) ==============
-# Module-level cache of shared httpx.AsyncClient instances per (base_url, api_key_hash).
-# Each provider gets ONE persistent pool with keep-alive — eliminates per-call TLS
-# handshake storms that triggered Cloudflare 5xx gate-keeping (cf-ray + cf-placement
-# remote-ORD responses with text/plain body, no JSON).
+# Module-level cache of shared httpx.AsyncClient instances per
+# (base_url, api_key_hash, event_loop_id).
 #
-# Why httpx.AsyncClient and not AsyncOpenAI cache:
-#   - SDK's `http_client=` parameter accepts our shared pool directly (documented
-#     "Custom HTTP Clients" pattern in openai-python).
-#   - SDK wrapper itself is cheap (just config); the expensive resource is the
-#     underlying httpx pool with its TLS sessions + keep-alive.
-#   - One pool per provider = stable TLS sessions across retries + agent pipeline
-#     (Orchestrator → Generator → Validator) instead of fresh handshakes per call.
-_provider_clients: Dict[Tuple[str, str], httpx.AsyncClient] = {}
+# The event_loop_id in the key is CRITICAL: httpx.AsyncClient binds its
+# internal transport (connection pool, TLS sessions) to the asyncio event
+# loop that was running at creation time.  When asyncio.run() is called
+# multiple times (each creates and closes a new loop), a client created on
+# a previous (now-dead) loop will raise RuntimeError('Event loop is closed')
+# on any transport operation.  Including id(loop) in the key ensures a
+# fresh client is created for each new loop.
+_provider_clients: Dict[Tuple[str, str, int], httpx.AsyncClient] = {}
 
 
-def _client_cache_key(base_url: str, api_key: str) -> Tuple[str, str]:
-    """Build cache key with hashed api_key (no raw secret in logs/dicts).
+def _client_cache_key(base_url: str, api_key: str) -> Tuple[str, str, int]:
+    """Build cache key with hashed api_key AND current event-loop id.
 
-    Returns (base_url_stripped, api_key_sha256_prefix). Same api_key+base_url
-    always maps to the same key — stable across retries and agent calls.
+    Returns (base_url_stripped, api_key_sha256_prefix, loop_id).
+    Same api_key+base_url+loop always maps to the same key — stable across
+    retries and agent calls within one event loop.  When the loop changes
+    (e.g. asyncio.run() called again), loop_id differs → new client created.
+
+    Uses id(loop) rather than the loop object itself to avoid keeping a
+    strong reference that would prevent GC of the loop object.
     """
     normalized_url = (base_url or "").rstrip("/")
     if api_key:
-        # Truncated sha256 — enough entropy for cache key, no PII leakage in logs.
         api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
     else:
         api_key_hash = "empty"
-    return (normalized_url, api_key_hash)
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        # No running loop — shouldn't happen in async context, but
+        # fall back to 0 so the function never crashes.
+        loop_id = 0
+    return (normalized_url, api_key_hash, loop_id)
 
 
 def _get_shared_http_client(base_url: str, api_key: str) -> httpx.AsyncClient:
-    """Return a shared httpx.AsyncClient for the (base_url, api_key) pair."""
+    """Return a shared httpx.AsyncClient for the (base_url, api_key, loop) triple."""
     key = _client_cache_key(base_url, api_key)
     client = _provider_clients.get(key)
     if client is None or client.is_closed:
-        # FIX: Возвращаем стандартное поведение httpx (без явного verify),
-        # чтобы использовать нативный SSLContext, как в старом коде.
+        # Opportunistic cleanup: remove any stale (closed) clients left
+        # over from previous event loops to prevent unbounded dict growth.
+        stale_keys = [k for k, c in _provider_clients.items() if c.is_closed]
+        for sk in stale_keys:
+            _provider_clients.pop(sk, None)
+
         client = httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT,
             limits=httpx.Limits(
-                # FIX: Лимиты уменьшены до 5, чтобы совпадать с CONCURRENT_REQUESTS.
-                # Стриминг удерживает соединения минутами. Если пул попытается открыть
-                # больше 5 соединений, Cloudflare сбросит лишние (BrokenResourceError).
                 max_connections=5,
                 max_keepalive_connections=5,
                 keepalive_expiry=40.0,
@@ -133,7 +142,7 @@ def _get_shared_http_client(base_url: str, api_key: str) -> httpx.AsyncClient:
         _provider_clients[key] = client
         logger.debug(
             f"Created shared httpx.AsyncClient pool: "
-            f"base_url={key[0]} api_key_hash={key[1]}"
+            f"base_url={key[0]} api_key_hash={key[1]} loop_id={key[2]}"
         )
     return client
 
@@ -152,7 +161,7 @@ async def close_all_clients() -> None:
                 await client.aclose()
             closed += 1
         except Exception as e:
-            logger.warning(f"Error closing shared httpx client for {key[0]}: {e}")
+            logger.warning(f"Error closing shared httpx client for {key[0]} (loop_id={key[2]}): {e}")
     _provider_clients.clear()
     if closed:
         logger.info(f"Closed {closed} shared HTTP client pool(s) on shutdown")
@@ -799,22 +808,22 @@ class LLMClient:
                         timeout_retries += 1
 
                         # === FIX: Drop stale connection pool on timeout ===
-                        # ConnectTimeout means the socket in the pool is guaranteed
-                        # dead (server never completed TLS handshake).  ReadTimeout
-                        # may also leave the socket in an inconsistent state.
-                        # Removing the client from the pool forces the next retry
-                        # to create a fresh TCP+TLS connection (like curl does).
+                        # Pop WITHOUT calling aclose() — the shared client may
+                        # still be used by active streams from other agents
+                        # (Orchestrator, Generator, Validator).  Calling
+                        # aclose() would kill those streams ("расстрел").
+                        # Instead, just remove from cache so the next request
+                        # creates a fresh client on a new TCP+TLS connection.
+                        # GC will clean up the old client once all active
+                        # streams release their references.
                         client_key = _client_cache_key(base_url, api_key)
-                        stale_client = _provider_clients.pop(client_key, None)
-                        if stale_client is not None:
-                            try:
-                                await stale_client.aclose()
-                            except Exception:
-                                pass
-                            logger.warning(
-                                f"Dropped stale httpx pool for {client_key[0]} "
-                                f"(timeout recovery, timeout_retry {timeout_retries})"
-                            )
+                        _provider_clients.pop(client_key, None)
+                        logger.warning(
+                            f"Dropped stale httpx pool for {client_key[0]} "
+                            f"(timeout recovery, timeout_retry {timeout_retries}, "
+                            f"loop_id={client_key[2]})"
+                        )                        
+                        
                         # ================================================
 
                         if timeout_retries <= TIMEOUT_MAX_RETRIES:
@@ -1115,13 +1124,12 @@ class LLMClient:
                         f"stream_options rejected by provider for {api_model}, "
                         f"resetting pool and retrying without stream_options: {e}"
                     )
+                    # Pop WITHOUT aclose() — the shared client may still be
+                    # used by active streams from other agents.  See the
+                    # timeout-recovery path in _execute_with_retry for the
+                    # full rationale.
                     client_key = _client_cache_key(base_url, api_key)
-                    stale_client = _provider_clients.pop(client_key, None)
-                    if stale_client is not None:
-                        try:
-                            await stale_client.aclose()
-                        except Exception:
-                            pass
+                    _provider_clients.pop(client_key, None)
 
                     kwargs.pop("stream_options", None)
 
