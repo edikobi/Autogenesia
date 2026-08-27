@@ -32,7 +32,66 @@ logger = logging.getLogger(__name__)
 # Минимальная допустимая версия pip в venv.
 # pip < 21.3 не поддерживает PEP 660 и новые метаданные PyPI,
 # что вызывает "Max retries exceeded" при установке современных пакетов.
+# Минимальная допустимая версия pip в venv.
 MIN_PIP_VERSION = (26, 0)
+
+# ============================================================================
+# SSL / CORPROATE PROXY WORKAROUND
+# ============================================================================
+# PyPI hosts that must be trusted when SSL verification fails due to
+# corporate proxy SSL inspection (Zscaler, Kaspersky, Symantec, etc.)
+PYPI_TRUSTED_HOSTS: List[str] = [
+    "pypi.org",
+    "files.pythonhosted.org",
+    "pypi.python.org",
+    "pypi.mirrors.example.com",
+]
+
+# Patterns that indicate SSL/certificate verification errors in pip output.
+# Used by _detect_ssl_error() to decide whether to retry with workarounds.
+SSL_ERROR_PATTERNS: List[str] = [
+    "SSL: CERTIFICATE_VERIFY_FAILED",
+    "certificate verify failed",
+    "self signed certificate",
+    "self-signed certificate",
+    "self-signed certificate in certificate chain",
+    "unable to get local issuer certificate",
+    "CERTIFICATE_VERIFY_FAILED",
+    "SSLError",
+    "Caused by NewConnectionError",
+    "Max retries exceeded",
+    "Failed to establish a new connection",
+    "ConnectionError",
+    "ssl.SSLCertVerificationError",
+    "[SSL: WRONG_VERSION_NUMBER]",
+    "subjectAltName",
+    "hostname mismatch",
+    "certificate has expired",
+    "certificate is not yet valid",
+]
+
+# Standard locations where corporate CA bundles might be installed.
+# Searched in order; first existing file wins.
+CORPORATE_CA_BUNDLE_PATHS: List[str] = [
+    # Corporate/system CA bundles (Linux/macOS)
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-bundle.crt",
+    # Corporate CA bundles (Windows — common proxy installs)
+    "C:\\ProgramData\\Microsoft\\Windows\\Certificates\\CAs.crt",
+    # User-provided via environment (highest priority at runtime)
+    # (handled separately via env vars)
+]
+
+# Environment variables that control SSL/CA behavior for pip and requests.
+SSL_ENV_VARS: List[str] = [
+    "PIP_CERT",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+]
+
 
 # ============================================================================
 # FALLBACK МАППИНГ: import name → pip package name
@@ -472,27 +531,28 @@ class DependencyManager:
                 )
                 return True
             
-            # Step 4: Upgrade pip
+            # Step 4: Upgrade pip (with SSL retry)
             logger.info(
                 f"[DEPS] pip version {version_str} is below minimum "
                 f"{MIN_PIP_VERSION[0]}.{MIN_PIP_VERSION[1]}, upgrading..."
             )
-            upgrade_result = subprocess.run(
-                [self._python_path, "-m", "pip", "install", "--upgrade", "pip"],
-                capture_output=True,
-                text=True,
-                timeout=120
+
+            returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
+                pip_args=["install", "--upgrade", "pip"],
+                timeout=120,
             )
-            
-            if upgrade_result.returncode == 0:
+
+            if returncode == 0:
                 logger.info("[DEPS] pip upgraded successfully")
+                if ssl_applied:
+                    logger.info("[DEPS] SSL workaround was applied during pip upgrade")
                 self._installed_cache = None
                 return True
             else:
                 logger.warning(
-                    f"[DEPS] pip upgrade failed: {upgrade_result.stderr[-300:]}"
+                    f"[DEPS] pip upgrade failed: {stderr[-300:]}"
                 )
-                return False
+                return False        
         
         except subprocess.TimeoutExpired:
             logger.warning("[DEPS] pip version check/upgrade timed out")
@@ -641,27 +701,29 @@ class DependencyManager:
             return True
         
         try:
+            # Jnc
             logger.info("[DEPS] Upgrading pip to latest version in new venv...")
-            upgrade_result = subprocess.run(
-                [self._python_path, "-m", "pip", "install", "--upgrade", "pip"],
-                capture_output=True,
-                text=True,
-                timeout=120
+
+            returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
+                pip_args=["install", "--upgrade", "pip"],
+                timeout=120,
             )
-            
-            if upgrade_result.returncode == 0:
+
+            if returncode == 0:
                 logger.info(
                     f"[DEPS] pip upgraded successfully: "
-                    f"{upgrade_result.stdout.strip()[-100:]}"
+                    f"{stdout.strip()[-100:]}"
                 )
+                if ssl_applied:
+                    logger.info("[DEPS] SSL workaround was applied during pip upgrade")
                 self._installed_cache = None
                 return True
             else:
                 logger.warning(
                     f"[DEPS] pip upgrade failed (non-fatal): "
-                    f"{upgrade_result.stderr[-200:]}"
+                    f"{stderr[-200:]}"
                 )
-                return False
+                return False        
         
         except subprocess.TimeoutExpired:
             logger.warning("[DEPS] pip upgrade timed out (non-fatal)")
@@ -669,6 +731,331 @@ class DependencyManager:
         except Exception as e:
             logger.warning(f"[DEPS] pip upgrade error (non-fatal): {e}")
             return False
+
+    # ========================================================================
+    # SSL / CORPORATE PROXY WORKAROUND METHODS
+    # ========================================================================
+
+    def _detect_ssl_error(self, stderr: str, stdout: str = "") -> bool:
+        """
+        Detects whether a pip failure is due to SSL certificate verification.
+
+        Corporate environments often use SSL-inspecting proxies (Zscaler,
+        Kaspersky, Symantec, BlueCoat) that replace the original certificate
+        with their own self-signed CA. pip refuses to trust it by default.
+
+        Args:
+            stderr: pip stderr output
+            stdout: pip stdout output (some errors go here)
+
+        Returns:
+            True if the failure looks SSL-related, False otherwise.
+        """
+        if not stderr and not stdout:
+            return False
+
+        combined = f"{stderr}\n{stdout}".lower()
+        for pattern in SSL_ERROR_PATTERNS:
+            if pattern.lower() in combined:
+                logger.warning(f"[DEPS] SSL error detected (pattern: '{pattern}')")
+                return True
+        return False
+
+    def _find_corporate_ca_bundle(self) -> Optional[str]:
+        """
+        Searches for a corporate CA bundle on the filesystem.
+
+        Checks:
+        1. Environment variables (PIP_CERT, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CURL_CA_BUNDLE)
+        2. Standard system locations (Linux/macOS/Windows)
+        3. pip's own certifi bundle as last resort
+
+        Returns:
+            Path to CA bundle file, or None if not found.
+        """
+        import os
+
+        # 1. Check environment variables (highest priority)
+        for var in SSL_ENV_VARS:
+            path = os.environ.get(var)
+            if path and Path(path).exists():
+                logger.info(f"[DEPS] Found CA bundle via env var {var}: {path}")
+                return path
+
+        # 2. Check standard system locations
+        for path in CORPORATE_CA_BUNDLE_PATHS:
+            if Path(path).exists():
+                logger.info(f"[DEPS] Found system CA bundle: {path}")
+                return path
+
+        # 3. Try to locate certifi bundle (pip's default)
+        try:
+            result = subprocess.run(
+                [self._python_path, "-c",
+                 "import certifi; print(certifi.where())"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                certifi_path = result.stdout.strip()
+                if certifi_path and Path(certifi_path).exists():
+                    logger.debug(f"[DEPS] Found certifi CA bundle: {certifi_path}")
+                    return certifi_path
+        except Exception as e:
+            logger.debug(f"[DEPS] Could not locate certifi bundle: {e}")
+
+        return None
+
+    def _build_ssl_env(self, ca_bundle: Optional[str] = None) -> Dict[str, str]:
+        """
+        Builds an environment dict with SSL-related variables set.
+
+        This ensures pip, requests, urllib3, and curl all use the same CA
+        bundle — critical for corporate proxy environments.
+
+        Args:
+            ca_bundle: Path to CA bundle. If None, env vars are not set
+                       (caller should use --trusted-host instead).
+
+        Returns:
+            Dict suitable for subprocess env= parameter.
+        """
+        import os
+        env = os.environ.copy()
+
+        if ca_bundle:
+            for var in SSL_ENV_VARS:
+                env[var] = ca_bundle
+            logger.debug(f"[DEPS] Set SSL env vars to: {ca_bundle}")
+
+        # Increase pip timeout and retries for flaky corporate networks
+        env.setdefault("PIP_DEFAULT_TIMEOUT", "120")
+        env.setdefault("PIP_RETRIES", "10")
+
+        return env
+
+    def _get_trusted_host_args(self) -> List[str]:
+        """
+        Builds the --trusted-host arguments for all PyPI hosts.
+
+        Returns:
+            List of command-line args like ["--trusted-host", "pypi.org", ...]
+        """
+        args: List[str] = []
+        for host in PYPI_TRUSTED_HOSTS:
+            args.extend(["--trusted-host", host])
+        return args
+
+    def _ensure_pip_config(self, ca_bundle: Optional[str] = None) -> None:
+        """
+        Creates or updates pip configuration file (pip.conf / pip.ini)
+        with SSL workarounds so ALL future pip invocations work.
+
+        This is a persistent fix — once written, every pip command in this
+        venv will use the trusted hosts and CA bundle automatically.
+
+        Args:
+            ca_bundle: Optional path to CA bundle to embed in config.
+        """
+        if self._venv_path is None:
+            return
+
+        import os
+
+        # Determine config file path based on OS
+        if sys.platform == "win32":
+            # Windows: pip.ini in venv root
+            config_path = self._venv_path / "pip.ini"
+        else:
+            # Unix: pip.conf in venv root
+            config_path = self._venv_path / "pip.conf"
+
+        try:
+            # Build config content
+            config_lines = ["[global]"]
+
+            # Trusted hosts (bypass SSL verification for PyPI)
+            config_lines.append(
+                f"trusted-host = {' '.join(PYPI_TRUSTED_HOSTS)}"
+            )
+
+            # CA bundle if provided
+            if ca_bundle:
+                config_lines.append(f"cert = {ca_bundle}")
+
+            # Timeout and retries
+            config_lines.append("timeout = 120")
+            config_lines.append("retries = 10")
+
+            # Write config (overwrite — we own this venv)
+            config_content = "\n".join(config_lines) + "\n"
+            config_path.write_text(config_content, encoding="utf-8")
+            logger.info(f"[DEPS] Updated pip config at {config_path}")
+
+        except (OSError, IOError) as e:
+            logger.warning(f"[DEPS] Could not write pip config: {e}")
+
+    def _run_pip_with_ssl_retry(
+        self,
+        pip_args: List[str],
+        timeout: int = 300,
+        cwd: Optional[str] = None,
+    ) -> Tuple[int, str, str, bool]:
+        """
+        Runs a pip command with multi-level SSL workaround retry logic.
+
+        Strategy (escalating):
+        1. Normal run (system CA bundle, no workarounds)
+        2. Retry with --trusted-host for all PyPI hosts
+        3. Retry with detected corporate CA bundle (via env vars + --cert)
+        4. Retry with both --trusted-host AND --cert
+        5. Final attempt: --trusted-host + HTTP index URL (insecure, last resort)
+
+        Args:
+            pip_args: pip command arguments (without 'python -m pip')
+            timeout: subprocess timeout in seconds
+            cwd: working directory for subprocess
+
+        Returns:
+            Tuple of (returncode, stdout, stderr, ssl_workaround_applied)
+            ssl_workaround_applied is True if any workaround was used successfully.
+        """
+        import os
+
+        base_cmd = [self._python_path, "-m", "pip"]
+        env_normal = self._build_ssl_env()
+
+        # === ATTEMPT 1: Normal run ===
+        logger.debug(f"[DEPS] pip attempt 1/5 (normal): {' '.join(pip_args[:3])}...")
+        result = subprocess.run(
+            base_cmd + pip_args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=cwd,
+            env=env_normal,
+        )
+
+        if result.returncode == 0:
+            return result.returncode, result.stdout, result.stderr, False
+
+        # Check if failure is SSL-related
+        if not self._detect_ssl_error(result.stderr, result.stdout):
+            # Non-SSL error — return as-is, no retry
+            return result.returncode, result.stdout, result.stderr, False
+
+        logger.warning(
+            "[DEPS] SSL error detected in attempt 1. "
+            "Retrying with --trusted-host workaround..."
+        )
+
+        # === ATTEMPT 2: --trusted-host for PyPI hosts ===
+        trusted_args = self._get_trusted_host_args()
+        logger.debug(f"[DEPS] pip attempt 2/5 (--trusted-host): {' '.join(pip_args[:3])}...")
+        result = subprocess.run(
+            base_cmd + pip_args + trusted_args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=cwd,
+            env=env_normal,
+        )
+
+        if result.returncode == 0:
+            # Success! Persist workaround to pip.conf so future calls work
+            self._ensure_pip_config(ca_bundle=None)
+            logger.info("[DEPS] SSL workaround (--trusted-host) succeeded. pip.conf updated.")
+            return result.returncode, result.stdout, result.stderr, True
+
+        # === ATTEMPT 3: Corporate CA bundle via env vars ===
+        ca_bundle = self._find_corporate_ca_bundle()
+        if ca_bundle:
+            logger.info(f"[DEPS] Found CA bundle: {ca_bundle}. Retrying with SSL env vars...")
+            env_with_ca = self._build_ssl_env(ca_bundle=ca_bundle)
+
+            logger.debug(f"[DEPS] pip attempt 3/5 (CA bundle env): {' '.join(pip_args[:3])}...")
+            result = subprocess.run(
+                base_cmd + pip_args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                cwd=cwd,
+                env=env_with_ca,
+            )
+
+            if result.returncode == 0:
+                # Success! Persist CA bundle path to pip.conf
+                self._ensure_pip_config(ca_bundle=ca_bundle)
+                logger.info("[DEPS] SSL workaround (CA bundle) succeeded. pip.conf updated.")
+                return result.returncode, result.stdout, result.stderr, True
+
+        # === ATTEMPT 4: Both --trusted-host AND --cert ===
+        if ca_bundle:
+            logger.info("[DEPS] Retrying with --trusted-host + --cert...")
+            cert_args = ["--cert", ca_bundle]
+
+            logger.debug(f"[DEPS] pip attempt 4/5 (trusted-host + cert): {' '.join(pip_args[:3])}...")
+            result = subprocess.run(
+                base_cmd + pip_args + trusted_args + cert_args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                cwd=cwd,
+                env=env_with_ca,
+            )
+
+            if result.returncode == 0:
+                self._ensure_pip_config(ca_bundle=ca_bundle)
+                logger.info("[DEPS] SSL workaround (trusted-host + cert) succeeded. pip.conf updated.")
+                return result.returncode, result.stdout, result.stderr, True
+
+        # === ATTEMPT 5: Last resort — HTTP index with trusted-host ===
+        # This bypasses HTTPS entirely. Use only if all else fails.
+        logger.warning(
+            "[DEPS] All SSL workarounds failed. Attempting HTTP index fallback "
+            "(insecure, last resort)..."
+        )
+
+        http_args = (
+            trusted_args +
+            ["--index-url", "http://pypi.org/simple/"] +
+            ["--trusted-host", "pypi.org"]
+        )
+
+        logger.debug(f"[DEPS] pip attempt 5/5 (HTTP index): {' '.join(pip_args[:3])}...")
+        result = subprocess.run(
+            base_cmd + pip_args + http_args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=cwd,
+            env=env_normal,
+        )
+
+        if result.returncode == 0:
+            logger.warning(
+                "[DEPS] HTTP index fallback succeeded. NOTE: This is insecure. "
+                "Please configure corporate CA bundle properly."
+            )
+            return result.returncode, result.stdout, result.stderr, True
+
+        # All attempts failed
+        logger.error(
+            f"[DEPS] All 5 SSL workaround attempts failed.\n"
+            f"Last stderr: {result.stderr[-500:]}"
+        )
+        return result.returncode, result.stdout, result.stderr, False
 
 
     def ensure_project_venv(self) -> bool:
@@ -1023,23 +1410,22 @@ class DependencyManager:
                     logger.info(f"Formatting tool '{tool}' is already available")
                     continue
                 
-                # If not available, install via pip
+                # If not available, install via pip (with SSL retry)
                 logger.info(f"Installing formatting tool '{tool}'...")
-                install_result = subprocess.run(
-                    [self._python_path, "-m", "pip", "install", tool],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=120
+
+                returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
+                    pip_args=["install", tool],
+                    timeout=120,
                 )
-                
-                results[tool] = (install_result.returncode == 0)
-                
-                if install_result.returncode == 0:
+
+                results[tool] = (returncode == 0)
+
+                if returncode == 0:
                     logger.info(f"Successfully installed formatting tool '{tool}'")
+                    if ssl_applied:
+                        logger.info(f"[DEPS] SSL workaround was applied for '{tool}'")
                 else:
-                    logger.warning(f"Failed to install formatting tool '{tool}': {install_result.stderr}")
+                    logger.warning(f"Failed to install formatting tool '{tool}': {stderr[-300:]}")            
             
             except subprocess.TimeoutExpired:
                 results[tool] = False
@@ -1217,23 +1603,23 @@ class DependencyManager:
         logger.info(f"Installing: {' '.join(cmd)}")
         
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
+            # Калибровка
+            # pip_args: всё после "python -m pip"
+            pip_args = cmd[3:]  # отбрасываем [python, "-m", "pip"]
+
+            returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
+                pip_args=pip_args,
                 timeout=300,
                 cwd=str(self.project_root),
             )
-            
-            if result.returncode == 0:
+
+            if returncode == 0:
                 # Сбрасываем кэш
                 self._installed_cache = None
                 installed_ver = self.get_installed_version(package_name)
-                
                 logger.info(f"Successfully installed {package_name} {installed_ver}")
-                
+                if ssl_applied:
+                    logger.info(f"[DEPS] SSL workaround was applied for {package_name}")
                 return InstallationResult(
                     package=package_name,
                     status=InstallResult.SUCCESS,
@@ -1241,8 +1627,13 @@ class DependencyManager:
                     version=installed_ver,
                 )
             else:
-                error_msg = result.stderr[-500:] if result.stderr else "Unknown error"
+                error_msg = stderr[-500:] if stderr else "Unknown error"
                 logger.error(f"Failed to install {package_name}: {error_msg}")
+                return InstallationResult(
+                    package=package_name,
+                    status=InstallResult.FAILED,
+                    message=f"Installation failed: {error_msg}",
+                )                
                 
                 return InstallationResult(
                     package=package_name,
