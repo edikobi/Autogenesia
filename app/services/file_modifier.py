@@ -169,6 +169,7 @@ class ModifyInstruction:
     insert_before: Optional[str] = None     # Вставить перед указанным элементом
     replace_pattern: Optional[str] = None   # Паттерн для поиска и замены
     replace_pattern_line: Optional[int] = None   # Опциональный номер строки (1-indexed) для REPLACE PATTERN.
+    replace_pattern_line_end: Optional[int] = None
     preserve_imports: bool = True           # Сохранять существующие импорты
     auto_format: bool = True                # Автоформатирование отступов
     skip_normalization: bool = False        # Пропустить нормализацию отступов (для auto-correct)
@@ -264,6 +265,7 @@ class ParsedCodeBlock:
         insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
         replace_pattern_line: Optional[int] = None,   # ⭐ НОВОЕ
+        replace_pattern_line_end: Optional[int] = None,
         language: Optional[str] = None,
     ):
         self.file_path = file_path
@@ -279,6 +281,7 @@ class ParsedCodeBlock:
         self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
         self.replace_pattern_line = replace_pattern_line   # ⭐ НОВОЕ
+        self.replace_pattern_line_end = replace_pattern_line_end
         self.language = language  # Programming language (python, javascript, typescript, go, java)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -297,6 +300,7 @@ class ParsedCodeBlock:
             'insert_before_target': self.insert_before_target,
             'replace_pattern': self.replace_pattern,
             'replace_pattern_line': self.replace_pattern_line,   # ⭐ НОВОЕ
+            'replace_pattern_line_end': self.replace_pattern_line_end,
             'language': self.language,
         }
 
@@ -317,6 +321,7 @@ class MultiLangDiffInstruction:
         insert_before_target: Optional[str] = None,
         replace_pattern: Optional[str] = None,
         replace_pattern_line: Optional[int] = None,
+        replace_pattern_line_end: Optional[int] = None,
         mode: str = "DIFF_INSERT",
     ):
         """Initialize multi-language diff instruction."""
@@ -332,6 +337,7 @@ class MultiLangDiffInstruction:
         self.insert_before_target = insert_before_target
         self.replace_pattern = replace_pattern
         self.replace_pattern_line = replace_pattern_line
+        self.replace_pattern_line_end = replace_pattern_line_end
         self.mode = mode
 
 # ============================================================================
@@ -610,6 +616,7 @@ class FileModifier:
                 insert_before=kwargs.get('insert_before', instruction.insert_before),
                 replace_pattern=kwargs.get('replace_pattern', instruction.replace_pattern),
                 replace_pattern_line=kwargs.get('replace_pattern_line', instruction.replace_pattern_line),  # ⭐ НОВОЕ
+                replace_pattern_line_end=kwargs.get('replace_pattern_line_end', instruction.replace_pattern_line_end),
                 preserve_imports=instruction.preserve_imports,
                 auto_format=instruction.auto_format,
                 skip_normalization=True
@@ -959,7 +966,8 @@ class FileModifier:
                     insert_after_target=block.insert_after_target,
                     insert_before_target=block.insert_before_target,
                     replace_pattern=block.replace_pattern,
-                    replace_pattern_line=block.replace_pattern_line, 
+                    replace_pattern_line=block.replace_pattern_line,
+                    replace_pattern_line_end=block.replace_pattern_line_end, 
                     mode=block.mode,
                 )
                 
@@ -1003,6 +1011,7 @@ class FileModifier:
                 insert_before=block.insert_before,
                 replace_pattern=block.replace_pattern,
                 replace_pattern_line=block.replace_pattern_line,
+                replace_pattern_line_end=block.replace_pattern_line_end,
                 preserve_imports=True,  # Always preserve imports
                 auto_format=True        # Always auto-format
             )
@@ -1094,6 +1103,7 @@ class FileModifier:
                     insert_before=block.insert_before,
                     replace_pattern=block.replace_pattern,
                     replace_pattern_line=block.replace_pattern_line,  # ⭐ НОВОЕ
+                    replace_pattern_line_end=block.replace_pattern_line_end,
                     mode=block.mode,
                 )
                 
@@ -1419,6 +1429,7 @@ class FileModifier:
                     insert_before=block.insert_before,
                     replace_pattern=block.replace_pattern,
                     replace_pattern_line=block.replace_pattern_line,
+                    replace_pattern_line_end=block.replace_pattern_line_end,
                     preserve_imports=True,
                     auto_format=True,
                 )
@@ -1821,69 +1832,47 @@ class FileModifier:
                 # Если replace_pattern_line указан и паттерн совпал — немедленная
                 # замена без поиска. Если не совпал — fallback к _find_unique_anchor.
                 if instruction.replace_pattern_line is not None:
-                    hint_start = instruction.replace_pattern_line - 1
-                    if 0 <= hint_start < len(lines):
-                        pattern_first_line = next(
-                            (l.strip() for l in instruction.replace_pattern.splitlines() if l.strip()),
-                            None
-                        )
-                        if pattern_first_line:
-                            file_line = lines[hint_start].strip()
-                            if pattern_first_line in file_line or file_line in pattern_first_line:
-                                # Хинт совпал! Вычисляем match_end.
-                                hint_end = hint_start + 1
-                                file_idx = hint_start + 1
-                                remaining_pattern_lines = [
-                                    l.strip() for l in instruction.replace_pattern.splitlines()
-                                    if l.strip()
-                                ][1:]
-                                for pl in remaining_pattern_lines:
-                                    while file_idx < len(lines) and not lines[file_idx].strip():
-                                        file_idx += 1
-                                    if file_idx >= len(lines):
-                                        break
-                                    fl = lines[file_idx].strip()
-                                    if pl in fl or fl in pl:
-                                        file_idx += 1
-                                        hint_end = file_idx
-                                    else:
-                                        break
-
-                                new_lines = instruction.code.split('\n')
-                                if new_lines and new_lines[-1].strip() != "":
-                                    new_lines.append("")
-
-                                modified_lines = lines[:hint_start] + new_lines + lines[hint_end:]
-                                modified_content = '\n'.join(modified_lines)
-
-                                if is_code_file:
-                                    is_valid, errors = self._validate_multilang_syntax(
-                                        modified_content, instruction.language
-                                    )
-                                    if not is_valid:
-                                        return ModifyResult(
-                                            success=False,
-                                            new_content=existing_content,
-                                            broken_content=modified_content,
-                                            message=(
-                                                f"DIFF_REPLACE: Syntax validation failed "
-                                                f"(line hint {instruction.replace_pattern_line}). "
-                                                f"Errors: {'; '.join(errors[:3])}"
-                                            )
-                                        )
-
-                                logger.info(
-                                    f"DIFF_REPLACE: Line hint {instruction.replace_pattern_line} "
-                                    f"matched, using direct replacement"
-                                )
+                    hint_result = self._try_pattern_at_line(
+                        lines, instruction.replace_pattern,
+                        instruction.replace_pattern_line,
+                        instruction.replace_pattern_line_end,
+                    )
+                    if hint_result is not None:
+                        hint_start, hint_end = hint_result
+                        new_lines = instruction.code.split('\n')
+                        if new_lines and new_lines[-1].strip() != "":
+                            new_lines.append("")
+                        modified_lines = lines[:hint_start] + new_lines + lines[hint_end:]
+                        modified_content = '\n'.join(modified_lines)
+                        if is_code_file:
+                            is_valid, errors = self._validate_multilang_syntax(
+                                modified_content, instruction.language
+                            )
+                            if not is_valid:
                                 return ModifyResult(
-                                    success=True,
-                                    new_content=modified_content,
-                                    message=f"DIFF_REPLACE: Replaced code for {instruction.language} (via line hint)",
-                                    changes_made=[
-                                        f"Replaced lines {hint_start + 1} to {hint_end} (via line hint)"
-                                    ],
+                                    success=False,
+                                    new_content=existing_content,
+                                    broken_content=modified_content,
+                                    message=(
+                                        f"DIFF_REPLACE: Syntax validation failed "
+                                        f"(line hint {instruction.replace_pattern_line}"
+                                        f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''}). "
+                                        f"Errors: {'; '.join(errors[:3])}"
+                                    )
                                 )
+                        logger.info(
+                            f"DIFF_REPLACE: Line hint {instruction.replace_pattern_line}"
+                            f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
+                            f"matched, using direct replacement"
+                        )
+                        return ModifyResult(
+                            success=True,
+                            new_content=modified_content,
+                            message=f"DIFF_REPLACE: Replaced code for {instruction.language} (via line hint)",
+                            changes_made=[
+                                f"Replaced lines {hint_start + 1} to {hint_end} (via line hint)"
+                            ],
+                        )
 
                 # Try to find pattern in target scope (существующий код)
                 result = self._find_unique_anchor(
@@ -3044,11 +3033,56 @@ class FileModifier:
                 message="Tree-sitter parser not available",
             )
         
+        # Wep Vibe ne ok
         try:
+            lines = existing_content.splitlines(keepends=True)
+
+            # ⭐ LINE-HINT: пробуем найти паттерн по номеру строки ДО Tree-sitter
+            if instruction.replace_pattern_line is not None:
+                hint_result = self._try_pattern_at_line(
+                    lines, replace_pattern,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if hint_result is not None:
+                    hint_start, hint_end = hint_result
+                    if not new_import:
+                        new_lines = lines[:hint_start] + lines[hint_end:]
+                        msg = f"Removed import matching '{replace_pattern}' (via line hint)"
+                    else:
+                        original_line = lines[hint_start] if hint_start < len(lines) else ""
+                        original_indent_str = original_line[:len(original_line) - len(original_line.lstrip())]
+                        new_import_lines = new_import.split('\n')
+                        indented_new_import = '\n'.join(
+                            original_indent_str + line if line.strip() else line
+                            for line in new_import_lines
+                        )
+                        new_lines = lines[:hint_start] + [indented_new_import + '\n'] + lines[hint_end:]
+                        msg = f"Replaced import matching '{replace_pattern}' (via line hint)"
+                    new_content = ''.join(new_lines)
+                    new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
+                    logger.info(
+                        f"REPLACE_IMPORT: Line hint {instruction.replace_pattern_line}"
+                        f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
+                        f"matched, using direct replacement at lines {hint_start + 1}-{hint_end}"
+                    )
+                    return ModifyResult(
+                        success=True,
+                        new_content=new_content,
+                        message=msg,
+                        changes_made=[msg],
+                        lines_added=1 if new_import else 0,
+                        lines_removed=hint_end - hint_start,
+                    )
+                logger.debug(
+                    f"REPLACE_IMPORT: Line hint {instruction.replace_pattern_line} did not match, "
+                    f"falling back to Tree-sitter search"
+                )
+
             parse_result = ts_parser.parse(existing_content)
-            
             # Ищем импорт, содержащий паттерн
-            target_import = None
+            target_import = None            
+            
             for imp in parse_result.parsed_imports:
                 if replace_pattern in imp.text:
                     target_import = imp
@@ -3061,8 +3095,6 @@ class FileModifier:
                     message=f"Import matching pattern '{replace_pattern}' not found",
                 )
             
-            # Получаем строки
-            lines = existing_content.splitlines(keepends=True)
             
             # Tree-sitter использует 1-based indexing для линий
             start_idx = target_import.span.start_line - 1
@@ -5513,74 +5545,54 @@ class FileModifier:
         lines: List[str],
         pattern: str,
         line_number: int,
+        line_end: Optional[int] = None,
     ) -> Optional[Tuple[int, int]]:
         """
-        ⭐ НОВОЕ: Проверяет совпадение паттерна на указанной строке (1-indexed).
-
+        Проверяет совпадение паттерна на указанной строке (1-indexed).
+        Поддерживает диапазон: если line_end указан, замена покрывает
+        строки от line_number до line_end включительно.
         Если первая непустая строка паттерна совпадает (substring match) с
         указанной строкой файла — немедленно возвращает (match_start, match_end)
-        без полного поиска. Если не совпадает — возвращает None, и вызывающий
-        код использует стандартные механизмы поиска.
-
-        Args:
-            lines: Все строки файла (с line endings)
-            pattern: Паттерн для проверки (может быть многострочным)
-            line_number: 1-indexed номер строки, где паттерн должен начинаться
-
-        Returns:
-            Tuple (match_start, match_end) 0-indexed, или None
+        без полного поиска. Если не совпадает — возвращает None.
         """
         if line_number is None or line_number < 1:
             return None
-
-        hint_start = line_number - 1  # Конвертация в 0-indexed
-
+        hint_start = line_number - 1
         if hint_start < 0 or hint_start >= len(lines):
             return None
-
-        # Получаем непустые строки паттерна (stripped)
         pattern_lines = [line.strip() for line in pattern.splitlines() if line.strip()]
         if not pattern_lines:
             return None
-
-        # Проверяем первую строку паттерна против указанной строки файла
         first_pattern_line = pattern_lines[0]
         file_line = lines[hint_start].strip()
-
-        # Substring match в обе стороны (как в _find_multiline_match)
         if first_pattern_line not in file_line and file_line not in first_pattern_line:
-            return None  # Паттерн не совпал на указанной строке
-
-        # Первая строка совпала! Вычисляем match_end.
-        # Для однострочного паттерна — match_end = hint_start + 1
+            return None
+        # Если указан диапазон — используем его как match_end
+        if line_end is not None:
+            hint_end = min(line_end, len(lines))
+            if hint_end <= hint_start:
+                hint_end = hint_start + 1
+            return (hint_start, hint_end)
+        # Однострочный паттерн без диапазона
         if len(pattern_lines) == 1:
             return (hint_start, hint_start + 1)
-
-        # Для многострочного паттерна — пытаемся сопоставить последующие строки
+        # Многострочный паттерн — ищем продолжение
         file_idx = hint_start + 1
         match_end = hint_start + 1
-
         for pattern_line in pattern_lines[1:]:
-            # Пропускаем пустые строки файла
             while file_idx < len(lines) and not lines[file_idx].strip():
                 file_idx += 1
-
             if file_idx >= len(lines):
-                break  # Достигнут конец файла
-
+                break
             file_line = lines[file_idx].strip()
             if pattern_line in file_line or file_line in pattern_line:
                 file_idx += 1
                 match_end = file_idx
             else:
-                break  # Строка не совпала
-
-        # Гарантируем, что match_end как минимум hint_start + 1
+                break
         if match_end <= hint_start:
             match_end = hint_start + 1
-
-        return (hint_start, match_end)
-    
+        return (hint_start, match_end)    
     
     def _replace_in_method(
         self,
@@ -5728,10 +5740,14 @@ class FileModifier:
         match_start = None
         match_end = None
 
+        # Xoчy vibe
         if instruction.replace_pattern_line is not None:
             hint_result = self._try_pattern_at_line(
-                lines, replace_pattern, instruction.replace_pattern_line
-            )
+                lines, replace_pattern,
+                instruction.replace_pattern_line,
+                instruction.replace_pattern_line_end,
+            )            
+            
             if hint_result is not None:
                 match_start, match_end = hint_result
                 # Расширяем match для покрытия составных блоков.
@@ -6065,6 +6081,7 @@ class FileModifier:
             target_class=None,              # Класса нет
             replace_pattern=instruction.replace_pattern,
             replace_pattern_line=instruction.replace_pattern_line,  # ⭐ НОВОЕ
+            replace_pattern_line_end=instruction.replace_pattern_line_end,
             insert_after=instruction.insert_after,
             insert_before=instruction.insert_before,
             preserve_imports=instruction.preserve_imports,
@@ -6192,6 +6209,8 @@ class FileModifier:
                 - replace_pattern: Что заменять
                 - code: На что заменять
         """
+        from app.agents.feedback_handler import StagingErrorType
+        
         replace_pattern = instruction.replace_pattern
         code = instruction.code.strip()
         
@@ -6212,11 +6231,47 @@ class FileModifier:
                 message="Tree-sitter parser not available",
             )
         
+        # Ne vkusno
         try:
+            # ⭐ LINE-HINT: пробуем найти паттерн по номеру строки ДО Tree-sitter
+            if instruction.replace_pattern_line is not None:
+                hint_result = self._try_pattern_at_line(
+                    lines, replace_pattern,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if hint_result is not None:
+                    hint_start, hint_end = hint_result
+                    formatted_code = code
+                    if not formatted_code.endswith('\n'):
+                        formatted_code += '\n'
+                    old_lines_count = hint_end - hint_start
+                    new_lines = lines[:hint_start] + [formatted_code] + lines[hint_end:]
+                    new_content = ''.join(new_lines)
+                    new_lines_count = len(formatted_code.splitlines())
+                    logger.info(
+                        f"REPLACE_GLOBAL: Line hint {instruction.replace_pattern_line}"
+                        f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
+                        f"matched, using direct replacement at lines {hint_start + 1}-{hint_end}"
+                    )
+                    return ModifyResult(
+                        success=True,
+                        new_content=new_content,
+                        message=f"Replaced global statement (via line hint)",
+                        changes_made=[f"Replaced lines {hint_start + 1} to {hint_end} (via line hint)"],
+                        lines_added=max(0, new_lines_count - old_lines_count),
+                        lines_removed=max(0, old_lines_count - new_lines_count),
+                    )
+                # Хинт не совпал → fallback к Tree-sitter
+                logger.debug(
+                    f"REPLACE_GLOBAL: Line hint {instruction.replace_pattern_line} did not match, "
+                    f"falling back to Tree-sitter search"
+                )
+
             parse_result = ts_parser.parse(existing_content)
-            
             # Итерируем по дочерним узлам корня (глобальный уровень)
-            target_node = None
+            target_node = None            
+            
             for child in parse_result.root_node.children:
                 # Пропускаем определения классов и функций
                 if child.type in ('class_definition', 'function_definition'):

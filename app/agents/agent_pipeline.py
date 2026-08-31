@@ -4502,6 +4502,7 @@ Remember: You can override the validator if you believe the critique is incorrec
             "insert_before": getattr(block, 'insert_before', None),
             "replace_pattern": getattr(block, 'replace_pattern', None),
             "replace_pattern_line": getattr(block, 'replace_pattern_line', None),  # ⭐ НОВОЕ
+            "replace_pattern_line_end": getattr(block, 'replace_pattern_line_end', None),
             "ai_fixed_code": ai_fixed_code,
             "ai_attempts": ai_attempts or [],
             "validation_errors": validation_errors or [],
@@ -4531,6 +4532,7 @@ Remember: You can override the validator if you believe the critique is incorrec
                 insert_after=err_item.get("insert_after"),
                 insert_before=err_item.get("insert_before"),
                 replace_pattern=err_item.get("replace_pattern"),
+                replace_pattern_line_end=err_item.get("replace_pattern_line_end"),
                 full_code=err_item.get("full_code"),
                 ai_fixed_code=err_item.get("ai_fixed_code"),
                 validation_errors=err_item.get("validation_errors"),

@@ -1573,16 +1573,13 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         insert_before_target = _extract_field(block_content, "INSERT_BEFORE_TARGET")
         replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
         
-        # ⭐ НОВОЕ: Извлекаем опциональный номер строки (1-indexed)
+        # ⭐ Извлекаем опциональный номер строки (1-indexed) или диапазон "начало-конец"
         replace_pattern_line_str = _extract_field(block_content, "REPLACE_PATTERN_LINE")
         replace_pattern_line = None
+        replace_pattern_line_end = None
         if replace_pattern_line_str:
-            try:
-                # Очищаем от возможных кавычек или пробелов и конвертируем в int
-                replace_pattern_line = int(replace_pattern_line_str.strip().strip('`"\''))
-            except ValueError:
-                logger.warning(f"Invalid REPLACE_PATTERN_LINE value: '{replace_pattern_line_str}' in CODE_BLOCK for {file_path}")
-                replace_pattern_line = None
+            replace_pattern_line, replace_pattern_line_end = _parse_line_hint(replace_pattern_line_str, file_path)        
+        
         
         # Извлекаем код из code fence
         code, language = _extract_code_from_block(block_content)        
@@ -1601,6 +1598,7 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             logger.warning(f"CODE_BLOCK for {file_path} missing code, skipping")
             continue
         
+        # ХЗ
         blocks.append(ParsedCodeBlock(
             file_path=file_path,
             mode=mode,
@@ -1615,8 +1613,9 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
             insert_before_target=insert_before_target,
             replace_pattern=replace_pattern,
             replace_pattern_line=replace_pattern_line,
+            replace_pattern_line_end=replace_pattern_line_end,
             language=language,
-        ))
+        ))        
         
         logger.debug(f"Parsed CODE_BLOCK: {file_path} [{mode}]")
     
@@ -1741,6 +1740,34 @@ def _extract_code_from_block(content: str) -> Tuple[Optional[str], str]:
     code = '\n'.join(code_lines).strip()
     return (code, language) if code else (None, language)
 
+def _parse_line_hint(raw: str, file_path: str = "") -> tuple:
+    """
+    Парсит REPLACE_PATTERN_LINE в формате:
+      - "42"       → (42, None)
+      - "42-45"    → (42, 45)
+      - "42 - 45"  → (42, 45)   (толерантно к пробелам вокруг '-')
+    Возвращает (start: Optional[int], end: Optional[int]).
+    """
+    import re as _re
+    cleaned = raw.strip().strip('`"\'').strip()
+    if not cleaned:
+        return (None, None)
+    # Пробуем диапазон: число, опциональные пробелы, дефис, опциональные пробелы, число
+    range_match = _re.match(r'^(\d+)\s*-\s*(\d+)$', cleaned)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        if start > end:
+            start, end = end, start
+        return (start, end)
+    # Пробуем одиночное число
+    try:
+        return (int(cleaned), None)
+    except ValueError:
+        logger.warning(
+            f"Invalid REPLACE_PATTERN_LINE value: '{raw}' in CODE_BLOCK for {file_path}"
+        )
+        return (None, None)
 
 
 def format_code_blocks_summary(blocks: List[ParsedCodeBlock]) -> str:
