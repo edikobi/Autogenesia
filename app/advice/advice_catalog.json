@@ -163,6 +163,14 @@
 
 
     {
+      "id": "ADV-G19",
+      "name": "Systematic Prompt Engineering & Robust Assembly",
+      "category": "general",
+      "description": "Framework for designing high-quality LLM instructions and assembling them programmatically. Guides you to apply constraint-first design, enforce structured reasoning, and use robust programmatic assembly patterns (e.g., list-based append() in Python) to prevent syntax errors and simplify prompt maintenance.",
+      "when_to_use": "When designing system prompts, writing complex instructions for LLMs, generating dynamic prompts in code, or when prompt maintenance becomes difficult due to hardcoded strings."
+    },
+
+    {
       "id": "ADV-E01",
       "name": "Caching Strategy Design",
       "category": "existing_project",
