@@ -3926,7 +3926,7 @@ def _build_ai_validator_system_prompt() -> str:
     prompt_parts.append("Do NOT reject code for:")
     prompt_parts.append("• Style preferences (naming conventions, formatting)")
     prompt_parts.append("• Minor inefficiencies (could be faster, but works)")
-    prompt_parts.append("• Missing docstrings or comments")
+    prompt_parts.append("• Missing, extra, misplaced, or poorly formatted comments or docstrings")    
     prompt_parts.append("• Not using latest language features")
     prompt_parts.append("• Suggestions for improvement (save for post-approval)")
     prompt_parts.append("")
@@ -6707,8 +6707,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("INSERT_FILE: Inserts code immediately after imports. Use for adding module-level constants or setup logic.")
     
     # Global Function Level
-    parts.append("ADD_NEW_FUNCTION: Adds a new global function to the file. Use for creating new standalone functions.")
-    parts.append("REPLACE_FUNCTION: Replaces an existing global function entirely. Use when rewriting a function's full logic.")
+    parts.append("ADD_NEW_FUNCTION: Adds a new global function to the file. Use for creating new standalone functions. Use for creating new standalone functions, including single-line functions.")
+    parts.append("REPLACE_FUNCTION: Replaces an existing global function entirely. Use when rewriting a function's full logic. Use when rewriting a function's full logic, including single-line functions.")
     parts.append("INSERT_IN_FUNCTION: Inserts specific lines inside an existing global function. Use for injecting logic into a function flow.")
     parts.append("REPLACE_IN_FUNCTION: Replaces specific lines within a global function. Use for surgical updates inside a function body.")
     
@@ -6726,7 +6726,7 @@ def _get_python_prompt_injection() -> str:
     # Imports & Globals
     parts.append("INSERT_IMPORT: Adds a new import statement. Use for ensuring necessary dependencies are present.")
     parts.append("REPLACE_IMPORT: Replaces an existing import line. Use for updating library paths or alias changes.")
-    parts.append("REPLACE_GLOBAL: Replaces a specific global variable or constant. Use for updating top-level assignments. (NOT for methods/functions/classes)")
+    parts.append("REPLACE_GLOBAL: Replaces a specific global variable or constant. Use for updating top-level assignments. You must replace the entire constant or variable definition, not just a fragment of it. (NOT for methods/functions/classes, including single-line functions)")
     
     parts.append("")    
     
