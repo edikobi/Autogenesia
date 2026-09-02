@@ -1731,13 +1731,18 @@ def _extract_code_from_block(content: str) -> Tuple[Optional[str], str]:
     remaining_content = content[code_start:]
     lines = remaining_content.split('\n')
     code_lines = []
-    
     for line in lines:
         if re.match(r'^\s*```\s*$', line):
             break
         code_lines.append(line)
-    
-    code = '\n'.join(code_lines).strip()
+    # Удаляем пустые строки в начале и конце кода,
+    # НО сохраняем значимые пробелы/табы отступов.
+    # (В отличие от .strip(), который удаляет и отступ первой строки)
+    while code_lines and not code_lines[0].strip():
+        code_lines.pop(0)
+    while code_lines and not code_lines[-1].strip():
+        code_lines.pop()
+    code = '\n'.join(code_lines)
     return (code, language) if code else (None, language)
 
 def _parse_line_hint(raw: str, file_path: str = "") -> tuple:

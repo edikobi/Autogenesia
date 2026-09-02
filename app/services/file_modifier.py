@@ -2544,7 +2544,7 @@ class FileModifier:
         instruction: ModifyInstruction
     ) -> ModifyResult:
         """Добавляет код в конец файла"""
-        code = instruction.code.strip()
+        code = instruction.code
         
         # Определяем разделитель
         if existing_content:
@@ -2835,6 +2835,8 @@ class FileModifier:
         # Подготовка кода: обеспечиваем 2 пустые строки (PEP8) перед новым классом
         # Вставляем AS IS, как требует план.
         formatted_code = "\n\n" + code.strip() + "\n"
+        
+        
         
         # Сборка
         new_lines = lines[:insert_idx] + [formatted_code] + lines[insert_idx:]
@@ -4984,7 +4986,7 @@ class FileModifier:
         """
         target_class = instruction.target_class
         insert_after = instruction.insert_after
-        code = instruction.code.strip()
+        code = instruction.code
         
         if not target_class:
             return ModifyResult(
@@ -5064,13 +5066,11 @@ class FileModifier:
         
         # CRITICAL FIX: Skip normalization for "insert in class" mode
         # Insert code AS-IS to prevent indentation corruption
-        formatted_code = code.expandtabs(4).rstrip()
-        # Add proper indentation only if code has no leading whitespace
-        if formatted_code and not formatted_code[0].isspace():
-            formatted_code = ' ' * body_indent + formatted_code
-        
+        # SAFE: Do not touch LLM indentation. Insert exactly as generated (AS-IS).
+        formatted_code = code.expandtabs(4)
         if not formatted_code.endswith('\n'):
-            formatted_code += '\n'
+            formatted_code += '\n'        
+        
         
         # Вставляем
         if '\n' in formatted_code.rstrip('\n'):
@@ -5109,7 +5109,7 @@ class FileModifier:
             target_class = instruction.target_class
             replace_pattern = instruction.replace_pattern
             target_attribute = instruction.target_attribute
-            code = instruction.code.strip()
+            code = instruction.code
 
             if not target_class or (not replace_pattern and not target_attribute):
                 return ModifyResult(
@@ -5198,12 +5198,9 @@ class FileModifier:
 
             # CRITICAL FIX: Skip normalization for "replace in class" mode
 
-    # New range-based replacement (replaces the old single-line logic)
-            formatted_code = code.expandtabs(4).rstrip()
-            # Add proper indentation only if code has no leading whitespace
-            if formatted_code and not formatted_code[0].isspace():
-                formatted_code = ' ' * body_indent + formatted_code
-
+    
+            # SAFE: Do not touch LLM indentation. Insert exactly as generated (AS-IS).
+            formatted_code = code.expandtabs(4)
             if not formatted_code.endswith('\n'):
                 formatted_code += '\n'
 
@@ -6107,15 +6104,10 @@ class FileModifier:
         """
         code = instruction.code.strip()
         insert_after = instruction.insert_after
+        # Проверка отключена: код может содержать условные определения функций (хаха, руками отключил, хотя просто скопировал ДАЖЕ ЭТО с веб версии ИИ)
+        # (например, "if not AVAILABLE: async def stub(): ...")
+        # Валидация синтаксиса выполняется позже через Tree-sitter.        
         
-        # ⭐ НОВОЕ: гибкая проверка вместо жёсткого startswith
-        if not self._code_starts_with_function_def(code):
-            return ModifyResult(
-                success=False,
-                new_content=existing_content,
-                message="Code must be a function definition starting with 'def' or 'async def' "
-                        "(optionally preceded by decorators or comments)",
-            )
         
         lines = existing_content.splitlines(keepends=True)
                 
@@ -6212,7 +6204,7 @@ class FileModifier:
         from app.agents.feedback_handler import StagingErrorType
         
         replace_pattern = instruction.replace_pattern
-        code = instruction.code.strip()
+        code = instruction.code
         
         if not replace_pattern:
             return ModifyResult(
