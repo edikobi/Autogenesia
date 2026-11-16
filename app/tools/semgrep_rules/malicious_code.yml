@@ -1,0 +1,225 @@
+rules:
+  - id: py-eval-decoded-payload
+    languages: [python]
+    severity: ERROR
+    message: >-
+      eval/exec of a dynamically decoded payload near network context — high-risk obfuscated code.
+    metadata:
+      confidence: HIGH
+      category: obfuscation
+    patterns:
+      - pattern-either:
+          - pattern: eval($X, ...)
+          - pattern: exec($X, ...)
+      - pattern-either:
+          - pattern-inside: |
+              import base64
+              ...
+          - pattern-inside: |
+              import codecs
+              ...
+          - pattern-inside: |
+              import marshal
+              ...
+          - pattern-inside: |
+              import pickle
+              ...
+      - pattern-either:
+          - pattern: base64.b64decode(...)
+          - pattern: codecs.decode(...)
+          - pattern: marshal.loads(...)
+          - pattern: pickle.loads(...)
+      - pattern-either:
+          - pattern-inside: |
+              import socket
+              ...
+          - pattern-inside: |
+              import requests
+              ...
+          - pattern-inside: |
+              import urllib.request
+              ...
+          - pattern-inside: |
+              import os
+              ...
+
+  - id: py-os-system-obfuscated
+    languages: [python]
+    severity: ERROR
+    message: >-
+      os.system / subprocess invoked with an obfuscated/decode-derived string — command injection / dropper pattern.
+    metadata:
+      confidence: HIGH
+      category: command_execution
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: subprocess.call($CMD, ...)
+          - pattern: subprocess.run($CMD, ...)
+          - pattern: subprocess.Popen($CMD, ...)
+      - metavariable-pattern:
+          metavariable: $CMD
+          patterns:
+            - pattern-either:
+                - pattern: base64.b64decode(...)
+                - pattern: codecs.decode(...)
+                - pattern: marshal.loads(...)
+                - pattern: pickle.loads(...)
+
+  - id: py-compile-decoded-exec
+    languages: [python]
+    severity: ERROR
+    message: >-
+      compile(..., "exec") with decoded content followed by exec — strong obfuscation signal.
+    metadata:
+      confidence: HIGH
+      category: obfuscation
+    patterns:
+      - pattern: compile($SRC, ..., "exec", ...)
+      - metavariable-pattern:
+          metavariable: $SRC
+          patterns:
+            - pattern-either:
+                - pattern: base64.b64decode(...)
+                - pattern: codecs.decode(...)
+                - pattern: marshal.loads(...)
+                - pattern: pickle.loads(...)
+
+  - id: py-reverse-shell
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Reverse-shell primitives: socket connect with dup2 redirection into a shell.
+    metadata:
+      confidence: HIGH
+      category: reverse_shell
+    patterns:
+      - pattern-inside: |
+          import socket
+          ...
+      - pattern-either:
+          - pattern: subprocess.call(["/bin/sh", "-i"], ...)
+          - pattern: subprocess.Popen(["/bin/sh", "-i"], ...)
+          - pattern: subprocess.call(["/bin/bash", "-i"], ...)
+          - pattern: subprocess.Popen(["/bin/bash", "-i"], ...)
+      - pattern-either:
+          - pattern: $S.connect((...))
+          - pattern: $S.connect_ex((...))
+      - pattern: os.dup2(...)
+      - pattern-not-inside: |
+          if $TEST: ...
+
+  - id: py-credential-exfil-post
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Reading environment secrets and sending them via HTTP POST — credential exfiltration shape.
+    metadata:
+      confidence: MEDIUM
+      category: exfiltration
+    patterns:
+      - pattern-either:
+          - pattern: os.environ.get(...)
+          - pattern: os.environ[...]
+          - pattern: os.getenv(...)
+      - pattern-either:
+          - pattern: requests.post($URL, ...)
+          - pattern: requests.request("POST", $URL, ...)
+          - pattern: urllib.request.urlopen(...)
+      - pattern-not-inside: |
+          def test_...(...):
+              ...
+
+  - id: js-child-process-eval-decoded
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      child_process plus eval/Function of a decoded payload — high-risk obfuscated execution.
+    metadata:
+      confidence: HIGH
+      category: obfuscation
+    patterns:
+      - pattern-either:
+          - pattern: require('child_process')
+          - pattern: require("child_process")
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: $CP.spawn(...)
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: Function($X)
+          - pattern: new Function($X)
+      - pattern-either:
+          - pattern: Buffer.from($X, 'base64')
+          - pattern: Buffer.from($X, "base64")
+          - pattern: atob($X)
+
+  - id: js-dynamic-require-remote
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Dynamic require() from a remote/decoded value — dropper / supply-chain risk.
+    metadata:
+      confidence: HIGH
+      category: dynamic_code
+    patterns:
+      - pattern-either:
+          - pattern: require($X)
+          - pattern: import($X)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-either:
+                - pattern: Buffer.from(..., 'base64').toString(...)
+                - pattern: atob(...)
+                - pattern: $RESP.data
+                - pattern: $RESP
+
+  - id: js-env-harvest-outbound
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      process.env harvesting plus outbound request — credential exfiltration shape.
+    metadata:
+      confidence: MEDIUM
+      category: exfiltration
+    patterns:
+      - pattern-either:
+          - pattern: process.env[...]
+          - pattern: process.env.$F
+      - pattern-either:
+          - pattern: $HTTP.post($URL, ...)
+          - pattern: fetch($URL, ...)
+          - pattern: axios.post($URL, ...)
+      - pattern-not-inside: |
+          function test_...(...) { ... }
+
+  - id: ps-frombase64-invoke-expression
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      PowerShell -enc / FromBase64String combined with Invoke-Expression — encoded payload execution.
+    metadata:
+      confidence: HIGH
+      category: powershell_encoded
+    patterns:
+      - pattern-either:
+          - pattern: powershell -enc ...
+          - pattern: powershell.exe -enc ...
+          - pattern: powershell -EncodedCommand ...
+      - pattern-regex: (?i)FromBase64String
+      - pattern-regex: (?i)Invoke-Expression|iex\s
+      - pattern-not: "..."
+
+  - id: high-risk-private-key-outbound
+    languages: [generic]
+    severity: WARNING
+    message: >-
+      Hard-coded private key/token shape combined with an outbound send context — potential secret leak.
+    metadata:
+      confidence: MEDIUM
+      category: secrets
+    patterns:
+      - pattern-regex: (?i)(BEGIN RSA PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY|BEGIN PRIVATE KEY)
+      - pattern-regex: (?i)(requests\.post|fetch\(|axios\.post|Invoke-WebRequest|curl\s)
+      - pattern-not: "-----BEGIN PRIVATE KEY-----\n...test...\n-----END PRIVATE KEY-----"

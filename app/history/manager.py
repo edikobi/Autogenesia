@@ -429,7 +429,12 @@ class HistoryManager:
     # === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ===
 
     async def _translate_thinking(self, text: str) -> str:
-        """Быстрый перевод мыслей на русский"""
+        """Быстрый перевод мыслей на русский (сейчас отключён)"""
+        # disabled: SSE streaming shows original thinking
+        # Перевод отключён: SSE-стриминг уже показывает оригинальные размышления.
+        return text
+
+        # --- Мёртвый код: прежняя реализация сохранена, но НЕ выполняется ---
         # Используем быструю модель (Gemini Flash или что есть в конфиге)
         model_id = getattr(cfg, 'MODEL_GEMINI_2_FLASH', 'gpt-3.5-turbo')
         

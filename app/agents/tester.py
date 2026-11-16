@@ -11,12 +11,13 @@ import tempfile
 import sys
 import re
 import os
+import json
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable
 from pathlib import Path
 
-from app.llm.api_client import call_llm_with_tools, ServerOverloadError
+from app.llm.api_client import call_llm_with_tools, call_llm, ServerOverloadError
 from app.tools.tool_executor import parse_tool_call
 from app.tools.tester_tool_executor import TesterToolExecutor
 from app.tools.tester_tool_definitions import TESTER_TOOLS
@@ -123,7 +124,7 @@ class TesterAgent:
         self._tool_executor = TesterToolExecutor(                    
                     project_dir, project_index, vfs, self._test_workspace_dir, project_python_path
                 )
-        self._max_iterations = 50
+        self._max_iterations = 105
 
     async def run(self) -> TesterReport:
         """
@@ -194,6 +195,9 @@ class TesterAgent:
             "- If the code fails on edge cases, note that as a WARNING even if happy path passes.\n\n"
 
             "**RESTRICTIONS**: You MUST NOT modify project files. You MUST NOT call `install_dependency`. "
+                "For genuine, blocking clarifications about the user's intent or the "
+                "expected test coverage, you may call `ask_user(question, options?, context?)` "
+                "— the answer arrives as a normal tool result and testing continues. "
             "You have read-only access: `read_file`, `read_code_chunk`, `search_code`, `grep_search`, "
             "`list_files`, `show_file_relations`, `read_line_context`, `list_installed_packages`, "
             "`search_pypi`, `web_search`, `fetch_webpage`, `analyze_webpage`, `check_security`, "
@@ -261,15 +265,61 @@ class TesterAgent:
         """
         final_content = ""
 
-        for iteration in range(self._max_iterations):
+        # Build role-scoped tester tool list (TESTER_TOOLS + MCP servers scoped to "tester")
+        tester_tools = list(TESTER_TOOLS)
+        try:
+            from app.mcp.definitions import get_mcp_tool_definitions
+
+            tester_tools.extend(get_mcp_tool_definitions(role="tester"))
+        except Exception:
+            pass
+
+        max_tester_iterations = self._max_iterations
+        iteration = 0
+        while True:
+            if iteration >= max_tester_iterations:
+                # === LIMIT-RECOVERY HOOK (tester iteration exhaustion) ===
+                try:
+                    from app.services.emergency_recovery import get_emergency_manager
+                    _tester_limit_resolution = get_emergency_manager().handle_limit_reached(
+                        limit_type="tool_calls",
+                        current_value=iteration,
+                        max_value=max_tester_iterations,
+                        agent_role="tester",
+                        messages=messages,
+                        vfs=self._vfs,
+                    )
+
+                    if asyncio.iscoroutine(_tester_limit_resolution):
+                        _tester_limit_resolution = await _tester_limit_resolution
+                    if _tester_limit_resolution is not None:
+                        _tester_action = getattr(_tester_limit_resolution, "action", "")
+                        if _tester_action == "extra_quota":
+                            _tester_extra = getattr(_tester_limit_resolution, "extra_tool_calls", 0) or 10
+                            max_tester_iterations += _tester_extra
+                            logger.info(
+                                f"TesterAgent: extra quota granted "
+                                f"(+{_tester_extra} iterations, new bound={max_tester_iterations})"
+                            )
+                            continue
+                        if _tester_action == "end_session":
+                            return (
+                                "# Testing Report\n\n"
+                                "## Conclusion\n\n"
+                                "**Verdict: FAIL**\n\n"
+                                "Tester agent session ended due to iteration limit."
+                            )
+                except Exception as _tester_limit_err:
+                    logger.warning(f"tester limit hook failed: {_tester_limit_err}")
+                break
+            iteration += 1
             try:
                 response = await call_llm_with_tools(
                                     model=self._model,
                                     messages=messages,
-                                    tools=TESTER_TOOLS,
+                                    tools=tester_tools,
                                     temperature=0,
                                     max_tokens=20000,
-                                    tool_choice="auto",
                                     preferred_provider=self._model_provider,
                                     on_delta=self._on_token,
                                 )
@@ -279,24 +329,92 @@ class TesterAgent:
                 continue
             except Exception as e:
                 logger.error(f"TesterAgent LLM call error on iteration {iteration}: {e}", exc_info=True)
+                try:
+                    from app.services.emergency_recovery import (
+                        get_emergency_manager,
+                        get_inflight_model_swap,
+                    )
+                    resolution = await get_emergency_manager().handle_exception(
+                        e,
+                        messages=messages,
+                        agent_role="tester",
+                        vfs=self._vfs,
+                    )
+                    if resolution is not None and getattr(resolution, "action", "") == "continue":
+                        _tester_swap = get_inflight_model_swap(resolution)
+                        if _tester_swap is not None:
+                            self._model = _tester_swap["model"] or self._model
+                            self._model_provider = _tester_swap["provider"]
+                            logger.info(
+                                f"TesterAgent: in-flight model swap → "
+                                f"model={self._model}, provider={self._model_provider}"
+                            )
+                        continue
+                except Exception as emergency_err:
+                    logger.warning(f"tester emergency hook failed: {emergency_err}")
                 break
 
+            # nh
             content = response.get("content", "") or ""
             tool_calls = response.get("tool_calls") or []
-            reasoning_content = response.get("reasoning_content")  # ← ДОБАВИТЬ
-            thought_signature = response.get("thought_signature")   # ← ДОБАВИТЬ
-            reasoning_details = response.get("reasoning_details")   # ← ДОБАВИТЬ
-            final_content = content
+            reasoning_content = response.get("reasoning_content")
+            thought_signature = response.get("thought_signature")
+            reasoning_details = response.get("reasoning_details")
 
             if not tool_calls:
+                final_content = content
+                break
+
+            # мерка
+            assistant_tool_calls = []
+            executable_tool_calls = []
+
+            for idx, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+
+                if not tc.get("id"):
+                    tc["id"] = f"tester_call_{iteration}_{idx}"
+
+                func = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+
+                name = (
+                    func.get("name")
+                    or tc.get("name")
+                    or "unknown"
+                )
+
+                args_raw = func.get(
+                    "arguments",
+                    tc.get("arguments", {})
+                )
+
+                if isinstance(args_raw, dict):
+                    args = args_raw
+                elif isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw)
+                    except Exception:
+                        args = {}
+                else:
+                    args = {}
+
+                if not isinstance(args, dict):
+                    args = {"raw": args}
+
+                assistant_tool_calls.append(tc)
+                executable_tool_calls.append((name, args, tc["id"]))
+
+            if not assistant_tool_calls:
+                final_content = content if content and content.strip() else ""
                 break
 
             messages.append({
                 "role": "assistant",
                 "content": content,
-                "tool_calls": tool_calls,
+                "tool_calls": assistant_tool_calls,
             })
-            
+
             # Сохраняем нативные рассуждения для round-trip (как в Оркестраторе)
             if reasoning_content:
                 messages[-1]["reasoning_content"] = reasoning_content
@@ -305,26 +423,23 @@ class TesterAgent:
             if reasoning_details:
                 messages[-1]["reasoning_details"] = reasoning_details
 
-            for tc in tool_calls:
+            for name, args, tc_id in executable_tool_calls:
                 try:
-                    name, args, tc_id = parse_tool_call(tc)
-                except Exception as e:
-                    logger.warning(f"Failed to parse tool call: {e}")
-                    name, args, tc_id = "unknown", {}, f"error_{iteration}"
-
-                try:
-                    result = self._tool_executor.execute(name, args)
+                    result = await asyncio.to_thread(
+                        self._tool_executor.execute,
+                        name,
+                        args,
+                    )
                 except Exception as e:
                     result = f"Tool error: {e}"
                     logger.warning(f"Tool execution error for {name}: {e}")
 
-    # Notify callback about tool call
-                    if self._on_tool_call is not None:
-                        try:
-                            success = not result.startswith("<!-- ERROR")
-                            self._on_tool_call(name, args, result[:500], success)
-                        except Exception as cb_err:
-                            logger.warning(f"Tool call callback error for {name}: {cb_err}")
+                if self._on_tool_call is not None:
+                    try:
+                        success = not result.startswith("<!-- ERROR")
+                        self._on_tool_call(name, args, result[:500], success)
+                    except Exception as cb_err:
+                        logger.warning(f"Tool call callback error for {name}: {cb_err}")
 
                 messages.append({
                     "role": "tool",
@@ -332,6 +447,29 @@ class TesterAgent:
                     "name": name,
                     "content": result,
                 })
+
+        # мерка1
+        if not final_content or not final_content.strip():
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Stop using tools. Provide your final Testing Report now. "
+                    "It MUST begin exactly with '# Testing Report'."
+                ),
+            })
+
+            try:
+                final_content = await call_llm(
+                    model=self._model,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=20000,
+                    preferred_provider=self._model_provider,
+                    on_delta=self._on_token,
+                ) or ""
+            except Exception as e:
+                logger.error(f"TesterAgent final LLM call error: {e}", exc_info=True)
+                final_content = ""
 
         if not final_content or not final_content.strip():
             return (
@@ -341,8 +479,8 @@ class TesterAgent:
                 "Tester agent failed to produce a report."
             )
 
-        # Очищаем финальный ответ от мыслей (CoT) и возможного мусора до маркера отчета
-        return self._extract_final_report(final_content)
+        return self._extract_final_report(final_content)     
+     
         
     async def ask_followup(self, user_question: str) -> dict:
         """Handle a follow-up question from the user after the initial test report.
@@ -366,18 +504,37 @@ class TesterAgent:
             "3. Do NOT output your chain-of-thought reasoning or '<think>' tags. Output only the final answer.\n"
             "4. You MUST end with a text response, not a tool call.\n"
         )
+
+        # === Idempotent de-duplication of follow-up system context ===
+        _FOLLOWUP_MARKER = "FOLLOW-UP question after you already produced a testing report"
+        self._messages[:] = [
+            _msg
+            for _msg in self._messages
+            if not (
+                isinstance(_msg, dict)
+                and _msg.get("role") == "system"
+                and isinstance(_msg.get("content"), str)
+                and _FOLLOWUP_MARKER in _msg["content"]
+            )
+        ]
         self._messages.append({"role": "system", "content": followup_context})
         self._messages.append({"role": "user", "content": user_question})
 
+        tester_tools = list(TESTER_TOOLS)
+        try:
+            from app.mcp.definitions import get_mcp_tool_definitions
+
+            tester_tools.extend(get_mcp_tool_definitions(role="tester"))
+        except Exception:
+            pass
 
         try:
             response = await call_llm_with_tools(
                 model=self._model,
                 messages=self._messages,
-                tools=TESTER_TOOLS,
+                tools=tester_tools,
                 temperature=0,
                 max_tokens=20000,
-                tool_choice="auto",
                 preferred_provider=self._model_provider,
                 on_delta=self._on_token,
             )
@@ -388,6 +545,51 @@ class TesterAgent:
             return {"response": f"Server overload: {e}", "is_new_report": False, "new_report": None}
         except Exception as e:
             logger.error(f"ask_followup LLM call error: {e}", exc_info=True)
+            try:
+                from app.services.emergency_recovery import (
+                    get_emergency_manager,
+                    get_inflight_model_swap,
+                )
+                resolution = await get_emergency_manager().handle_exception(
+                    e,
+                    messages=self._messages,
+                    agent_role="tester",
+                    vfs=self._vfs,
+                )
+                if resolution is not None and getattr(resolution, "action", "") == "continue":
+                    _fu_swap = get_inflight_model_swap(resolution)
+                    if _fu_swap is not None:
+                        self._model = _fu_swap["model"] or self._model
+                        self._model_provider = _fu_swap["provider"]
+                        logger.info(
+                            f"ask_followup: in-flight model swap → "
+                            f"model={self._model}, provider={self._model_provider}"
+                        )
+                    # Retry once with unchanged messages
+                    try:
+                        response = await call_llm_with_tools(
+                            model=self._model,
+                            messages=self._messages,
+                            tools=tester_tools,
+                            temperature=0,
+                            max_tokens=20000,
+                            preferred_provider=self._model_provider,
+                            on_delta=self._on_token,
+                        )
+                        content = response.get("content", "") or ""
+                        extracted = self._extract_final_report(content)
+                        if extracted:
+                            self._messages.append({"role": "assistant", "content": extracted})
+                        is_new = self._looks_like_report(extracted)
+                        return {
+                            "response": extracted,
+                            "is_new_report": is_new,
+                            "new_report": extracted if is_new else None,
+                        }
+                    except Exception as retry_err:
+                        logger.warning(f"ask_followup emergency retry failed: {retry_err}")
+            except Exception as emergency_err:
+                logger.warning(f"ask_followup emergency hook failed: {emergency_err}")
             self._messages.pop()
             return {"response": "", "is_new_report": False, "new_report": None}
 
@@ -399,21 +601,62 @@ class TesterAgent:
             if not tool_calls:
                 break
 
+            # jj
+            assistant_tool_calls = []
+            executable_tool_calls = []
+
+            for idx, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+
+                if not tc.get("id"):
+                    tc["id"] = f"followup_call_{_iteration}_{idx}"
+
+                func = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+
+                name = (
+                    func.get("name")
+                    or tc.get("name")
+                    or "unknown"
+                )
+
+                args_raw = func.get(
+                    "arguments",
+                    tc.get("arguments", {})
+                )
+
+                if isinstance(args_raw, dict):
+                    args = args_raw
+                elif isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw)
+                    except Exception:
+                        args = {}
+                else:
+                    args = {}
+
+                if not isinstance(args, dict):
+                    args = {"raw": args}
+
+                assistant_tool_calls.append(tc)
+                executable_tool_calls.append((name, args, tc["id"]))
+
+            if not assistant_tool_calls:
+                break
+
             self._messages.append({
                 "role": "assistant",
                 "content": content,
-                "tool_calls": tool_calls,
+                "tool_calls": assistant_tool_calls,
             })
 
-            for tc in tool_calls:
+            for name, args, tc_id in executable_tool_calls:
                 try:
-                    name, args, tc_id = parse_tool_call(tc)
-                except Exception as e:
-                    logger.warning(f"Failed to parse tool call in followup: {e}")
-                    name, args, tc_id = "unknown", {}, f"followup_error"
-
-                try:
-                    result = self._tool_executor.execute(name, args)
+                    result = await asyncio.to_thread(
+                        self._tool_executor.execute,
+                        name,
+                        args,
+                    )
                 except Exception as e:
                     result = f"Tool error: {e}"
                     logger.warning(f"Tool execution error in followup for {name}: {e}")
@@ -436,10 +679,9 @@ class TesterAgent:
                 response = await call_llm_with_tools(
                     model=self._model,
                     messages=self._messages,
-                    tools=TESTER_TOOLS,
+                    tools=tester_tools,
                     temperature=0,
                     max_tokens=20000,
-                    tool_choice="auto",
                     preferred_provider=self._model_provider,
                     on_delta=self._on_token,
                 )
@@ -455,18 +697,20 @@ class TesterAgent:
 
         # Если после цикла модель всё ещё хочет вызвать тулы или отдала пустой контент
         if tool_calls or not content.strip():
+            self._messages.append({
+                "role": "user",
+                "content": "Stop using tools and provide your final text answer now.",
+            })
+
             try:
-                response = await call_llm_with_tools(
+                content = await call_llm(
                     model=self._model,
                     messages=self._messages,
-                    tools=TESTER_TOOLS,
                     temperature=0,
                     max_tokens=20000,
-                    tool_choice="none",  # Запрещаем вызов инструментов, заставляем выдать текст
                     preferred_provider=self._model_provider,
                     on_delta=self._on_token,
-                )
-                content = response.get("content", "") or ""
+                ) or ""
             except Exception as e:
                 logger.error(f"ask_followup final LLM call error: {e}", exc_info=True)
 

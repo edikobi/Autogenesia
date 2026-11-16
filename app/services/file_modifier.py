@@ -1100,11 +1100,13 @@ class FileModifier:
                     target_method=block.target_method,
                     target_function=block.target_function,
                     insert_after=block.insert_after,
-                    insert_before=block.insert_before,
-                    replace_pattern=block.replace_pattern,
-                    replace_pattern_line=block.replace_pattern_line,  # ⭐ НОВОЕ
-                    replace_pattern_line_end=block.replace_pattern_line_end,
-                    mode=block.mode,
+                        insert_before=block.insert_before,
+                        insert_after_target=block.insert_after_target,
+                        insert_before_target=block.insert_before_target,
+                        replace_pattern=block.replace_pattern,
+                        replace_pattern_line=block.replace_pattern_line,  # ⭐ НОВОЕ
+                        replace_pattern_line_end=block.replace_pattern_line_end,
+                        mode=block.mode,
                 )
                 
                 result = self.apply_multilang_diff(existing_content, diff_instruction)        
@@ -1507,52 +1509,45 @@ class FileModifier:
     def apply_multilang_diff(self, existing_content: str, instruction: 'MultiLangDiffInstruction') -> ModifyResult:
         """
         Apply multi-language diffs for non-Python files (JS/TS, Go, Java).
-        
-        Supports two modes:
-        1. DIFF_INSERT mode: insert_after or insert_before specified
-        - Uses target (function/method name) to find insertion scope
-        - If target not found by name, searches for function with that name
-        - If unique function found, inserts there
-        
-        2. DIFF_REPLACE mode: replace_pattern specified
-        - Uses target + replace_pattern to find replacement location
-        - If target not found, falls back to searching by replace_pattern only
-        - If unique pattern found, replaces there
-        
-        CRITICAL: Each code block insertion is validated with tree-sitter.
-        If insertion breaks the syntax tree, staging is cancelled and error is returned.
-        
-        Args:
-            existing_content: Current file content
-            instruction: MultiLangDiffInstruction with language, code, and targets
-            
-        Returns:
-            ModifyResult with success status and modified content
+
+        Supports:
+        - DIFF_INSERT (insert_after / insert_before with target scope)
+        - DIFF_INSERT_TARGET (relative to named entity)
+        - DIFF_REPLACE_TARGET (replace named entity entirely)
+        - DIFF_REPLACE (replace_pattern within target scope)
+
+        Scope guards:
+        - When target_info is found, `_try_pattern_at_line` and
+          `_find_unique_anchor` receive (scope_start, scope_end) so hints
+          outside the target are ignored.
+        - In DIFF_REPLACE, an explicit `replace_pattern_line` that does not
+          yield a valid in-scope match triggers an immediate failure —
+          outside-scope full-file fallback is skipped to prevent silent
+          edits of another function.
         """
         is_code_file = not self.is_plain_text_file(instruction.file_path)
-        
+
         try:
             # === VALIDATION: Language support (Only for code files) ===
             supported_langs = ['javascript', 'typescript', 'go', 'java', 'tsx', 'jsx']
-            if is_code_file and instruction.language not in supported_langs:                
+            if is_code_file and instruction.language not in supported_langs:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
                     message=f"Unsupported language for structural validation: {instruction.language}. Supported: {', '.join(supported_langs)}"
                 )
-            
+
             # === INITIALIZATION ===
             from app.services.tree_sitter_parser import MultiLanguageParser
             parser = MultiLanguageParser() if is_code_file else None
             source_bytes = existing_content.encode('utf-8')
             lines = existing_content.split('\n')
-            
+
             # === MODE 1: DIFF_INSERT ===
             if instruction.insert_after or instruction.insert_before:
-                # Find target element if specified
                 target_info = None
                 target_name = instruction.target_function or instruction.target_method
-                
+
                 if is_code_file and (instruction.target_function or instruction.target_class or instruction.target_method):
                     target_info = self._find_multilang_target(
                         parser,
@@ -1563,40 +1558,70 @@ class FileModifier:
                         instruction.target_function,
                         target_name=target_name
                     )
-                    
-                    # Fallback: if target not found by full specification, try to find function by name
+
                     if not target_info and target_name:
-                        # Search for any function with this name
                         target_info = self._find_multilang_target(
                             parser,
                             source_bytes,
                             instruction.language,
-                            None,  # No class constraint
-                            None,  # No method constraint
-                            target_name  # Search as function
+                            None,
+                            None,
+                            target_name
                         )
                         if target_info:
                             logger.info(f"DIFF_INSERT: Found function '{target_name}' as fallback target")
-                    
+
                     if target_info and 'error' in target_info:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
                             message=f"DIFF_INSERT: AMBIGUOUS_TARGET_METHOD: Method '{target_name}' not found uniquely in context, multiple global matches exist."
                         )
-                    
+
                     if not target_info:
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
                             message=f"DIFF_INSERT: Target not found: class={instruction.target_class}, method={instruction.target_method}, function={instruction.target_function}"
                         )
-                
-                # Find insertion point
+
+                # Compute scope bounds when target is known
+                if target_info:
+                    _scope_start = target_info['start_line'] - 1
+                    _scope_end = target_info['end_line']
+                else:
+                    _scope_start = 0
+                    _scope_end = len(lines)
+
                 insert_line = None
-                
+
                 if instruction.insert_after:
-                    result = self._find_unique_anchor(lines, instruction.insert_after)
+                    _hint_after = None
+                    if instruction.replace_pattern_line is not None:
+                        _hint_after = self._try_pattern_at_line(
+                            lines, instruction.insert_after,
+                            instruction.replace_pattern_line,
+                            instruction.replace_pattern_line_end,
+                            scope_start=_scope_start,
+                            scope_end=_scope_end,
+                        )
+                    if _hint_after is not None:
+                        _hs_a, _he_a = _hint_after
+                        result = {
+                            'found': True,
+                            'unique': True,
+                            'line_number': _he_a - 1,
+                            'match_end': _he_a,
+                            'count': 1,
+                        }
+                        logger.info(
+                            f"DIFF_INSERT: Line hint {instruction.replace_pattern_line} "
+                            f"matched for insert_after at lines {_hs_a + 1}-{_he_a}"
+                        )
+                    else:
+                        result = self._find_unique_anchor(
+                            lines, instruction.insert_after, _scope_start, _scope_end
+                        )
                     if not result['found']:
                         return ModifyResult(
                             success=False,
@@ -1609,10 +1634,35 @@ class FileModifier:
                             new_content=existing_content,
                             message=f"DIFF_INSERT: Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_after}'"
                         )
-                    insert_line = result['line_number'] + 1
-                    
+                    insert_line = result['match_end']
+
                 elif instruction.insert_before:
-                    result = self._find_unique_anchor(lines, instruction.insert_before)
+                    _hint_before = None
+                    if instruction.replace_pattern_line is not None:
+                        _hint_before = self._try_pattern_at_line(
+                            lines, instruction.insert_before,
+                            instruction.replace_pattern_line,
+                            instruction.replace_pattern_line_end,
+                            scope_start=_scope_start,
+                            scope_end=_scope_end,
+                        )
+                    if _hint_before is not None:
+                        _hs_b, _he_b = _hint_before
+                        result = {
+                            'found': True,
+                            'unique': True,
+                            'line_number': _hs_b,
+                            'match_end': _he_b,
+                            'count': 1,
+                        }
+                        logger.info(
+                            f"DIFF_INSERT: Line hint {instruction.replace_pattern_line} "
+                            f"matched for insert_before at lines {_hs_b + 1}-{_he_b}"
+                        )
+                    else:
+                        result = self._find_unique_anchor(
+                            lines, instruction.insert_before, _scope_start, _scope_end
+                        )
                     if not result['found']:
                         return ModifyResult(
                             success=False,
@@ -1626,25 +1676,20 @@ class FileModifier:
                             message=f"DIFF_INSERT: Insert anchor is ambiguous (found {result['count']} occurrences): '{instruction.insert_before}'"
                         )
                     insert_line = result['line_number']
-                    
+
                 elif target_info:
                     insert_line = target_info['end_line']
-                
                 else:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
                         message="DIFF_INSERT: No insertion point specified (no insert_after, insert_before, or target)"
                     )
-                
-                # No longer indenting code - use code as generated
+
                 indented_lines = instruction.code.split('\n')
-                
-                # Insert at position
                 modified_lines = lines[:insert_line] + indented_lines + lines[insert_line:]
                 modified_content = '\n'.join(modified_lines)
-                
-                # === CRITICAL: Validate syntax (Only for code files) ===
+
                 if is_code_file:
                     is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                     if not is_valid:
@@ -1653,14 +1698,14 @@ class FileModifier:
                             new_content=existing_content,
                             message=f"DIFF_INSERT: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                         )
-                
+
                 return ModifyResult(
                     success=True,
                     new_content=modified_content,
                     message=f"DIFF_INSERT: Inserted code for {instruction.language}",
                     changes_made=[f"Inserted code at line {insert_line + 1}"]
                 )
-            
+
             # === MODE 1.5: DIFF_INSERT_TARGET ===
             elif instruction.mode == "DIFF_INSERT_TARGET":
                 target_name = instruction.insert_after_target or instruction.insert_before_target
@@ -1670,7 +1715,7 @@ class FileModifier:
                         new_content=existing_content,
                         message="DIFF_INSERT_TARGET: No target specified (INSERT_AFTER_TARGET or INSERT_BEFORE_TARGET required)"
                     )
-                
+
                 if is_code_file:
                     target_info = self._find_multilang_target(
                         parser,
@@ -1683,37 +1728,33 @@ class FileModifier:
                     )
                 else:
                     target_info = None
-                
+
                 if target_info and 'error' in target_info:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
                         message=f"DIFF_INSERT_TARGET: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
                     )
-                
+
                 if not target_info:
                     return ModifyResult(
                         success=False,
                         new_content=existing_content,
                         message=f"DIFF_INSERT_TARGET: Target entity '{target_name}' not found in source file"
                     )
-                
-                # Determine insertion line
+
                 if instruction.insert_after_target:
                     insert_line = target_info['end_line']
                 else:
                     insert_line = target_info['start_line'] - 1
-                
-                # Clean multi-line insertion
+
                 new_lines = instruction.code.split('\n')
-                # Ensure trailing blank line
                 if new_lines and new_lines[-1].strip() != "":
                     new_lines.append("")
-                
+
                 modified_lines = lines[:insert_line] + new_lines + lines[insert_line:]
                 modified_content = '\n'.join(modified_lines)
-                
-                # === CRITICAL: Validate syntax (Only for code files) ===
+
                 if is_code_file:
                     is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                     if not is_valid:
@@ -1723,14 +1764,14 @@ class FileModifier:
                             broken_content=modified_content,
                             message=f"DIFF_INSERT_TARGET: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                         )
-                
+
                 return ModifyResult(
                     success=True,
                     new_content=modified_content,
                     message=f"DIFF_INSERT_TARGET: Inserted code relative to '{target_name}' for {instruction.language}",
                     changes_made=[f"Inserted code at line {insert_line + 1}"]
                 )
-            
+
             # === MODE 2: DIFF_REPLACE_TARGET ===
             elif instruction.mode == "DIFF_REPLACE_TARGET":
                 if not (instruction.target_function or instruction.target_class or instruction.target_method):
@@ -1739,7 +1780,7 @@ class FileModifier:
                         new_content=existing_content,
                         message="DIFF_REPLACE_TARGET: Target must be specified (TARGET_FUNCTION, TARGET_METHOD, or TARGET_CLASS)"
                     )
-                
+
                 if is_code_file:
                     target_name = instruction.target_function or instruction.target_method or instruction.target_class
                     target_info = self._find_multilang_target(
@@ -1753,7 +1794,7 @@ class FileModifier:
                     )
                 else:
                     target_info = None
-                
+
                 if target_info and 'error' in target_info:
                     target_name = instruction.target_function or instruction.target_method or instruction.target_class
                     return ModifyResult(
@@ -1761,7 +1802,7 @@ class FileModifier:
                         new_content=existing_content,
                         message=f"DIFF_REPLACE_TARGET: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
                     )
-                
+
                 if not target_info:
                     target_name = instruction.target_function or instruction.target_method or instruction.target_class
                     return ModifyResult(
@@ -1769,19 +1810,17 @@ class FileModifier:
                         new_content=existing_content,
                         message=f"DIFF_REPLACE_TARGET: Target '{target_name}' not found in source file"
                     )
-                
-                start_line = target_info['start_line'] - 1  # Convert to 0-indexed
+
+                start_line = target_info['start_line'] - 1
                 end_line = target_info['end_line']
-                
+
                 new_lines = instruction.code.split('\n')
-                # Ensure trailing blank line
                 if new_lines and new_lines[-1].strip() != "":
                     new_lines.append("")
-                
+
                 modified_lines = lines[:start_line] + new_lines + lines[end_line:]
                 modified_content = '\n'.join(modified_lines)
-                
-                # === CRITICAL: Validate syntax (Only for code files) ===
+
                 if is_code_file:
                     is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                     if not is_valid:
@@ -1791,22 +1830,23 @@ class FileModifier:
                             broken_content=modified_content,
                             message=f"DIFF_REPLACE_TARGET: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                         )
-                
+
                 return ModifyResult(
                     success=True,
                     new_content=modified_content,
                     message=f"DIFF_REPLACE_TARGET: Replaced target block for {instruction.language}",
                     changes_made=[f"Replaced target block from line {start_line + 1} to {end_line}"]
                 )
-            
+
             # === MODE 3: DIFF_REPLACE ===
             elif instruction.replace_pattern:
-                # Find target scope if specified
                 search_start = 0
                 search_end = len(lines)
                 target_name = instruction.target_function or instruction.target_method
-                
-                if is_code_file and (instruction.target_function or instruction.target_class or instruction.target_method):
+                _target_specified = bool(instruction.target_function or instruction.target_class or instruction.target_method)
+                _target_info_ok = False
+
+                if is_code_file and _target_specified:
                     target_info = self._find_multilang_target(
                         parser,
                         source_bytes,
@@ -1815,7 +1855,7 @@ class FileModifier:
                         instruction.target_method,
                         instruction.target_function
                     )
-                    
+
                     if target_info and 'error' in target_info:
                         target_name = instruction.target_function or instruction.target_method or instruction.target_class
                         return ModifyResult(
@@ -1823,19 +1863,20 @@ class FileModifier:
                             new_content=existing_content,
                             message=f"DIFF_REPLACE: AMBIGUOUS_TARGET_METHOD: '{target_name}' not found uniquely in context, multiple global matches exist."
                         )
-                        
+
                     if target_info:
-                        search_start = target_info['start_line'] - 1  # Convert to 0-indexed
+                        search_start = target_info['start_line'] - 1
                         search_end = target_info['end_line']
-                
-                # ⭐ НОВОЕ: Проверка опционального хинта номера строки от ИИ.
-                # Если replace_pattern_line указан и паттерн совпал — немедленная
-                # замена без поиска. Если не совпал — fallback к _find_unique_anchor.
+                        _target_info_ok = True
+
+                # Line-hint path — scope-guarded
                 if instruction.replace_pattern_line is not None:
                     hint_result = self._try_pattern_at_line(
                         lines, instruction.replace_pattern,
                         instruction.replace_pattern_line,
                         instruction.replace_pattern_line_end,
+                        scope_start=search_start,
+                        scope_end=search_end,
                     )
                     if hint_result is not None:
                         hint_start, hint_end = hint_result
@@ -1874,39 +1915,61 @@ class FileModifier:
                             ],
                         )
 
-                # Try to find pattern in target scope (существующий код)
+                # Explicit line hint is authoritative: when it fails inside
+                # the target scope there is NO anchor/fuzzy/whole-file
+                # fallback — fuzzy must never be a successful path with an
+                # explicit hint, and the exact in-scope match (if any) has
+                # already replaced exactly [hint_start, hint_end).
+                if instruction.replace_pattern_line is not None:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=(
+                            f"DIFF_REPLACE: line hint {instruction.replace_pattern_line} "
+                            f"did not match the exact pattern inside the target scope. "
+                            f"Outside-scope fallback skipped."
+                        ),
+                    )
+                # NEW: Scope guard — if target was specified for a code file but
+                # NOT found by _find_multilang_target, fail immediately. Prevents
+                # silent full-file fallback that would edit a different function.
+                if is_code_file and _target_specified and not _target_info_ok:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"DIFF_REPLACE: Target '{target_name}' not found in source file",
+                    )
+                # Scoped search — pass scope to _find_unique_anchor
                 result = self._find_unique_anchor(
                     lines, instruction.replace_pattern, search_start, search_end
-                )               
-                
-                # TERTIARY (fuzzy): fallback for SECONDARY only — multiline patterns not found by exact match
+                )
+
                 if not result['found'] and '\n' in instruction.replace_pattern:
-                    result = self._find_fuzzy_anchor(lines, instruction.replace_pattern, search_start, search_end)
-                
+                    result = self._find_fuzzy_anchor(
+                        lines, instruction.replace_pattern, search_start, search_end
+                    )
+
                 if result['found'] and result['unique']:
-                    # Found and unique in target scope
                     replace_line = result['line_number']
                     match_end = result['match_end']
-                    
+
                     new_lines = instruction.code.split('\n')
-                    # Ensure trailing blank line
                     if new_lines and new_lines[-1].strip() != "":
                         new_lines.append("")
-                    
+
                     modified_lines = lines[:replace_line] + new_lines + lines[match_end:]
                     modified_content = '\n'.join(modified_lines)
-                    
-                    # === CRITICAL: Validate syntax (Only for code files) ===
+
                     if is_code_file:
                         is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                         if not is_valid:
                             return ModifyResult(
                                 success=False,
                                 new_content=existing_content,
-                                broken_content=modified_content,  # preserve merged result for AI fixer
+                                broken_content=modified_content,
                                 message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                             )
-                    
+
                     fuzzy_warn = ["Pattern matched via fuzzy search (ratio≥0.90)"] if result.get('fuzzy') else []
                     return ModifyResult(
                         success=True,
@@ -1915,40 +1978,48 @@ class FileModifier:
                         changes_made=[f"Replaced lines {replace_line + 1} to {match_end}"],
                         warnings=fuzzy_warn if fuzzy_warn else None
                     )
-                
-                # Fallback: if target was specified but pattern not found in scope, search by replace_pattern only
-                if (instruction.target_function or instruction.target_class or instruction.target_method):
-                    # Search in full file by replace_pattern only
+
+                # No in-scope match found.
+                # If an explicit line hint was provided, skip outside-scope fallback.
+                if instruction.replace_pattern_line is not None:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=(
+                            f"DIFF_REPLACE: Replace pattern not found inside target scope "
+                            f"(line hint {instruction.replace_pattern_line}). "
+                            f"Outside-scope fallback skipped."
+                        )
+                    )
+
+                # Fallback: if target specified but pattern not found in scope, search whole file
+                if _target_specified:
                     result = self._find_unique_anchor(lines, instruction.replace_pattern, 0, len(lines))
-                    
-                    # TERTIARY (fuzzy): fallback for SECONDARY only — multiline patterns not found by exact match
+
                     if not result['found'] and '\n' in instruction.replace_pattern:
                         result = self._find_fuzzy_anchor(lines, instruction.replace_pattern, 0, len(lines))
-                    
+
                     if result['found'] and result['unique']:
-                        # Found unique pattern in full file
                         replace_line = result['line_number']
                         match_end = result['match_end']
-                        
+
                         new_lines = instruction.code.split('\n')
-                        # Ensure trailing blank line
                         if new_lines and new_lines[-1].strip() != "":
                             new_lines.append("")
-                        
+
                         modified_lines = lines[:replace_line] + new_lines + lines[match_end:]
                         modified_content = '\n'.join(modified_lines)
-                        
-                        # === CRITICAL: Validate syntax (Only for code files) ===
+
                         if is_code_file:
                             is_valid, errors = self._validate_multilang_syntax(modified_content, instruction.language)
                             if not is_valid:
                                 return ModifyResult(
                                     success=False,
                                     new_content=existing_content,
-                                    broken_content=modified_content,  # preserve merged result for AI fixer
+                                    broken_content=modified_content,
                                     message=f"DIFF_REPLACE: Syntax validation failed - code block breaks tree-sitter parsing. Staging cancelled. Errors: {'; '.join(errors[:3])}"
                                 )
-                        
+
                         fuzzy_warn = ["Pattern matched via fuzzy search (ratio≥0.90)"] if result.get('fuzzy') else []
                         return ModifyResult(
                             success=True,
@@ -1957,7 +2028,7 @@ class FileModifier:
                             changes_made=[f"Replaced lines {replace_line + 1} to {match_end} (outside target scope)"],
                             warnings=["Pattern found outside target scope"] + fuzzy_warn
                         )
-                    
+
                     elif not result['found']:
                         if result.get('fuzzy'):
                             return ModifyResult(
@@ -1982,9 +2053,8 @@ class FileModifier:
                             new_content=existing_content,
                             message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
                         )
-                
+
                 else:
-                    # No target specified, use full file result
                     if not result['found']:
                         return ModifyResult(
                             success=False,
@@ -1997,14 +2067,14 @@ class FileModifier:
                             new_content=existing_content,
                             message=f"DIFF_REPLACE: Replace pattern '{instruction.replace_pattern}' is ambiguous, found {result['count']} occurrences"
                         )
-            
+
             else:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
                     message=f"{instruction.mode}: No operation specified (no insert_after, insert_before, or replace_pattern)"
                 )
-        
+
         except Exception as e:
             logger.error(f"Error in apply_multilang_diff: {e}", exc_info=True)
             return ModifyResult(
@@ -2100,93 +2170,32 @@ class FileModifier:
         end_line: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Find a unique anchor pattern in lines.
-    
-        Supports both single-line and multiline patterns.
-    
+        Find a unique anchor pattern in lines via the exact matcher.
+
+        PRIMARY is the exact line-sequence comparison
+        (``lines[i].strip() == pattern_line.strip()`` with
+        ``_normalize_pattern_line`` boundary tolerance); the multiline branch
+        is the exact in-order line-sequence matcher through
+        ``_count_text_matches_in_scope``. No quote, whitespace-aggressive or
+        fuzzy normalisation happens in PRIMARY. ``match_end`` remains
+        exclusive after the last matched line. Ambiguity is reported as
+        ``found=True, unique=False, line_number=-1, match_end=-1, count=N``.
+
         Returns:
-            Dict with keys:
-                - found: bool - whether pattern was found at all
-                - unique: bool - whether pattern is unique (exactly one match)
-                - line_number: int - line index of match (or -1 if not found/not unique)
-                - match_end: int - line index of the end of the match (exclusive)
-                - count: int - number of matches found
+            Dict with keys: found, unique, line_number, match_end, count.
         """
         if end_line is None:
             end_line = len(lines)
-    
-        matches = []
-    
-        # PRIMARY STRATEGY: Single-line substring search
-        for i in range(start_line, min(end_line, len(lines))):
-            if pattern in lines[i]:
-                matches.append(i)
-    
+
+        matches = self._count_text_matches_in_scope(
+            lines, pattern or '', start_line, end_line
+        )
+
         if len(matches) == 1:
-            return {'found': True, 'unique': True, 'line_number': matches[0], 'match_end': matches[0] + 1, 'count': 1}
-        elif len(matches) > 1:
+            s, e = matches[0]
+            return {'found': True, 'unique': True, 'line_number': s, 'match_end': e, 'count': 1}
+        if len(matches) > 1:
             return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(matches)}
-    
-        # SECONDARY STRATEGY: Multiline pattern support
-        if '\n' in pattern:
-            try:
-                # Split pattern by newlines and strip each part
-                pattern_lines = [line.strip() for line in pattern.split('\n')]
-                # REMOVED: pattern_lines = [line for line in pattern_lines if line]  # Do NOT filter empty lines anymore
-            
-                if len(pattern_lines) == 1:
-                    # After filtering, only one line left - search for that stripped element
-                    single_line = pattern_lines[0]
-                    for i in range(start_line, min(end_line, len(lines))):
-                        if single_line in lines[i]:
-                            matches.append(i)
-                
-                    if len(matches) == 0:
-                        return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
-                    elif len(matches) == 1:
-                        return {'found': True, 'unique': True, 'line_number': matches[0], 'match_end': matches[0] + 1, 'count': 1}
-                    else:
-                        return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(matches)}
-            
-                elif len(pattern_lines) > 1:
-                    # Multiple pattern lines - perform sliding window search
-                    multiline_matches = []
-                
-                    for i in range(start_line, min(end_line - len(pattern_lines) + 1, len(lines))):
-                        # Check if pattern_lines[0] is substring of lines[i].strip()
-                        if pattern_lines[0] in lines[i].strip():
-                            # Verify subsequent lines match
-                            all_match = True
-                            for j, p_line in enumerate(pattern_lines[1:], 1):
-                                if i + j >= len(lines):
-                                    all_match = False
-                                    break
-                                
-                                # If pattern line is empty, matching line in file must also be empty (after strip)
-                                if not p_line:
-                                    if lines[i + j].strip() != "":
-                                        all_match = False
-                                        break
-                                # If pattern line is NOT empty, it must be a substring of the file line (after strip)
-                                elif p_line not in lines[i + j].strip():
-                                    all_match = False
-                                    break
-                        
-                            if all_match:
-                                multiline_matches.append(i)
-                
-                    if len(multiline_matches) == 0:
-                        return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
-                    elif len(multiline_matches) == 1:
-                        return {'found': True, 'unique': True, 'line_number': multiline_matches[0], 'match_end': multiline_matches[0] + len(pattern_lines), 'count': 1}
-                    else:
-                        return {'found': True, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': len(multiline_matches)}
-        
-            except Exception as e:
-                logger.debug(f"Multiline pattern search failed: {e}")
-                return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
-    
-        # No matches found
         return {'found': False, 'unique': False, 'line_number': -1, 'match_end': -1, 'count': 0}
     
     
@@ -2403,21 +2412,26 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Вставляет метод в класс.
-        Использует Tree-sitter для парсинга.
+
+        Поддерживает line-hint (replace_pattern_line / _end) — если валиден
+        и попадает в область класса, позиция вставки вычисляется по нему.
+        Иначе — стандартный поиск по имени метода (insert_after).
+        Наконец — fallback в конец класса.
         """
         target_class = instruction.target_class
         code = instruction.code
         insert_after = instruction.insert_after
-        
+        insert_before = instruction.insert_before
+
         if not target_class:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message="target_class is required for INSERT_INTO_CLASS",
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
-        
+
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -2425,64 +2439,107 @@ class FileModifier:
                 new_content=existing_content,
                 message="Tree-sitter parser not available",
             )
-        
+
         parse_result = ts_parser.parse(existing_content)
         class_info = parse_result.get_class(target_class)
-        
+
         if class_info is None:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message=f"Class '{target_class}' not found",
             )
-        
+
         # Определяем отступ метода
         method_indent = None
         if class_info.methods:
             first_method = class_info.methods[0]
             if first_method.span.start_line - 1 < len(lines):
-                # Используем сохраненный indent или вычисляем
                 method_indent = first_method.indent
-        
+
         if method_indent is None:
-            # Fallback: отступ класса + default
             class_indent = class_info.indent
             method_indent = class_indent + self.default_indent
-        
-        # Позиция вставки
+
+        class_start = class_info.span.start_line - 1
+        class_end = class_info.span.end_line
+
         insert_line = None
-        if insert_after and class_info.methods:
+
+        # ============================================================
+        # NEW: line-hint branch BEFORE method-name anchor search
+        # ============================================================
+        if (
+            instruction.replace_pattern_line is not None
+            and 1 <= instruction.replace_pattern_line <= len(lines)
+        ):
+            _hint_start_0 = instruction.replace_pattern_line - 1
+            if class_start <= _hint_start_0 < class_end:
+                anchor_text = insert_after or insert_before
+                if anchor_text:
+                    _hint = self._try_pattern_at_line(
+                        lines, anchor_text,
+                        instruction.replace_pattern_line,
+                        instruction.replace_pattern_line_end,
+                        scope_start=class_start,
+                        scope_end=class_end,
+                    )
+                    if _hint is not None:
+                        _hs, _he = _hint
+                        insert_line = _hs if insert_before else _he
+                else:
+                    # Line-only hint (no anchor text)
+                    if insert_before:
+                        insert_line = _hint_start_0
+                    else:
+                        if instruction.replace_pattern_line_end is not None:
+                            _he = instruction.replace_pattern_line_end
+                        else:
+                            _he = _hint_start_0 + 1
+                        insert_line = _he
+                    # Clamp to [class_start, class_end]
+                    insert_line = max(class_start, min(insert_line, class_end))
+
+        # ============================================================
+        # Existing method-name anchor search (only if hint failed)
+        # ============================================================
+        if insert_line is None and insert_after and class_info.methods:
             for method in class_info.methods:
                 if method.name == insert_after:
                     insert_line = method.span.end_line
                     break
-        
+
+        if insert_line is None and insert_before and class_info.methods:
+            for method in class_info.methods:
+                if method.name == insert_before:
+                    insert_line = method.span.start_line - 1
+                    break
+
         if insert_line is None:
             insert_line = class_info.span.end_line
-        
+
         # Нормализуем отступы метода по PEP8 (сигнатура=4, тело=8+)
-        # Только для Python файлов. Обязательно для INSERT_INTO_CLASS.
         _filepath = getattr(instruction, 'filepath', '') or ''
         if _filepath.endswith('.py') or not _filepath:
             code = self._normalize_method_indent_for_class(code)
         formatted_code = code
-        
+
         # Добавляем пустую строку перед методом
         prefix = '\n'
         if insert_line > 0 and insert_line <= len(lines):
             prev_line = lines[insert_line - 1]
             if not prev_line.strip():
                 prefix = ''
-        
+
         # Вставляем
         insert_content = prefix + formatted_code + '\n'
         lines.insert(insert_line, insert_content)
         new_content = ''.join(lines)
-        
+
         new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
-        
+
         added_lines = len(formatted_code.splitlines())
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
@@ -2498,12 +2555,15 @@ class FileModifier:
         instruction: ModifyInstruction
     ) -> ModifyResult:
         """
-        Вставляет код после импортов.
-        
-        УЛУЧШЕНО: Автоматически определяет отступ (обычно 0 для module-level).
+        Вставляет код после импортов (по умолчанию) или в позицию, заданную
+        line-hint (replace_pattern_line / _end).
+
+        Line-hint приоритетен и применяется, если валиден и (если задан anchor
+        text) реально совпадает через `_try_pattern_at_line`. При провале —
+        fallback на стандартную позицию после импортов.
         """
         code = instruction.code
-        
+
         if not existing_content.strip():
             # Новый файл — вставляем как есть
             formatted_code = code
@@ -2511,24 +2571,61 @@ class FileModifier:
                 success=True,
                 new_content=formatted_code + '\n',
                 message="Created new file",
+                changes_changed=[],  # placeholder; overwritten below
+                changes_made=["Created new file with provided code"],
+                lines_added=len(formatted_code.splitlines()),
+            ) if False else ModifyResult(
+                success=True,
+                new_content=formatted_code + '\n',
+                message="Created new file",
                 changes_made=["Created new file with provided code"],
                 lines_added=len(formatted_code.splitlines()),
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
+
+        # Default position: after imports
         insert_line = self._find_imports_end(lines)
-        
+
+        # Line-hint branch
+        if (
+            instruction.replace_pattern_line is not None
+            and 1 <= instruction.replace_pattern_line <= len(lines)
+        ):
+            hint_start = instruction.replace_pattern_line - 1
+            if instruction.replace_pattern_line_end is not None and 1 <= instruction.replace_pattern_line_end <= len(lines):
+                hint_end = instruction.replace_pattern_line_end
+            else:
+                hint_end = hint_start + 1
+
+            if instruction.insert_before:
+                candidate_pos = hint_start
+            else:
+                candidate_pos = hint_end
+
+            anchor_text = instruction.insert_after or instruction.insert_before
+            if anchor_text:
+                _hint = self._try_pattern_at_line(
+                    lines, anchor_text,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if _hint is not None:
+                    insert_line = candidate_pos
+            else:
+                insert_line = candidate_pos
+
         # Use code exactly as provided
         formatted_code = code
-        
+
         # Добавляем пустые строки вокруг для PEP8
         insert_content = '\n\n' + formatted_code.strip() + '\n'
-        
+
         lines.insert(insert_line, insert_content)
         new_content = ''.join(lines)
-        
+
         new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
@@ -2543,10 +2640,59 @@ class FileModifier:
         existing_content: str,
         instruction: ModifyInstruction
     ) -> ModifyResult:
-        """Добавляет код в конец файла"""
+        """
+        Добавляет код в конец файла (по умолчанию) или в позицию, заданную
+        line-hint (replace_pattern_line / _end). В line-hint ветке разделитель
+        end-of-file НЕ применяется — код вставляется точно в указанное место.
+
+        Если задан anchor text вместе с хинтом, позиция применяется только
+        при успешном `_try_pattern_at_line`; иначе fallback на стандартный
+        append в конец.
+        """
         code = instruction.code
-        
-        # Определяем разделитель
+
+        # Line-hint branch — insert code + '\n' at exact position
+        if (
+            instruction.replace_pattern_line is not None
+            and 1 <= instruction.replace_pattern_line <= len(existing_content.splitlines() or [''])
+            or (instruction.replace_pattern_line is not None and existing_content == '')
+        ):
+            lines = existing_content.splitlines(keepends=True) if existing_content else []
+            hint_start = instruction.replace_pattern_line - 1
+            if 1 <= instruction.replace_pattern_line <= (len(lines) if lines else 1):
+                if instruction.insert_before:
+                    pos = hint_start
+                else:
+                    if instruction.replace_pattern_line_end is not None and 1 <= instruction.replace_pattern_line_end <= (len(lines) if lines else 1):
+                        pos = instruction.replace_pattern_line_end
+                    else:
+                        pos = hint_start + 1
+                pos = max(0, min(pos, len(lines)))
+
+                anchor_text = instruction.insert_after or instruction.insert_before
+                _proceed = True
+                if anchor_text:
+                    _hint = self._try_pattern_at_line(
+                        lines, anchor_text,
+                        instruction.replace_pattern_line,
+                        instruction.replace_pattern_line_end,
+                    )
+                    if _hint is None:
+                        _proceed = False
+                if _proceed:
+                    insert_code = code if code.endswith('\n') else code + '\n'
+                    new_lines = lines[:pos] + [insert_code] + lines[pos:]
+                    new_content = ''.join(new_lines)
+                    new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
+                    return ModifyResult(
+                        success=True,
+                        new_content=new_content,
+                        message=f"Inserted code at line {pos + 1}",
+                        changes_made=[f"Inserted code at line {pos + 1}"],
+                        lines_added=len(code.splitlines()),
+                    )
+
+        # Default append behavior with separator logic
         if existing_content:
             if existing_content.endswith('\n\n'):
                 separator = ''
@@ -2556,11 +2702,11 @@ class FileModifier:
                 separator = '\n\n'
         else:
             separator = ''
-        
+
         new_content = existing_content + separator + code + '\n'
-        
+
         new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
@@ -2856,10 +3002,15 @@ class FileModifier:
         existing_content: str,
         instruction: ModifyInstruction
     ) -> ModifyResult:
-        """Добавляет импорт если его ещё нет"""
+        """
+        Добавляет импорт если его ещё нет. Поддерживает line-hint:
+        если `replace_pattern_line` валиден, позиция вставки берётся из
+        хинта (с проверкой anchor text через `_try_pattern_at_line`).
+        Многострочные импорты переотступаются по leading whitespace hint-строки.
+        """
         raw_code = instruction.code
-        
-        # 1. Очистка от markdown fences (```python ... ```)
+
+        # 1. Очистка от markdown fences
         _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
         _raw_lines = raw_code.splitlines()
         _start = 0
@@ -2880,10 +3031,10 @@ class FileModifier:
             _stripped = '\n'.join(_raw_lines[_start:_end])
             if _stripped.strip():
                 raw_code = _stripped
-                
-        # 2. Dedent для удаления случайных отступов LLM, чтобы применить целевые
+
+        # 2. Dedent
         import_statement = textwrap.dedent(raw_code).strip()
-        
+
         if not import_statement:
             return ModifyResult(
                 success=False,
@@ -2891,8 +3042,8 @@ class FileModifier:
                 message="Empty import code",
                 warnings=["Empty import code, skipped"]
             )
-        
-        # 3. Проверяем, есть ли уже такой импорт
+
+        # 3. Idempotency check
         if import_statement in existing_content:
             return ModifyResult(
                 success=True,
@@ -2900,45 +3051,39 @@ class FileModifier:
                 message="Import already exists",
                 warnings=["Import already present, skipped"],
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
-        
-        # 4. Находим конец блока импортов (приблизительно, через текст)
+
+        # 4. Default end of imports via text
         insert_idx = self._find_imports_end(lines)
         target_indent_str = ""
-        
-        # 5. Уточняем позицию и отступ с помощью Tree-sitter AST
+
+        # 5. AST refinement of position and indent
         ts_parser = _get_tree_sitter_parser()
         if ts_parser:
             try:
                 parse_result = ts_parser.parse(existing_content)
                 if parse_result.parsed_imports:
-                    # Ищем импорт, который заканчивается на или перед insert_idx
                     best_import = None
                     for imp in parse_result.parsed_imports:
                         if imp.span.end_line <= insert_idx:
                             if best_import is None or imp.span.end_line > best_import.span.end_line:
                                 best_import = imp
-                    
+
                     if best_import:
-                        # Вставляем строго после найденного AST-узла импорта
                         insert_idx = best_import.span.end_line
-                        # Берем отступ из первой строки найденного импорта
                         first_line_idx = best_import.span.start_line - 1
                         if 0 <= first_line_idx < len(lines):
                             first_line = lines[first_line_idx]
                             first_line_stripped = first_line.lstrip()
                             target_indent_str = first_line[:len(first_line) - len(first_line_stripped)]
                     elif insert_idx > 0 and insert_idx - 1 < len(lines):
-                        # Если импортов выше нет, но insert_idx > 0 (например, после docstring)
-                        # Проверяем, не находимся ли мы внутри блока (if TYPE_CHECKING:)
                         prev_line = lines[insert_idx - 1]
                         prev_stripped = prev_line.lstrip()
                         if prev_stripped.endswith(':'):
                             target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
             except Exception as e:
                 logger.debug(f"Tree-sitter import analysis failed: {e}")
-                # Fallback to text-based logic if Tree-sitter fails
                 if insert_idx > 0 and insert_idx - 1 < len(lines):
                     prev_line = lines[insert_idx - 1]
                     prev_stripped = prev_line.lstrip()
@@ -2947,7 +3092,6 @@ class FileModifier:
                     elif prev_stripped.endswith(':'):
                         target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
         else:
-            # Fallback if no Tree-sitter available
             if insert_idx > 0 and insert_idx - 1 < len(lines):
                 prev_line = lines[insert_idx - 1]
                 prev_stripped = prev_line.lstrip()
@@ -2956,23 +3100,54 @@ class FileModifier:
                 elif prev_stripped.endswith(':'):
                     target_indent_str = ' ' * (len(prev_line) - len(prev_stripped) + self.default_indent)
 
-        # 6. Применяем отступ к многострочному импорту (если ИИ прислал несколько строк)
+        # ============================================================
+        # NEW: line-hint branch — override position when valid
+        # ============================================================
+        if (
+            instruction.replace_pattern_line is not None
+            and 1 <= instruction.replace_pattern_line <= len(lines)
+        ):
+            hint_start = instruction.replace_pattern_line - 1
+            if instruction.replace_pattern_line_end is not None and 1 <= instruction.replace_pattern_line_end <= len(lines):
+                hint_end = instruction.replace_pattern_line_end
+            else:
+                hint_end = hint_start + 1
+
+            anchor_text = instruction.insert_after or instruction.insert_before
+            _hint_ok = True
+            if anchor_text:
+                _hint = self._try_pattern_at_line(
+                    lines, anchor_text,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if _hint is None:
+                    _hint_ok = False
+
+            if _hint_ok:
+                insert_idx = hint_start if instruction.insert_before else hint_end
+                # Derive target_indent_str from hint line
+                if 0 <= hint_start < len(lines):
+                    first_line = lines[hint_start]
+                    first_line_stripped = first_line.lstrip()
+                    target_indent_str = first_line[:len(first_line) - len(first_line_stripped)]
+
+        # 6. Multiline indentation step
         import_lines = import_statement.split('\n')
         indented_import = '\n'.join(
             target_indent_str + line if line.strip() else line
             for line in import_lines
         )
-        
-        # 7. Вставляем импорт на скорректированную позицию
+
+        # 7. Insert
         lines.insert(insert_idx, indented_import + '\n')
         new_content = ''.join(lines)
-        
-        # 8. Валидация и авто-фикс синтаксиса (как в других режимах)
+
+        # 8. Validation
         new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
-        
-        # Формируем короткое сообщение для логов
+
         first_line_msg = import_lines[0] if import_lines else ""
-        
+
         return ModifyResult(
             success=True,
             new_content=new_content,
@@ -2989,11 +3164,23 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Заменяет существующий импорт.
-        
-        Использует replace_pattern для поиска импорта в распарсенном дереве.
+
+        Поддерживает ДВА легитимных формата вывода LLM без новых полей
+        и хелперов:
+
+        * **items-style** — только содержимое списка импорта (existing
+          behavior, byte-for-byte preserved);
+        * **full-statement** — ``from … import ( … )`` / ``import …``
+          (заменяет ЦЕЛЫЙ import-узел, не приклеивается к строке элемента
+          и не получает element indent).
+
+        Гарантия: метод НИКОГДА не возвращает success=True с синтаксически
+        сломанным содержимым.
         """
+        from app.agents.feedback_handler import StagingErrorType
+
         replace_pattern = instruction.replace_pattern
-        
+
         # 1. Очистка от markdown fences (```python ... ```)
         raw_code = instruction.code
         _fence_re = re.compile(r'^[ \t]*```[a-zA-Z0-9_+\-]*[ \t]*$')
@@ -3016,17 +3203,23 @@ class FileModifier:
             _stripped = '\n'.join(_raw_lines[_start:_end])
             if _stripped.strip():
                 raw_code = _stripped
-        
+
         # Dedent для удаления случайных отступов LLM, чтобы применить целевые
         new_import = textwrap.dedent(raw_code).strip()
-        
+
+        # === CLASSIFICATION: full-statement vs. items-style ===
+        _first_non_empty_new = next(
+            (ln.strip() for ln in new_import.splitlines() if ln.strip()), ''
+        )
+        is_full_statement = _first_non_empty_new.startswith(('from ', 'import '))
+
         if not replace_pattern:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message="replace_pattern required for REPLACE_IMPORT",
             )
-        
+
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -3034,12 +3227,149 @@ class FileModifier:
                 new_content=existing_content,
                 message="Tree-sitter parser not available",
             )
-        
-        # Wep Vibe ne ok
+
+        def _final_gate(nc: str, msg: str, added: int, removed: int) -> ModifyResult:
+            _ok = self._validate_full_content(nc)
+            _struct_ok = _ok and self._validate_structural_integrity(existing_content, nc)
+            if not _ok or not _struct_ok:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="REPLACE_IMPORT produced invalid syntax",
+                    error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                )
+            return ModifyResult(
+                success=True,
+                new_content=nc,
+                message=msg,
+                changes_made=[msg],
+                lines_added=added,
+                lines_removed=removed,
+            )
+
         try:
             lines = existing_content.splitlines(keepends=True)
 
-            # ⭐ LINE-HINT: пробуем найти паттерн по номеру строки ДО Tree-sitter
+            # === FULL-STATEMENT PATH ===
+            if is_full_statement:
+                # Deterministic validity precondition: fragment claims to be a
+                # complete statement — parse or refuse outright.
+                try:
+                    ast.parse(new_import)
+                except (SyntaxError, ValueError):
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message="REPLACE_IMPORT produced invalid syntax",
+                        error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                    )
+
+                parse_result = ts_parser.parse(existing_content)
+                _all_imports = list(
+                    getattr(parse_result, 'parsed_imports', []) or []
+                )
+                _pat_nonempty_lines = [
+                    ln.strip() for ln in replace_pattern.splitlines() if ln.strip()
+                ]
+
+                target_import = None
+
+                # Priority 1: hint range covered by a single import node
+                if instruction.replace_pattern_line is not None:
+                    _hint_start = instruction.replace_pattern_line
+                    _hint_end = (
+                        instruction.replace_pattern_line_end
+                        if instruction.replace_pattern_line_end is not None
+                        else _hint_start
+                    )
+                    for _imp in _all_imports:
+                        try:
+                            _imp_start = _imp.span.start_line
+                            _imp_end = _imp.span.end_line
+                        except Exception:
+                            continue
+                        # end_line exclusive → hint_end < _imp_end
+                        if _imp_start <= _hint_start and _hint_end < _imp_end:
+                            target_import = _imp
+                            break
+
+                # Priority 2: text-based resolution
+                if target_import is None and _pat_nonempty_lines:
+                    _first_pat_line = _pat_nonempty_lines[0]
+                    _candidates = []
+                    for _imp in _all_imports:
+                        _imp_text = getattr(_imp, 'text', '') or ''
+                        if _first_pat_line in _imp_text:
+                            _candidates.append(_imp)
+                    if len(_candidates) > 1:
+                        _narrowed = []
+                        for _imp in _candidates:
+                            _imp_text = getattr(_imp, 'text', '') or ''
+                            if all(_p in _imp_text for _p in _pat_nonempty_lines):
+                                _narrowed.append(_imp)
+                        _candidates = _narrowed
+                    if len(_candidates) > 1:
+                        return ModifyResult(
+                            success=False,
+                            new_content=existing_content,
+                            message="REPLACE_IMPORT: ambiguous import target",
+                        )
+                    if len(_candidates) == 1:
+                        target_import = _candidates[0]
+
+                if target_import is None:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Import matching pattern '{replace_pattern}' not found",
+                    )
+
+                try:
+                    _node_start_0 = target_import.span.start_line - 1
+                    _node_end_excl = target_import.span.end_line
+                except Exception:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=f"Import matching pattern '{replace_pattern}' not found",
+                    )
+
+                # Re-indent by the leading whitespace of the node's first line
+                _first_src_line = (
+                    lines[_node_start_0]
+                    if 0 <= _node_start_0 < len(lines)
+                    else ""
+                )
+                _first_line_indent_str = _first_src_line[
+                    : len(_first_src_line) - len(_first_src_line.lstrip())
+                ]
+
+                _full_import_lines = new_import.splitlines()
+                _reindented_full = '\n'.join(
+                    (_first_line_indent_str + _ln) if _ln.strip() else _ln
+                    for _ln in _full_import_lines
+                )
+
+                # Replace the WHOLE node — one new block, no element indent
+                new_lines = (
+                    lines[:_node_start_0]
+                    + [_reindented_full + '\n']
+                    + lines[_node_end_excl:]
+                )
+                msg = f"Replaced import matching '{replace_pattern}'"
+                nc = ''.join(new_lines)
+                nc = self._validate_and_fix_syntax(nc, mode=instruction.mode)
+
+                _old_count = _node_end_excl - _node_start_0
+                _new_count = len(_full_import_lines)
+                return _final_gate(
+                    nc, msg,
+                    added=max(0, _new_count - _old_count),
+                    removed=max(0, _old_count - _new_count),
+                )
+
+            # === ITEMS-STYLE PATH (byte-for-byte current behavior) ===
+            # 2. LINE-HINT: пробуем найти паттерн по номеру строки ДО Tree-sitter
             if instruction.replace_pattern_line is not None:
                 hint_result = self._try_pattern_at_line(
                     lines, replace_pattern,
@@ -3061,88 +3391,108 @@ class FileModifier:
                         )
                         new_lines = lines[:hint_start] + [indented_new_import + '\n'] + lines[hint_end:]
                         msg = f"Replaced import matching '{replace_pattern}' (via line hint)"
-                    new_content = ''.join(new_lines)
-                    new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
+                    nc = ''.join(new_lines)
+                    nc = self._validate_and_fix_syntax(nc, mode=instruction.mode)
                     logger.info(
                         f"REPLACE_IMPORT: Line hint {instruction.replace_pattern_line}"
                         f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
                         f"matched, using direct replacement at lines {hint_start + 1}-{hint_end}"
                     )
-                    return ModifyResult(
-                        success=True,
-                        new_content=new_content,
-                        message=msg,
-                        changes_made=[msg],
-                        lines_added=1 if new_import else 0,
-                        lines_removed=hint_end - hint_start,
+                    return _final_gate(
+                        nc, msg,
+                        added=1 if new_import else 0,
+                        removed=hint_end - hint_start,
                     )
                 logger.debug(
                     f"REPLACE_IMPORT: Line hint {instruction.replace_pattern_line} did not match, "
-                    f"falling back to Tree-sitter search"
+                    f"falling back to text-first / Tree-sitter search"
                 )
 
+            # 3. text-first path — multiline patterns only
+            if replace_pattern and '\n' in replace_pattern:
+                _ml_start, _ml_end = self._find_multiline_match(
+                    lines, replace_pattern, 0, len(lines)
+                )
+                if _ml_start is not None and _ml_end is not None:
+                    if not new_import:
+                        _fb_lines = lines[:_ml_start] + lines[_ml_end:]
+                        _fb_msg = f"Removed import matching '{replace_pattern}'"
+                    else:
+                        _orig_line = lines[_ml_start] if _ml_start < len(lines) else ""
+                        _orig_indent = _orig_line[:len(_orig_line) - len(_orig_line.lstrip())]
+                        _new_import_lines = new_import.split('\n')
+                        _indented = '\n'.join(
+                            _orig_indent + _l if _l.strip() else _l
+                            for _l in _new_import_lines
+                        )
+                        _fb_lines = lines[:_ml_start] + [_indented + '\n'] + lines[_ml_end:]
+                        _fb_msg = f"Replaced import matching '{replace_pattern}'"
+                    _fb_content = ''.join(_fb_lines)
+                    _fb_content = self._validate_and_fix_syntax(_fb_content, mode=instruction.mode)
+                    logger.info(
+                        f"REPLACE_IMPORT: text-first multiline match at lines "
+                        f"{_ml_start + 1}-{_ml_end}"
+                    )
+                    return _final_gate(
+                        _fb_content, _fb_msg,
+                        added=1 if new_import else 0,
+                        removed=_ml_end - _ml_start,
+                    )
+                logger.debug(
+                    "REPLACE_IMPORT: text-first multiline search found no match, "
+                    "falling back to Tree-sitter"
+                )
+
+            # 4. Tree-sitter whole-node path (single-line imports / whole-import span)
             parse_result = ts_parser.parse(existing_content)
-            # Ищем импорт, содержащий паттерн
-            target_import = None            
-            
+            target_import = None
             for imp in parse_result.parsed_imports:
                 if replace_pattern in imp.text:
                     target_import = imp
                     break
-            
+
             if not target_import:
                 return ModifyResult(
                     success=False,
                     new_content=existing_content,
                     message=f"Import matching pattern '{replace_pattern}' not found",
                 )
-            
-            
-            # Tree-sitter использует 1-based indexing для линий
+
             start_idx = target_import.span.start_line - 1
             end_idx = target_import.span.end_line
-            
-            # Формируем новый контент
-            # Если новый импорт пустой - это удаление
+
             if not new_import:
                 new_lines = lines[:start_idx] + lines[end_idx:]
                 msg = f"Removed import matching '{replace_pattern}'"
             else:
-                # === КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сохраняем отступ оригинального импорта ===
                 original_line = lines[start_idx] if start_idx < len(lines) else ""
                 original_indent_str = original_line[:len(original_line) - len(original_line.lstrip())]
-                
-                # Применяем оригинальный отступ к каждой строке новых импортов
+
                 new_import_lines = new_import.split('\n')
                 indented_new_import = '\n'.join(
                     original_indent_str + line if line.strip() else line
                     for line in new_import_lines
                 )
-                
+
                 new_lines = lines[:start_idx] + [indented_new_import + '\n'] + lines[end_idx:]
                 msg = f"Replaced import matching '{replace_pattern}'"
-            
-            new_content = ''.join(new_lines)
-            
-            # === НОВОЕ: Валидация и авто-фикс синтаксиса (как в других режимах) ===
-            new_content = self._validate_and_fix_syntax(new_content, mode=instruction.mode)
-            
-            return ModifyResult(
-                success=True,
-                new_content=new_content,
-                message=msg,
-                changes_made=[msg],
-                lines_added=1 if new_import else 0,
-                lines_removed=end_idx - start_idx
+
+            nc = ''.join(new_lines)
+            nc = self._validate_and_fix_syntax(nc, mode=instruction.mode)
+
+            return _final_gate(
+                nc, msg,
+                added=1 if new_import else 0,
+                removed=end_idx - start_idx,
             )
-            
+
         except Exception as e:
             logger.error(f"Import replacement failed: {e}")
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message=f"Error replacing import: {e}",
-            )    
+            )
     
     def _reindent_if_needed(self, code: str, target_indent: int) -> str:
         """Checks if code starts with 0 indent. If so, shifts it to target_indent. Otherwise returns as is."""
@@ -3274,8 +3624,11 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Вставляет код внутрь существующего метода.
-        
-        УЛУЧШЕНО: Робастный поиск якорей (игнорирует пробелы, предпочитает точное совпадение).
+
+        УЛУЧШЕНО: Робастный поиск якорей (игнорирует пробелы, предпочитает точное
+        совпадение) + приоритетная проверка хинта `REPLACE_PATTERN_LINE`
+        (`_try_pattern_at_line`) ДО стандартного пайплайна. При валидном хинте
+        `_find_statement_node`/`find_best_match` НЕ вызываются.
         """
         target_class = instruction.target_class
         # FIX: Sanitize method name
@@ -3283,16 +3636,16 @@ class FileModifier:
         code = instruction.code
         insert_after = instruction.insert_after
         insert_before = instruction.insert_before
-        
+
         if not target_method:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message="target_method required for PATCH_METHOD",
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
-        
+
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -3300,9 +3653,9 @@ class FileModifier:
                 new_content=existing_content,
                 message="Tree-sitter parser not available",
             )
-        
+
         parse_result = ts_parser.parse(existing_content)
-        
+
         if target_class:
             method_info = parse_result.get_method(target_class, target_method)
             if method_info is None:
@@ -3325,10 +3678,10 @@ class FileModifier:
                     new_content=existing_content,
                     message=f"Function '{target_method}' not found",
                 )
-        
+
         method_start = method_info.span.start_line - 1
         method_end = method_info.span.end_line
-        
+
     # ═══════════════════════════════════════════════════════════════════
     # 🔍 DIAGNOSTIC: Tree-sitter span vs. target pattern (read-only) ()
     # ═══════════════════════════════════════════════════════════════════
@@ -3337,7 +3690,7 @@ class FileModifier:
             _diag_target = f"{target_class}.{target_method}" if target_class else target_method
             _diag_total_lines = len(lines)
             _diag_span_size = method_end - method_start
-            
+
             print(f"\n{'─'*70}")
             print(f"🔍 [DIAG-PATCH] target='{_diag_target}'")
             print(f"   Tree-sitter span: lines [{method_start + 1} .. {method_end}] "
@@ -3345,18 +3698,25 @@ class FileModifier:
             print(f"   File total lines: {_diag_total_lines}")
             print(f"   has_errors inside: {method_info.has_errors}")
             print(f"   body_start_line:   {method_info.body_start_line}")
-            
+
             if _diag_pattern:
+
+                # Косметика диагностики: для многострочных паттернов проверяем
+                # только stripped-первую-строку (иначе печатается ложное
+                # «PATTERN NOT FOUND ANYWHERE IN FILE!»).
+                _diag_pattern = next(
+                    (seg.strip() for seg in _diag_pattern.splitlines() if seg.strip()),
+                    _diag_pattern,
+                )
                 _diag_method_lines = lines[method_start:method_end]
                 _diag_in_span = any(_diag_pattern in l for l in _diag_method_lines)
                 _diag_in_file = any(_diag_pattern in l for l in lines)
-                
+
                 print(f"   Search pattern:   {_diag_pattern!r}")
                 print(f"   → in method span: {'✅ YES' if _diag_in_span else '❌ NO'}")
                 print(f"   → in full file:   {'✅ YES' if _diag_in_file else '❌ NO'}")
-                
+
                 if _diag_in_file and not _diag_in_span:
-                    # Паттерн есть в файле, но Tree-sitter обрезал span!
                     print(f"\n   ⚠️  PATTERN OUTSIDE TREE-SITTER SPAN!")
                     print(f"   Tree-sitter закрыл функцию на строке {method_end}, "
                         f"но паттерн находится дальше:")
@@ -3365,39 +3725,36 @@ class FileModifier:
                             _in_marker = "IN span" if method_start <= _i < method_end else "OUTSIDE"
                             print(f"     Line {_i + 1:5d} [{_in_marker:>8s}]: "
                                 f"{_line.rstrip()[:100]!r}")
-                    
-                    # Показать, что находится на границе span
+
                     if method_end <= _diag_total_lines:
                         print(f"\n   📍 At span boundary (line {method_end}):")
-                        for _b in range(max(0, method_end - 2), 
+                        for _b in range(max(0, method_end - 2),
                                         min(_diag_total_lines, method_end + 3)):
                             _marker = "← SPAN END" if _b == method_end - 1 else ""
                             _indent = len(lines[_b]) - len(lines[_b].lstrip())
                             print(f"     {_b + 1:5d} [indent={_indent:2d}]: "
                                 f"{lines[_b].rstrip()[:80]!r}  {_marker}")
-                
+
                 elif not _diag_in_file:
-                    # Паттерна НЕТ ВЕЗДЕ — предыдущий REPLACE блок его удалил
                     print(f"\n   🔴 PATTERN NOT FOUND ANYWHERE IN FILE!")
                     print(f"   Previous REPLACE_IN_METHOD block likely deleted it.")
-                    _similar = [(i, l.rstrip()) for i, l in enumerate(lines) 
+                    _similar = [(i, l.rstrip()) for i, l in enumerate(lines)
                                 if 'elif choice' in l or 'elif ' in l]
                     if _similar:
                         print(f"   Similar 'elif' lines in file:")
                         for _i, _l in _similar[:8]:
                             print(f"     Line {_i + 1:5d}: {_l[:100]!r}")
                 else:
-                    # Паттерн в span — значит проблема в find_best_match
                     print(f"\n   ℹ️  Pattern IS in span. "
                         f"If staging fails, check find_best_match() logic.")
             else:
                 print(f"   (no insert_before/insert_after — insertion at end of method)")
-            
+
             print(f"{'─'*70}\n")
         except Exception as _diag_err:
             print(f"⚠️ [DIAG-PATCH] Diagnostic failed: {_diag_err}")
-        # ═══════════════════════════════════════════════════════════════════        
-        
+        # ═══════════════════════════════════════════════════════════════════
+
         # Получаем строки метода
         method_lines = lines[method_start:method_end]
 
@@ -3405,7 +3762,7 @@ class FileModifier:
         if not insert_after and not insert_before:
             code_lines = [l.strip() for l in code.strip().splitlines() if l.strip()]
             method_lines_stripped = [l.strip() for l in method_lines]
-            
+
             if code_lines:
                 first_code_line = code_lines[0]
                 match_start_offset = None
@@ -3421,11 +3778,11 @@ class FileModifier:
                                     break
                             else:
                                 break
-                        
+
                         if match_count == len(code_lines):
                             match_start_offset = i
                             break
-                
+
                 if match_start_offset is not None:
                     replace_start = method_start + match_start_offset
                     replace_end = replace_start + len(code_lines)
@@ -3494,29 +3851,106 @@ class FileModifier:
                         message=f"Replaced {replace_end - replace_start} lines in method '{target_name}'",
                         changes_made=[f"Replaced lines {replace_start + 1}-{replace_end} in {target_name}"],
                     )
-        # === END IDEMPOTENCY CHECK ===        
+        # === END IDEMPOTENCY CHECK ===
+
         # Get method body indent using Tree-sitter when possible
         # body_base_indent removal as per Plan V14
-        
+
         insert_line_offset = None
         context_line_for_indent = None
-        is_block_node = False
         node_info = None
-        
+        _hint_line_in_method: Optional[int] = None  # offset inside method for container indent
+        _is_multiline_match = False  # NEW: marks multiline text-search match (skip container calc)
+
         # Helper to find robust match
-        # Helper to find robust match
-        def find_best_match(pattern: str, lines: List[str]) -> Tuple[Optional[int], Optional[str]]:
+        def find_best_match(
+            pattern: str,
+            lines: List[str],
+        ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+            """Find the best matching block for a pattern within ``lines``.
+
+            Returns ``(start_idx, end_idx_exclusive, matched_line)``.
+
+            Multiline patterns (>= 2 non-empty lines) use a sequential search
+            that never treats a blank file line as a match for a non-empty
+            pattern line; three passes are tried per line: exact equality,
+            normalized substring, then loose substring. Single-line patterns
+            keep the previous three-pass strategy (exact → normalized
+            substring → loose). Ambiguous matches return ``(None, None, None)``.
+            """
             if not pattern:
-                return None, None
-            
-            pattern_stripped = pattern.strip()
-            
+                return None, None, None
+
+            pattern_lines = [ln.strip() for ln in pattern.splitlines() if ln.strip()]
+            if not pattern_lines:
+                return None, None, None
+
+            # === Multiline mode: >= 2 non-empty pattern lines ===
+            if len(pattern_lines) >= 2:
+                multiline_matches: List[Tuple[int, int, str]] = []
+                n = len(lines)
+                first_pl = pattern_lines[0]
+                first_pl_norm = ' '.join(first_pl.split())
+
+                for i, line in enumerate(lines):
+                    line_stripped = line.strip()
+                    # First line: (a) exact, (b) normalized substring, (c) loose substring
+                    matched_first = (
+                        line_stripped == first_pl
+                        or (first_pl_norm and first_pl_norm in ' '.join(line.split()))
+                        or (first_pl and first_pl in line)
+                    )
+                    if not matched_first:
+                        continue
+
+                    file_idx = i + 1
+                    ok = True
+                    for pline in pattern_lines[1:]:
+                        # Skip blank file lines — an empty file line must NEVER
+                        # match a non-empty pattern line.
+                        while file_idx < n and not lines[file_idx].strip():
+                            file_idx += 1
+                        if file_idx >= n:
+                            ok = False
+                            break
+                        src_line = lines[file_idx]
+                        src_stripped = src_line.strip()
+                        src_norm = ' '.join(src_line.split())
+                        pline_norm = ' '.join(pline.split())
+                        if src_stripped == pline:
+                            pass  # (a) exact
+                        elif pline_norm and pline_norm in src_norm:
+                            pass  # (b) normalized substring
+                        elif pline and pline in src_line:
+                            pass  # (c) loose substring
+                        else:
+                            ok = False
+                            break
+                        file_idx += 1
+
+                    if ok:
+                        multiline_matches.append((i, file_idx, lines[i]))
+
+                if len(multiline_matches) == 1:
+                    return multiline_matches[0]
+                elif len(multiline_matches) > 1:
+                    logger.warning(
+                        f"find_best_match: Ambiguous multiline anchor '{pattern[:40]}' "
+                        f"found {len(multiline_matches)} matches. "
+                        f"Returning no match to prevent wrong insertion."
+                    )
+                    return None, None, None
+                return None, None, None
+
+            # === Single-line mode ===
+            pattern_stripped = pattern_lines[0]
+
             # Pass 1: Exact match of stripped content
-            exact_matches = []
+            exact_matches: List[Tuple[int, int, str]] = []
             for i, line in enumerate(lines):
                 if line.strip() == pattern_stripped:
-                    exact_matches.append((i, line))
-            
+                    exact_matches.append((i, i + 1, line))
+
             if len(exact_matches) == 1:
                 return exact_matches[0]
             elif len(exact_matches) > 1:
@@ -3525,17 +3959,17 @@ class FileModifier:
                     f"found {len(exact_matches)} exact matches. "
                     f"Returning no match to prevent wrong insertion."
                 )
-                return None, None
-            
+                return None, None, None
+
             # Pass 2: Substring match (robust to spacing)
-            substring_matches = []
+            substring_matches: List[Tuple[int, int, str]] = []
+            pattern_norm = ' '.join(pattern.split())
             for i, line in enumerate(lines):
                 # Normalize spaces to single space for comparison
                 line_norm = ' '.join(line.split())
-                pattern_norm = ' '.join(pattern.split())
                 if pattern_norm in line_norm:
-                    substring_matches.append((i, line))
-            
+                    substring_matches.append((i, i + 1, line))
+
             if len(substring_matches) == 1:
                 return substring_matches[0]
             elif len(substring_matches) > 1:
@@ -3544,14 +3978,14 @@ class FileModifier:
                     f"found {len(substring_matches)} matches. "
                     f"Returning no match to prevent wrong insertion."
                 )
-                return None, None
-            
+                return None, None, None
+
             # Pass 3: Fallback loose substring
-            loose_matches = []
+            loose_matches: List[Tuple[int, int, str]] = []
             for i, line in enumerate(lines):
                 if pattern_stripped in line:
-                    loose_matches.append((i, line))
-            
+                    loose_matches.append((i, i + 1, line))
+
             if len(loose_matches) == 1:
                 return loose_matches[0]
             elif len(loose_matches) > 1:
@@ -3560,88 +3994,194 @@ class FileModifier:
                     f"found {len(loose_matches)} matches. "
                     f"Returning no match to prevent wrong insertion."
                 )
-                return None, None
-                
-            return None, None
-        
+                return None, None, None
+
+            return None, None, None
+
         # 1. Determine insertion point
         method_text = ''.join(method_lines)
-        
+
         if insert_after:
-            # Try Tree-sitter first
-            node_info, line_offset, matched_line = self._find_statement_node(
-                method_text, insert_after, lines, method_lines, method_start
-            )
-            
-            if node_info:
-                insert_line_offset = line_offset + 1
-                context_line_for_indent = matched_line
-                is_block_node = self._is_block_statement(node_info['node_type'])
-            
+            # ⭐ PRIORITY: check anchor line hint from AI (D-scope)
+            hint_result = None
+            if instruction.replace_pattern_line is not None:
+                hint_result = self._try_pattern_at_line(
+                    lines, insert_after,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if hint_result is not None:
+                    _hs, _he = hint_result
+                    if _hs < method_start or _he > method_end:
+                        logger.debug(
+                            f"PATCH_METHOD: line hint {instruction.replace_pattern_line} "
+                            f"outside method bounds [{method_start}:{method_end}], ignored"
+                        )
+                        hint_result = None
+            if hint_result is not None:
+                _hs, _he = hint_result
+                insert_line_offset = _he - method_start
+                context_line_for_indent = lines[_hs]
+                node_info = None
+                _hint_line_in_method = _hs - method_start
+                # Multiline hint range (e.g. `if …:` together with its full body)
+                # marks the insertion as "after the closing line of a multiline
+                # construct" — the same flag the text-search path sets itself.
+                # Downstream this skips the extra "+4 per block-header" container
+                # calc so the inserted code keeps the sibling-level indent of the
+                # anchor (e.g. 8) instead of diving into the body indent (e.g. 12).
+                _is_multiline_match = (_he - _hs) > 1
+                logger.info(
+                    f"PATCH_METHOD: Line hint {instruction.replace_pattern_line} matched "
+                    f"for insert_after at lines {_hs + 1}-{_he}"
+                )
             else:
-                # Fallback to text search
-                idx, match_line = find_best_match(insert_after, method_lines)
-                if idx is not None:
-                    insert_line_offset = idx + 1
-                    context_line_for_indent = match_line
+                if instruction.replace_pattern_line is not None:
+                    logger.debug(
+                        f"PATCH_METHOD: line hint {instruction.replace_pattern_line} "
+                        f"did not match for insert_after, falling back to standard search"
+                    )
+                # Try Tree-sitter first
+                node_info, line_offset, matched_line = self._find_statement_node(
+                    method_text, insert_after, lines, method_lines, method_start
+                )
+
+                if node_info:
+                    insert_line_offset = line_offset + 1
+
+                    # NEW: end_line-aware insertion offset — for a multiline node
+                    # (if/for/try block, multi-line list/dict/call literal) place
+                    # the generated code AFTER the statement's closing line, not
+                    # between its header and body.
+                    if (
+                        isinstance(node_info.get('end_line'), int)
+                        and node_info.get('end_line') > line_offset
+                    ):
+                        insert_line_offset = node_info.get('end_line') + 1
+                        _is_multiline_match = True
+                    context_line_for_indent = matched_line
+
                 else:
-                    # Distinguish between "not found" and "ambiguous"
-                    count = sum(1 for line in method_lines if insert_after in line)
-                    if count > 1:
+                    # Unified text-search path: find_best_match handles BOTH
+                    # single-line and multi-line patterns; it returns
+                    # (start_idx, end_idx, matched_line) with end_idx EXCLUSIVE.
+                    _start_idx, _end_idx, _match_line = find_best_match(insert_after, method_lines)
+                    if _start_idx is not None:
+                        _abs_start = method_start + _start_idx
+                        _abs_end = method_start + _end_idx
+                        _exp_s, _exp_e = self._expand_multiline_block(
+                            lines, _abs_start, _abs_end, method_end
+                        )
+                        insert_line_offset = _exp_e - method_start
+                        context_line_for_indent = _match_line
+                        _is_multiline_match = (_exp_e - _exp_s) > 1
+                    else:
+                        # Distinguish between "not found" and "ambiguous"
+                        _pat_lines_u = [ln.strip() for ln in (insert_after or "").splitlines() if ln.strip()]
+                        if len(_pat_lines_u) >= 2:
+                            _first_line_u = _pat_lines_u[0]
+                            count = sum(1 for line in method_lines if _first_line_u in line)
+                        else:
+                            count = sum(1 for line in method_lines if insert_after in line)
+                        if count > 1:
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                message=f"Ambiguous replace_pattern: Anchor '{insert_after[:40]}' has {count} occurrences found in method '{target_method}'",
+                            )
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Ambiguous replace_pattern: Anchor '{insert_after[:40]}' has {count} occurrences found in method '{target_method}'",
+                            message=f"Pattern '{insert_after}' not found in method '{target_method}'",
                         )
-                    return ModifyResult(
-                        success=False,
-                        new_content=existing_content,
-                        message=f"Pattern '{insert_after}' not found in method '{target_method}'",
-                    )        
-        
+
         elif insert_before:
-            # Try Tree-sitter first
-            node_info, line_offset, matched_line = self._find_statement_node(
-                method_text, insert_before, lines, method_lines, method_start
-            )
-            
-            if node_info:
-                insert_line_offset = line_offset
-                context_line_for_indent = matched_line
-                is_block_node = self._is_block_statement(node_info['node_type'])
-            
+            # ⭐ PRIORITY: check anchor line hint from AI (D-scope)
+            hint_result = None
+            if instruction.replace_pattern_line is not None:
+                hint_result = self._try_pattern_at_line(
+                    lines, insert_before,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                )
+                if hint_result is not None:
+                    _hs, _he = hint_result
+                    if _hs < method_start or _he > method_end:
+                        logger.debug(
+                            f"PATCH_METHOD: line hint {instruction.replace_pattern_line} "
+                            f"outside method bounds [{method_start}:{method_end}], ignored"
+                        )
+                        hint_result = None
+            if hint_result is not None:
+                _hs, _he = hint_result
+                insert_line_offset = _hs - method_start
+                context_line_for_indent = lines[_hs]
+                node_info = None
+                _hint_line_in_method = _hs - method_start
+                logger.info(
+                    f"PATCH_METHOD: Line hint {instruction.replace_pattern_line} matched "
+                    f"for insert_before at lines {_hs + 1}-{_he}"
+                )
             else:
-                # Fallback to text search
-                idx, match_line = find_best_match(insert_before, method_lines)
-                if idx is not None:
-                    insert_line_offset = idx
-                    context_line_for_indent = match_line
+                if instruction.replace_pattern_line is not None:
+                    logger.debug(
+                        f"PATCH_METHOD: line hint {instruction.replace_pattern_line} "
+                        f"did not match for insert_before, falling back to standard search"
+                    )
+                # Try Tree-sitter first
+                node_info, line_offset, matched_line = self._find_statement_node(
+                    method_text, insert_before, lines, method_lines, method_start
+                )
+
+                if node_info:
+                    insert_line_offset = line_offset
+                    context_line_for_indent = matched_line
+
                 else:
-                    # Distinguish between "not found" and "ambiguous"
-                    count = sum(1 for line in method_lines if insert_before in line)
-                    if count > 1:
+                    # Unified text-search path: find_best_match handles BOTH
+                    # single-line and multi-line patterns; it returns
+                    # (start_idx, end_idx, matched_line) with end_idx EXCLUSIVE.
+                    _start_idx_b, _end_idx_b, _match_line_b = find_best_match(insert_before, method_lines)
+                    if _start_idx_b is not None:
+                        _abs_start_b = method_start + _start_idx_b
+                        _abs_end_b = method_start + _end_idx_b
+                        _exp_s_b, _exp_e_b = self._expand_multiline_block(
+                            lines, _abs_start_b, _abs_end_b, method_end
+                        )
+                        insert_line_offset = _exp_s_b - method_start
+                        context_line_for_indent = _match_line_b
+                        _is_multiline_match = (_exp_e_b - _exp_s_b) > 1
+                    else:
+                        # Distinguish between "not found" and "ambiguous"
+                        _pat_lines_u_b = [ln.strip() for ln in (insert_before or "").splitlines() if ln.strip()]
+                        if len(_pat_lines_u_b) >= 2:
+                            _first_line_u_b = _pat_lines_u_b[0]
+                            count_b = sum(1 for line in method_lines if _first_line_u_b in line)
+                        else:
+                            count_b = sum(1 for line in method_lines if insert_before in line)
+                        if count_b > 1:
+                            return ModifyResult(
+                                success=False,
+                                new_content=existing_content,
+                                message=f"Ambiguous replace_pattern: Anchor '{insert_before[:40]}' has {count_b} occurrences found in method '{target_method}'",
+                            )
                         return ModifyResult(
                             success=False,
                             new_content=existing_content,
-                            message=f"Ambiguous replace_pattern: Anchor '{insert_before[:40]}' has {count} occurrences found in method '{target_method}'",
+                            message=f"Pattern '{insert_before}' not found in method '{target_method}'",
                         )
-                    return ModifyResult(
-                        success=False,
-                        new_content=existing_content,
-                        message=f"Pattern '{insert_before}' not found in method '{target_method}'",
-                    )        
-        
+
         else:
             # Default: before first return or at end
             last_return_offset = None
             last_return_line = None
-            
+
             for i, line in enumerate(method_lines):
                 stripped = line.strip()
                 if stripped.startswith('return ') or stripped == 'return':
                     last_return_offset = i
                     last_return_line = line
-            
+
             if last_return_offset is not None:
                 insert_line_offset = last_return_offset
                 context_line_for_indent = last_return_line
@@ -3651,21 +4191,36 @@ class FileModifier:
                     if line.strip():
                         context_line_for_indent = line
                         break
-        
+
         # --- Вычисление body_indent через контейнер-блок (новая логика) ---
         # _resolve_insertion_indent_python НЕ вызывается (помечен deprecated).
         active_anchor = insert_after if insert_after else (insert_before if insert_before else None)
         active_mode = 'after' if insert_after else ('before' if insert_before else 'replace')
 
-        body_indent = 0  # fallback
+        body_indent = 0
 
-        if active_anchor and active_anchor.strip():
+        if _is_multiline_match and context_line_for_indent and context_line_for_indent.strip():
+            _ctx_exp_ml = context_line_for_indent.expandtabs(4)
+            body_indent = len(_ctx_exp_ml) - len(_ctx_exp_ml.lstrip(' '))
+            logger.debug(
+                f"_patch_method: multiline-match body_indent={body_indent} "
+                f"(anchor={active_anchor!r}, mode={active_mode})"
+            )
+        elif active_anchor and active_anchor.strip():
+            _ctx_exp = context_line_for_indent.expandtabs(4) if context_line_for_indent else ''
+            body_indent = len(_ctx_exp) - len(_ctx_exp.lstrip(' '))
+            logger.debug(
+                f"_patch_method: anchor body_indent={body_indent} "
+                f"(anchor={active_anchor!r}, mode={active_mode})"
+            )
+        if active_anchor and active_anchor.strip() and not _is_multiline_match:
             # Основной путь: Tree-sitter ищет контейнер в точке вставки
             _container_indent = self._find_container_indent_at_insertion(
                 method_text=method_text,
                 anchor_line=active_anchor,
                 insert_after=bool(insert_after),
                 global_offset=method_start,
+                hint_line_idx=_hint_line_in_method,
             )
             if _container_indent is not None:
                 body_indent = _container_indent
@@ -3698,7 +4253,7 @@ class FileModifier:
                         f"_patch_method: text-fallback body_indent={body_indent} "
                         f"(context_line={context_line_for_indent.rstrip()!r})"
                     )
-       
+
         else:
             # Default (нет anchor): отступ из context_line_for_indent.
             # Если context_line_for_indent is None — ищем первую непустую строку тела метода.
@@ -3741,17 +4296,17 @@ class FileModifier:
             target_class=target_class,
             target_method=target_method,
         )
-        
+
         # 4. Calculate absolute position
         absolute_insert_line = method_start + insert_line_offset
-        
+
         # Add spacing
         prefix = ''
         if absolute_insert_line > 0 and absolute_insert_line <= len(lines):
             prev_line = lines[absolute_insert_line - 1]
             if prev_line.strip():
                 prefix = '\n'
-        
+
         # Insert
         insert_content = prefix + formatted_code + '\n'
         lines.insert(absolute_insert_line, insert_content)
@@ -3788,6 +4343,22 @@ class FileModifier:
             lines.insert(absolute_insert_line, insert_content)
             new_content = ''.join(lines)
             emitted_code = code
+
+            if not self._validate_full_content(new_content, file_path=None):
+                _patched_target = f"{target_class}.{target_method}" if target_class else target_method
+                _anchor_preview = (insert_after or insert_before or '')[:40]
+                logger.warning(
+                    f"PATCH_METHOD: raw fallback for target '{_patched_target}' "
+                    f"(anchor '{_anchor_preview}') is still invalid — refusing the change"
+                )
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=(
+                        f"PATCH_METHOD: raw fallback for target '{_patched_target}' "
+                        f"(anchor '{_anchor_preview}') is still invalid — refusing the change"
+                    ),
+                )
 
         # Store inserted block info for SyntaxChecker
         FileModifier._last_inserted_block = {
@@ -3976,19 +4547,136 @@ class FileModifier:
         method_lines: List[str],
         method_start: int
     ) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[str]]:
-        """Finds a statement node matching pattern using Tree-sitter, returns node info, line offset, and matched line."""
+        """Finds a statement node matching pattern using Tree-sitter, returns node info, line offset, and matched line.
+
+        Guard: кандидат с совпавшим нормализованным текстом принимается ТОЛЬКО
+        если фактическая стартовая строка источника (`method_text.splitlines()`
+        по `node.start_point[0]`) совпадает (strip) с первой непустой строкой
+        паттерна. Это защищает от recovery-узлов tree-sitter с неверной стартовой
+        строкой (вставка в чужой блок с `success=True`).
+
+        NEW: range-aware + ambiguity-aware.
+
+        * ``node_info['end_line']`` reports the 0-based index of the LAST line
+          the node occupies (so a single-line node returns
+          ``end_line == start_line`` and ``_patch_method`` can place code after
+          the closing line of a multiline block).
+        * Ambiguous anchors (single or multiline) without a line hint are
+          refused: ``(None, None, None)`` is returned *before* parsing so the
+          caller's canonical ambiguous-anchor failure path executes.
+        """
         parser = _get_tree_sitter_parser()
         if not parser:
             return None, None, None
-        
+
+        # Первая непустая строка паттерна — контракт сверки со стартовой строкой источника.
+        pattern_first_line = next(
+            (ln.strip() for ln in pattern.strip().splitlines() if ln.strip()),
+            None,
+        )
+        if pattern_first_line is None:
+            return None, None, None
+
+        # === NEW: Ambiguity gate (mirrors find_best_match precedence) ===
+        _pat_nonempty = [ln.strip() for ln in pattern.splitlines() if ln.strip()]
+        _anchor_ambiguous = False
+        _ambig_count = 0
+        try:
+            if len(_pat_nonempty) == 1:
+                _pat_line_single = _pat_nonempty[0]
+                _pat_line_norm = ' '.join(_pat_line_single.split())
+
+                _exact_count = sum(
+                    1 for _ln in method_lines if _ln.strip() == _pat_line_single
+                )
+                if _exact_count == 1:
+                    _anchor_ambiguous = False
+                elif _exact_count > 1:
+                    _anchor_ambiguous = True
+                    _ambig_count = _exact_count
+                else:
+                    _norm_count = 0
+                    for _ln in method_lines:
+                        _ln_norm = ' '.join(_ln.split())
+                        if _pat_line_norm and _pat_line_norm in _ln_norm:
+                            _norm_count += 1
+                    if _norm_count == 1:
+                        _anchor_ambiguous = False
+                    elif _norm_count > 1:
+                        _anchor_ambiguous = True
+                        _ambig_count = _norm_count
+                    else:
+                        _loose_count = sum(
+                            1 for _ln in method_lines if _pat_line_single in _ln
+                        )
+                        if _loose_count > 1:
+                            _anchor_ambiguous = True
+                            _ambig_count = _loose_count
+            elif len(_pat_nonempty) >= 2:
+                _first_pl = _pat_nonempty[0]
+                _first_pl_norm = ' '.join(_first_pl.split())
+                _window_count = 0
+                _n_ml = len(method_lines)
+                for _i_ml, _line_ml in enumerate(method_lines):
+                    _line_ml_stripped = _line_ml.strip()
+                    _matched_first_ml = (
+                        _line_ml_stripped == _first_pl
+                        or (_first_pl_norm and _first_pl_norm in ' '.join(_line_ml.split()))
+                        or (_first_pl and _first_pl in _line_ml)
+                    )
+                    if not _matched_first_ml:
+                        continue
+                    _file_idx_ml = _i_ml + 1
+                    _ok_ml = True
+                    for _pline_ml in _pat_nonempty[1:]:
+                        while _file_idx_ml < _n_ml and not method_lines[_file_idx_ml].strip():
+                            _file_idx_ml += 1
+                        if _file_idx_ml >= _n_ml:
+                            _ok_ml = False
+                            break
+                        _src_line_ml = method_lines[_file_idx_ml]
+                        _src_stripped_ml = _src_line_ml.strip()
+                        _src_norm_ml = ' '.join(_src_line_ml.split())
+                        _pline_norm_ml = ' '.join(_pline_ml.split())
+                        if _src_stripped_ml == _pline_ml:
+                            pass
+                        elif _pline_norm_ml and _pline_norm_ml in _src_norm_ml:
+                            pass
+                        elif _pline_ml and _pline_ml in _src_line_ml:
+                            pass
+                        else:
+                            _ok_ml = False
+                            break
+                        _file_idx_ml += 1
+                    if _ok_ml:
+                        _window_count += 1
+                if _window_count > 1:
+                    _anchor_ambiguous = True
+                    _ambig_count = _window_count
+        except Exception as _ambig_err:
+            logger.debug(
+                f"_find_statement_node: ambiguity gate failed: {_ambig_err}"
+            )
+            _anchor_ambiguous = False
+
+        if _anchor_ambiguous:
+            logger.warning(
+                f"_find_statement_node: Ambiguous anchor '{pattern[:40]}' "
+                f"found {_ambig_count} matches in method. "
+                f"Returning no match to let caller report canonical failure."
+            )
+            return None, None, None
+
+        _pattern_nonempty_count = len(_pat_nonempty)
+
         try:
             parse_result = parser.parse(method_text)
             if not parse_result.root_node:
                 return None, None, None
-            
+
             # Normalize pattern for comparison
             pattern_normalized = ' '.join(pattern.split()).strip()
-            
+
             def traverse_ast(node):
                 """Recursively traverse AST to find statement nodes."""
                 if 'statement' in node.type or 'expression' in node.type:
@@ -3996,21 +4684,63 @@ class FileModifier:
                     node_text_normalized = ' '.join(node_text.split()).strip()
 
                     if node_text_normalized == pattern_normalized:
-                        start_line_idx = node.start_point[0]
-                        source_lines_local = method_text.splitlines()
-                        if 0 <= start_line_idx < len(source_lines_local):
-                            src_line = source_lines_local[start_line_idx]
-                            expanded = src_line.expandtabs(4)
-                            indent = len(expanded) - len(expanded.lstrip(' '))
+                        # NEW: candidate must cover the whole pattern (non-empty count).
+                        _node_nonempty_count = len(
+                            [ln for ln in node_text.splitlines() if ln.strip()]
+                        )
+                        if _node_nonempty_count < _pattern_nonempty_count:
+                            logger.debug(
+                                f"_find_statement_node: rejected narrow candidate "
+                                f"(node_nonempty={_node_nonempty_count} < "
+                                f"pattern_nonempty={_pattern_nonempty_count})"
+                            )
+                            # Fall through to child traversal instead of returning.
                         else:
-                            # Fallback: use tree-sitter column as-is
-                            indent = node.start_point[1]
-                        return {
-                            'node_type': node.type,
-                            'start_line': node.start_point[0],
-                            'indent': indent,
-                            'text': node_text
-                        }
+                            start_line_idx = node.start_point[0]
+                            # NEW: derive 'end_line' from node end point.
+                            _end_line_raw = node.end_point[0]
+                            if (
+                                node.end_point[1] == 0
+                                and _end_line_raw > start_line_idx
+                            ):
+                                _end_line_val = _end_line_raw - 1
+                            else:
+                                _end_line_val = _end_line_raw
+
+                            source_lines_local = method_text.splitlines()
+                            if 0 <= start_line_idx < len(source_lines_local):
+                                src_line = source_lines_local[start_line_idx]
+                                # Верификация реальной стартовой строки источника:
+                                # recovery-узлы с неверной строкой отвергаются
+                                # (не принимаем ложное совпадение по recovery-узлу).
+                                if src_line.strip() != pattern_first_line:
+                                    logger.debug(
+                                        f"_find_statement_node: candidate at line "
+                                        f"{start_line_idx + 1} (col {node.start_point[1]}) "
+                                        f"rejected — source line {src_line.strip()!r} "
+                                        f"!= pattern first line {pattern_first_line!r}"
+                                    )
+                                    # Не возвращаем — продолжаем обход по детям/следующим узлам.
+                                else:
+                                    expanded = src_line.expandtabs(4)
+                                    indent = len(expanded) - len(expanded.lstrip(' '))
+                                    return {
+                                        'node_type': node.type,
+                                        'start_line': node.start_point[0],
+                                        'end_line': _end_line_val,
+                                        'indent': indent,
+                                        'text': node_text
+                                    }
+                            else:
+                                # Fallback: use tree-sitter column as-is
+                                indent = node.start_point[1]
+                                return {
+                                    'node_type': node.type,
+                                    'start_line': node.start_point[0],
+                                    'end_line': _end_line_val,
+                                    'indent': indent,
+                                    'text': node_text
+                                }
 
                 for child in node.children:
                     result = traverse_ast(child)
@@ -4018,17 +4748,17 @@ class FileModifier:
                         return result
 
                 return None
-            
+
             node_info = traverse_ast(parse_result.root_node)
-            
+
             if node_info:
                 line_offset = node_info['start_line']
                 if line_offset < len(method_lines):
                     matched_line = method_lines[line_offset]
                     return node_info, line_offset, matched_line
-            
+
             return None, None, None
-            
+
         except Exception as e:
             logger.debug(f"Tree-sitter statement search failed: {e}")
             return None, None, None
@@ -4254,6 +4984,7 @@ class FileModifier:
         anchor_line: str,
         insert_after: bool,
         global_offset: int = 0,
+        hint_line_idx: Optional[int] = None,
     ) -> Optional[int]:
         """
         Определяет правильный отступ для вставляемого блока кода,
@@ -4262,14 +4993,17 @@ class FileModifier:
         Алгоритм:
         1. Нормализовать anchor_line (первая непустая stripped строка).
         2. Пропустить clause-ключевые слова (else:/except: и т.д.).
-        3. Найти anchor в method_text (текстовый поиск, точный → подстрока).
+        3. Найти anchor в method_text:
+           - если передан hint_line_idx (0-indexed, относительно method_text) —
+             использовать его напрямую, пропустив текстовый поиск. Это гарантирует
+             правильный отступ при повторяющихся якорях.
+           - иначе — текстовый поиск (точный → подстрока).
         4. Вычислить anchor_indent из реальной строки (expandtabs → lstrip).
         5. Определить is_block_header: сначала текстово (надёжно), затем уточнить через
            Tree-sitter AST — обходить от узла вверх, пока узел начинается на anchor_line_idx.
         6. Вернуть: insert_after + is_block_header → anchor_indent + 4, иначе → anchor_indent.
 
         Используется ТОЛЬКО в _patch_method (режим PATCH_METHOD).
-        Для REPLACE_IN_METHOD НЕ вызывается — там indent берётся напрямую из lines[match_start].
         """
         try:
             # Шаг 1: нормализация anchor
@@ -4280,9 +5014,7 @@ class FileModifier:
             if not anchor_stripped:
                 return None
 
-            # Шаг 2: пропускаем clause-ключевые слова — они ненадёжны как anchor,
-            # потому что могут вести к неверному контейнеру (else: → тело if-блока,
-            # а не следующий оператор после него).
+            # Шаг 2: пропускаем clause-ключевые слова
             _CLAUSE_PREFIXES = ('else:', 'finally:', 'elif ', 'except ', 'except:')
             if any(
                 anchor_stripped == kw or anchor_stripped.startswith(kw)
@@ -4292,12 +5024,19 @@ class FileModifier:
 
             source_lines = method_text.splitlines()
 
-            # Шаг 3: найти номер строки anchor в method_text
+            # Шаг 3: определить anchor_line_idx
             anchor_line_idx = None
-            for idx, src_line in enumerate(source_lines):
-                if src_line.strip() == anchor_stripped:
-                    anchor_line_idx = idx
-                    break
+            if hint_line_idx is not None and 0 <= hint_line_idx < len(source_lines):
+                anchor_line_idx = hint_line_idx
+                logger.debug(
+                    f"_find_container_indent_at_insertion: using hint_line_idx={hint_line_idx}"
+                )
+            if anchor_line_idx is None:
+                # Точный текстовый поиск
+                for idx, src_line in enumerate(source_lines):
+                    if src_line.strip() == anchor_stripped:
+                        anchor_line_idx = idx
+                        break
             if anchor_line_idx is None:
                 # Мягкий поиск: подстрока
                 for idx, src_line in enumerate(source_lines):
@@ -4314,7 +5053,6 @@ class FileModifier:
             anchor_indent = len(expanded) - len(expanded.lstrip(' '))
 
             # Шаг 5a: текстовое определение is_block_header (надёжный baseline).
-            # Этот результат используется если AST-уточнение недоступно или упало.
             BLOCK_HEADER_PREFIXES = (
                 'if ', 'for ', 'while ', 'with ', 'try:', 'def ', 'class ',
                 'async def ', 'async for ', 'async with ', 'match ',
@@ -4328,9 +5066,6 @@ class FileModifier:
             )
 
             # Шаг 5b: AST-уточнение через Tree-sitter.
-            # Дедентируем method_text перед парсингом для канонического дерева.
-            # anchor_indent уже вычислен из реальной строки — он глобальный.
-            # После дедентации пересчитываем anchor_col для Tree-sitter.
             try:
                 parser = _get_tree_sitter_parser()
                 if parser is not None:
@@ -4341,11 +5076,8 @@ class FileModifier:
                         'else_clause', 'elif_clause', 'except_clause', 'finally_clause',
                         'except_group',
                     })
-                    # Дедентируем method_text чтобы Tree-sitter получил канонический Python.
-                    # textwrap.dedent убирает общий ведущий пробел всех строк.
                     import textwrap as _textwrap
                     dedented_text = _textwrap.dedent(method_text)
-                    # Вычислить смещение дедентации (сколько пробелов убрано).
                     _first_src = next(
                         (ln for ln in method_text.splitlines() if ln.strip()), ''
                     )
@@ -4356,7 +5088,6 @@ class FileModifier:
                         len(_first_src) - len(_first_src.lstrip(' '))
                         - (len(_first_ded) - len(_first_ded.lstrip(' ')))
                     )
-                    # anchor_col в дедентированном тексте:
                     anchor_col_ded = max(0, anchor_indent - _dedent_offset)
 
                     parse_result = parser.parse(dedented_text)
@@ -4365,26 +5096,20 @@ class FileModifier:
                             (anchor_line_idx, anchor_col_ded),
                             (anchor_line_idx, anchor_col_ded + max(1, len(anchor_stripped)))
                         )
-                        # Подниматься вверх по дереву, проверяя BLOCK_HEADER_TYPES.
-                        # ВАЖНО: перед break по start_point — проверяем parent.type,
-                        # чтобы не пропустить BLOCK_HEADER-узел, чьё тело (block)
-                        # начинается на другой строке, но сам заголовок — на anchor_line_idx.
                         while node is not None:
+                            # СНАЧАЛА guard: узел обязан сам начинаться на строке якоря.
+                            # Если узел начался на более ранней строке (родительский compound-
+                            # statement), подъём немедленно прекращается.
+                            if node.start_point[0] != anchor_line_idx:
+                                break
+                            # Только после guard — проверка типа block-header.
                             if node.type in BLOCK_HEADER_TYPES:
                                 is_block_header = True
                                 break
                             if node.parent is None:
                                 break
-                            # Подниматься, пока ТЕКУЩИЙ узел начинается на anchor_line_idx.
-                            # Проверяем start_point текущего узла — это позволяет достичь
-                            # BLOCK_HEADER_TYPES-узла (if_statement, for_statement и т.д.)
-                            # даже когда его тело (block) начинается на другой строке:
-                            # сам заголовок (if_statement) начинается на anchor_line_idx,
-                            # и мы до него доберёмся пока current.start_point == anchor_line_idx.
-                            if node.start_point[0] != anchor_line_idx:
-                                break
                             node = node.parent
-            
+
             except Exception:
                 pass  # Оставляем текстовый результат из шага 5a
 
@@ -4398,7 +5123,7 @@ class FileModifier:
                 f"_find_container_indent_at_insertion: anchor={anchor_stripped!r}, "
                 f"anchor_indent={anchor_indent}, is_block_header={is_block_header}, "
                 f"insert_after={insert_after}, body_indent={body_indent}, "
-                f"global_offset={global_offset}"
+                f"global_offset={global_offset}, hint_line_idx={hint_line_idx}"
             )
             return body_indent
 
@@ -4976,27 +5701,30 @@ class FileModifier:
         instruction: ModifyInstruction
     ) -> ModifyResult:
         """
-        Вставляет атрибут (поле) в тело класса.
-        
-        Args:
-            instruction:
-                - target_class: Имя класса
-                - insert_after: Якорь - поле, после которого вставить
-                - code: Строка атрибута (например: "name = Column(String)")
+        Вставляет код в тело класса.
+
+        Оба пути (line-hint и текстовый anchor) расширяют найденный диапазон
+        через `_expand_multiline_block`, чтобы код никогда не оказался внутри
+        списка/словаря. Идемпотентность проверяется по последовательности
+        непустых stripped строк в области класса. Вставка AS-IS с валидацией
+        и неразрушающим откатом.
         """
+        from app.agents.feedback_handler import StagingErrorType
+
         target_class = instruction.target_class
         insert_after = instruction.insert_after
+        insert_before = instruction.insert_before
         code = instruction.code
-        
+
         if not target_class:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message="target_class is required for INSERT_IN_CLASS",
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
-        
+
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -5004,92 +5732,115 @@ class FileModifier:
                 new_content=existing_content,
                 message="Tree-sitter parser not available",
             )
-        
+
         parse_result = ts_parser.parse(existing_content)
         class_info = parse_result.get_class(target_class)
-        
         if class_info is None:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message=f"Class '{target_class}' not found",
             )
-        
-        # Получаем отступ класса
+
+        class_start = class_info.span.start_line - 1
+        class_end = class_info.span.end_line
         class_indent = class_info.indent
         body_indent = class_indent + self.default_indent
-        
-        # ⭐ ДОБАВЛЯЕМ: Проверка идемпотентности - не добавлять если уже существует
-        code_stripped = code.strip()
-        if code_stripped:
-            # Проверяем, есть ли уже такая строка в теле класса
-            class_start = class_info.span.start_line
-            class_end = class_info.span.end_line
-            # Формируем то, как будет выглядеть добавленный код (с отступом)
-            expected_line = ' ' * body_indent + code_stripped
-            
-            for i in range(class_start - 1, class_end - 1):  # -1 т.к. 1-indexed -> 0-indexed
-                line = lines[i].rstrip('\n')
-                # Сравниваем с отступом и без
-                if line == expected_line or line.lstrip() == code_stripped:
+
+        # === IDEMPOTENCY: compare sequence of non-empty stripped lines within class scope ===
+        code_stripped_lines = [l.strip() for l in code.strip().splitlines() if l.strip()]
+        if code_stripped_lines:
+            scope_lines = [l.strip() for l in lines[class_start:class_end]]
+            n = len(code_stripped_lines)
+            for i in range(len(scope_lines) - n + 1):
+                if scope_lines[i:i + n] == code_stripped_lines:
                     return ModifyResult(
                         success=True,
                         new_content=existing_content,
-                        message=f"Attribute already exists in class '{target_class}'",
-                        changes_made=["Attribute already present, skipped"],
+                        message=f"Code already exists in class '{target_class}'",
+                        changes_made=["Already present, skipped"],
                     )
-            
-        # Находим позицию для вставки
-        insert_line = class_info.span.end_line - 1  # Перед закрывающей строкой класса
-        found_anchor = False
-        
-        if insert_after:
-            # Ищем якорь в теле класса
-            class_start = class_info.span.start_line - 1
-            class_end = class_info.span.end_line - 1
-            
-            for i in range(class_start, class_end):
-                line = lines[i].rstrip('\n')
-                if insert_after in line and len(line) - len(line.lstrip()) == body_indent:
-                    insert_line = i + 1
-                    found_anchor = True
-                    break
-        
-        # Если якорь не найден, вставляем перед последней строкой класса
-        if not found_anchor:
-            # Ищем первую строку метода (чтобы вставить перед методами)
+
+        insert_line = max(class_start, class_end - 1)  # before class end fallback
+        hint_used = False
+
+        # Line-hint path (validated inside class span) — expand via _expand_multiline_block
+        if instruction.replace_pattern_line is not None:
+            anchor_pattern = insert_after or insert_before or instruction.replace_pattern or ""
+            hint_result = self._try_pattern_at_line(
+                lines, anchor_pattern,
+                instruction.replace_pattern_line,
+                instruction.replace_pattern_line_end,
+                scope_start=class_start,
+                scope_end=class_end,
+            )
+            if hint_result is not None:
+                hs, he = hint_result
+                # Extend to the full multiline block (list/dict/etc.)
+                hs, he = self._expand_multiline_block(lines, hs, he, class_end)
+                insert_line = hs if insert_before else he
+                hint_used = True
+
+        # Textual anchor search inside class
+        if not hint_used and (insert_after or insert_before):
+            anchor = insert_after or insert_before
+            anchor_res = self._find_unique_anchor(lines, anchor, class_start, class_end)
+            if anchor_res['found'] and anchor_res['unique']:
+                hs = anchor_res['line_number']
+                he = anchor_res['match_end']
+                # Extend to the full multiline block (list/dict/etc.)
+                hs, he = self._expand_multiline_block(lines, hs, he, class_end)
+                if insert_before:
+                    insert_line = hs
+                else:
+                    insert_line = he
+                hint_used = True
+
+        # Fallback: before first method / before class end
+        if not hint_used:
             for method in class_info.methods:
                 method_start = method.span.start_line - 1
                 if method_start > class_info.span.start_line:
                     insert_line = method_start
                     break
-        
-        # CRITICAL FIX: Skip normalization for "insert in class" mode
-        # Insert code AS-IS to prevent indentation corruption
-        # SAFE: Do not touch LLM indentation. Insert exactly as generated (AS-IS).
+
+        insert_line = max(class_start, min(insert_line, class_end))
+
+        # AS-IS insertion path (no new dedent/reindent normalization)
         formatted_code = code.expandtabs(4)
         if not formatted_code.endswith('\n'):
-            formatted_code += '\n'        
-        
-        
-        # Вставляем
-        if '\n' in formatted_code.rstrip('\n'):
-            # Многострочная вставка
-            for i, line in enumerate(reversed(formatted_code.splitlines(keepends=True))):
-                lines.insert(insert_line, line)
-            lines_added = len(formatted_code.splitlines())
-        else:
-            lines.insert(insert_line, formatted_code)
-            lines_added = 1
-        
+            formatted_code += '\n'
+
+        formatted_lines = formatted_code.splitlines(keepends=True)
+        added_lines = len(formatted_code.splitlines())
+        lines[insert_line:insert_line] = formatted_lines
         new_content = ''.join(lines)
-        
+
+        # Validation gate with non-destructive fallback to raw LLM code
+        _syntax_ok = self._validate_full_content(new_content, file_path=None)
+        _struct_ok = _syntax_ok and self._validate_structural_integrity(existing_content, new_content)
+        if not _syntax_ok or not _struct_ok:
+            logger.debug("_insert_in_class: validation failed, falling back to raw code")
+            lines = existing_content.splitlines(keepends=True)
+            raw = code.expandtabs(4)
+            if not raw.endswith('\n'):
+                raw += '\n'
+            lines[insert_line:insert_line] = raw.splitlines(keepends=True)
+            new_content = ''.join(lines)
+            if not self._validate_full_content(new_content, file_path=None):
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="INSERT_IN_CLASS produced invalid syntax",
+                    error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                )
+
         return ModifyResult(
             success=True,
             new_content=new_content,
-            message=f"Inserted attribute into class '{target_class}'",
-            changes_made=[f"Added attribute to {target_class} at line {insert_line + 1}"],
-            lines_added=1,
+            message=f"Inserted code into class '{target_class}'",
+            changes_made=[f"Added {added_lines} line(s) to {target_class} at line {insert_line + 1}"],
+            lines_added=added_lines,
         )
     
     def _replace_in_class(
@@ -5100,12 +5851,19 @@ class FileModifier:
             """
             Заменяет атрибут в теле класса.
 
+            Hint ranges landing INSIDE a multiline attribute (e.g. an element
+            of a list literal) are widened to the enclosing
+            ``ast.Assign``/``ast.AnnAssign`` full span. A final syntactic
+            validation gate guarantees the returned content parses.
+
             Args:
                 instruction:
                     - target_class: Имя класса
                     - replace_pattern: Старая строка атрибута (полностью или частично)
                     - code: Новая строка атрибута
             """
+            from app.agents.feedback_handler import StagingErrorType
+
             target_class = instruction.target_class
             replace_pattern = instruction.replace_pattern
             target_attribute = instruction.target_attribute
@@ -5146,48 +5904,126 @@ class FileModifier:
             class_start = class_info.span.start_line - 1
             class_end = class_info.span.end_line
 
-    # New multi-line/fallback search logic
             target_line_idx = -1
             target_match_end = -1
-            if target_attribute:
-                # Single-line attribute search (preserved logic)
-                for i in range(class_start, class_end):
-                    line = lines[i]
-                    line_stripped = line.strip()
-                    line_indent = len(line) - len(line.lstrip())
-                    if line_indent == body_indent and (line_stripped.startswith(f"{target_attribute} = ") or line_stripped.startswith(f"{target_attribute}:")):
-                        target_line_idx = i
-                        target_match_end = i + 1
-                        break
-            elif replace_pattern:
-                # Phase 1: multi-line match
-                ml_start, ml_end = self._find_multiline_match(lines, replace_pattern, class_start, class_end)
-                if ml_start is not None and ml_end is not None:
-                    # Expand the match to cover full expression and compound blocks
-                    try:
-                        ml_start_exp, ml_end_exp = self._expand_multiline_block(lines, ml_start, ml_end, class_end)
-                        ml_start, ml_end = ml_start_exp, ml_end_exp
-                    except Exception:
-                        pass
-                    try:
-                        ml_start_comp, ml_end_comp = self._expand_compound_block_python(lines, ml_start, ml_end, class_end)
-                        ml_start, ml_end = ml_start_comp, ml_end_comp
-                    except Exception:
-                        pass
-                    target_line_idx = ml_start
-                    target_match_end = ml_end
+
+            _hint_used_range = False
+            if instruction.replace_pattern_line is not None and replace_pattern:
+                hint_result = self._try_pattern_at_line(
+                    lines, replace_pattern,
+                    instruction.replace_pattern_line,
+                    instruction.replace_pattern_line_end,
+                    scope_start=class_start,
+                    scope_end=class_end,
+                )
+                if hint_result is not None:
+                    hint_start, hint_end = hint_result
+                    # Validate BOTH ends of the returned range against class bounds
+                    _hint_used_range = True
+                    if class_start <= hint_start and hint_end <= class_end:
+                        # Authoritative hint range: a proven exact textual
+                        # range with a valid hint must NOT be widened to the
+                        # whole assignment (mandatory plan §2.3.7) — the
+                        # exact range is applied and the ast.parse gate
+                        # decides success or a safe refusal.
+                        target_line_idx = hint_start
+                        target_match_end = hint_end
+
+                        _hinted_line_indent = None
+                        if 0 <= target_line_idx < len(lines):
+                            _hinted_line_exp = lines[target_line_idx].expandtabs(4)
+                            _hinted_line_indent = len(_hinted_line_exp) - len(_hinted_line_exp.lstrip(' '))
+
+                        if _hinted_line_indent is None:
+                            logger.warning(
+                                f"REPLACE_IN_CLASS: hint line {instruction.replace_pattern_line} "
+                                f"is out of range (file has {len(lines)} lines); "
+                                f"falling back to pattern search"
+                            )
+                            target_line_idx = -1
+                            target_match_end = -1
+                        elif _hinted_line_indent > body_indent:
+                            logger.warning(
+                                f"REPLACE_IN_CLASS: hint line {instruction.replace_pattern_line} "
+                                f"points inside a multi-line class-level expression "
+                                f"(indent={_hinted_line_indent} > body_indent={body_indent}); "
+                                f"falling back to pattern search"
+                            )
+                            target_line_idx = -1
+                            target_match_end = -1
+                        logger.info(
+                            f"REPLACE_IN_CLASS: Line hint {instruction.replace_pattern_line}"
+                            f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
+                            f"matched, using direct replacement at lines {hint_start + 1}-{hint_end}"
+                        )
+                    else:
+                        logger.debug(
+                            f"REPLACE_IN_CLASS: Line hint {instruction.replace_pattern_line} "
+                            f"is outside class '{target_class}' bounds, falling back to search"
+                        )
                 else:
-                    # Phase 2: fallback single-line search
+                    logger.debug(
+                        f"REPLACE_IN_CLASS: Line hint {instruction.replace_pattern_line} did not match, "
+                        f"falling back to standard search"
+                    )
+
+            if target_line_idx == -1:
+                def _expand_replace_range(start_idx: int, end_idx: int) -> Tuple[int, int]:
+                    """Expand the found replacement range to the full expression."""
+                    s_idx, e_idx = start_idx, end_idx
+
+                    try:
+                        s_idx, e_idx = self._expand_multiline_block(
+                            lines, s_idx, e_idx, class_end
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        s_idx, e_idx = self._expand_compound_block_python(
+                            lines, s_idx, e_idx, class_end
+                        )
+                    except Exception:
+                        pass
+
+                    return s_idx, e_idx
+
+                if replace_pattern:
+                    ml_start, ml_end = self._find_multiline_match(
+                        lines, replace_pattern, class_start, class_end
+                    )
+
+                    if ml_start is not None and ml_end is not None:
+                        target_line_idx, target_match_end = _expand_replace_range(
+                            ml_start, ml_end
+                        )
+                    else:
+                        for i in range(class_start, class_end):
+                            line = lines[i]
+                            line_stripped = line.strip()
+                            line_indent = len(line) - len(line.lstrip())
+
+                            if line_indent == body_indent and replace_pattern in line_stripped:
+                                target_line_idx, target_match_end = _expand_replace_range(
+                                    i, i + 1
+                                )
+                                break
+
+                if target_line_idx == -1 and target_attribute:
                     for i in range(class_start, class_end):
                         line = lines[i]
                         line_stripped = line.strip()
                         line_indent = len(line) - len(line.lstrip())
-                        if line_indent == body_indent and replace_pattern in line_stripped:
-                            target_line_idx = i
-                            target_match_end = i + 1
+
+                        if line_indent == body_indent and (
+                            line_stripped.startswith(f"{target_attribute} = ")
+                            or line_stripped.startswith(f"{target_attribute}:")
+                        ):
+                            target_line_idx, target_match_end = _expand_replace_range(
+                                i, i + 1
+                            )
                             break
 
-            # Early return if not found (with improved error message)
             if target_line_idx == -1:
                 pattern_desc = replace_pattern if replace_pattern else f"attribute '{target_attribute}'"
                 return ModifyResult(
@@ -5196,9 +6032,59 @@ class FileModifier:
                     message=f"Pattern or attribute '{pattern_desc}' not found in class '{target_class}'",
                 )
 
-            # CRITICAL FIX: Skip normalization for "replace in class" mode
+            # === RANGE WIDENING: locate enclosing Assign/AnnAssign ===
+            def _widen_range_to_statement(
+                s_idx: int, e_idx: int
+            ) -> Tuple[int, int]:
+                """Widen ``[s_idx, e_idx)`` to the enclosing ast.Assign/AnnAssign span.
 
-    
+                Silently returns the input range on AST failure or when no
+                enclosing assignment is found. A hint pointing at the HEADER
+                of a multiline attribute is a no-op (range already covers).
+                """
+                try:
+                    try:
+                        _tree = ast.parse(existing_content)
+                    except Exception:
+                        return s_idx, e_idx
+
+                    _target_class_node = None
+                    for _n in ast.walk(_tree):
+                        if isinstance(_n, ast.ClassDef) and _n.name == target_class:
+                            _target_class_node = _n
+                            break
+
+                    if _target_class_node is None:
+                        return s_idx, e_idx
+
+                    _stmt_match = None
+                    for _child in ast.iter_child_nodes(_target_class_node):
+                        if not isinstance(_child, (ast.Assign, ast.AnnAssign)):
+                            continue
+                        _stmt_end = getattr(_child, 'end_lineno', _child.lineno)
+                        if (_child.lineno - 1) <= s_idx <= (_stmt_end - 1):
+                            _stmt_match = _child
+                            break
+
+                    if _stmt_match is None:
+                        return s_idx, e_idx
+
+                    _new_start = _stmt_match.lineno - 1
+                    _new_end = getattr(_stmt_match, 'end_lineno', _stmt_match.lineno)
+                    # Only accept widening when it lies inside class bounds.
+                    if _new_start >= class_start and _new_end <= class_end:
+                        return _new_start, _new_end
+                    return s_idx, e_idx
+                except Exception:
+                    return s_idx, e_idx
+
+            # Whole-assignment widening is a legacy NO-HINT behaviour only:
+            # with an explicit hint the proven exact range is never widened.
+            if not _hint_used_range:
+                target_line_idx, target_match_end = _widen_range_to_statement(
+                    target_line_idx, target_match_end
+                )
+
             # SAFE: Do not touch LLM indentation. Insert exactly as generated (AS-IS).
             formatted_code = code.expandtabs(4)
             if not formatted_code.endswith('\n'):
@@ -5217,6 +6103,30 @@ class FileModifier:
             lines[target_line_idx:target_match_end] = replacement_lines
             new_content = ''.join(lines)
 
+            # === FINAL VALIDATION GATE ===
+            if not self._validate_full_content(new_content):
+                logger.debug(
+                    f"REPLACE_IN_CLASS: _validate_full_content failed for "
+                    f"{target_class}, restoring original content"
+                )
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="REPLACE_IN_CLASS produced invalid syntax",
+                    error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                )
+            if not self._validate_structural_integrity(existing_content, new_content):
+                logger.debug(
+                    f"REPLACE_IN_CLASS: _validate_structural_integrity failed for "
+                    f"{target_class}, restoring original content"
+                )
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="REPLACE_IN_CLASS produced invalid syntax",
+                    error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                )
+
             new_lines_count = len(replacement_lines)
             lines_added = max(0, new_lines_count - old_lines_count)
             lines_removed = max(0, old_lines_count - new_lines_count)
@@ -5232,114 +6142,313 @@ class FileModifier:
     
     def _find_multiline_match(self, source_lines: List[str], pattern: str, start_idx: int, end_idx: int) -> Tuple[Optional[int], Optional[int]]:
         """
-        Finds a multi-line pattern within a range of source lines. 
-        Robust to whitespace and quote differences.
-        
-        Uses multiple strategies:
-        1. Single-line substring match
-        2. Multi-line exact match (normalized)
-        3. Multi-line fuzzy match (substring per line)
-        4. Joined pattern search (pattern as single string in joined source)
+        Finds a multi-line pattern within a range of source lines.
+
+        PRIMARY is a delegation to the unified exact contract
+        ``_find_text_match_in_scope`` (strict on content, tolerant only to
+        leading/trailing whitespace, tabs, ``\\r\\n`` and a final newline).
+        Zero or ambiguous exact matches return ``(None, None)`` — the first
+        hit is never returned and no quote/fuzzy normalisation happens here.
+
+        A proven exact match is returned verbatim: it is never extended by
+        bracket balancing or to a whole AST node. Bracket/whole-node
+        extension is permitted only in the documented legacy whole-node
+        fallback paths taken by callers when there is no exact match and no
+        line hint.
         """
-        def normalize(s: str) -> str:
-            # Сначала expandtabs(4) — иначе табы не схлопываются в .split()
-            # и паттерн не найдётся в файлах со смешанными пробел/таб отступами.
-            s = s.expandtabs(4)
-            # Replace non-breaking spaces and unify quotes
-            s = s.replace('\xa0', ' ').replace('"', "'")
-            # Collapse whitespace
+        match = self._find_text_match_in_scope(
+            source_lines, pattern, start_idx, end_idx,
+        )
+        if match is None:
+            return (None, None)
+        return match
+    
+    def _split_pattern_into_lines(self, pattern: str) -> List[str]:
+        """
+        Split ``pattern`` on physical line endings only (escape-aware).
+
+        ``\\r\\n`` is normalised to ``\\n`` and a trailing final newline is
+        ignored. Escape TEXT (``\\n``, ``\\\\n``, ``\\\\\\\\n``, literal
+        ``\\r\\n`` four-character sequences) is never converted into extra
+        lines because it contains no physical newline. Blank pattern lines
+        are retained in the returned list.
+        """
+        if pattern is None:
+            return []
+        normalized = pattern.replace('\r\n', '\n').replace('\r', '\n')
+        if normalized.endswith('\n'):
+            normalized = normalized[:-1]
+        return normalized.split('\n')
+
+    def _normalize_pattern_line(self, line: str) -> str:
+        """
+        Tolerant ONLY at line boundaries: expand tabs, map ``\\xa0`` to a
+        plain space, strip leading/trailing whitespace (including the line
+        ending). Interior whitespace, quotes, backslashes, escape sequences
+        and ordering remain byte-identical.
+        """
+        if line is None:
+            return ''
+        expanded = line.replace('\xa0', ' ').expandtabs(4)
+        return expanded.strip()
+
+    def _count_text_matches_in_scope(
+        self,
+        lines: List[str],
+        pattern: str,
+        scope_start: int,
+        scope_end: int,
+    ) -> List[Tuple[int, int]]:
+        """
+        Return every exact textual match as 0-indexed
+        ``(match_start, match_end_exclusive)``.
+
+        Matching is a line-sequence comparison using
+        ``_split_pattern_into_lines`` + ``_normalize_pattern_line``: every
+        non-empty pattern line must equal the corresponding file line; blank
+        pattern/file lines are treated as separators only and a non-empty
+        pattern line is never satisfied by a blank file line. Order is
+        preserved; ``match_end`` is exclusive immediately after the last
+        matched non-empty line. The result never leaves
+        ``[scope_start, scope_end)``. No AST, bracket-balancing, fuzzy or
+        quote/aggressive normalisation is involved.
+        """
+        pattern_lines_raw = self._split_pattern_into_lines(pattern)
+        non_empty = [
+            self._normalize_pattern_line(pl)
+            for pl in pattern_lines_raw
+            if self._normalize_pattern_line(pl)
+        ]
+        if not non_empty:
+            return []
+
+        upper = max(0, min(scope_end, len(lines)))
+        lower = max(0, min(scope_start, upper))
+        norm_file = [self._normalize_pattern_line(l) for l in lines]
+
+        matches: List[Tuple[int, int]] = []
+        n = len(non_empty)
+        for i in range(lower, upper):
+            if norm_file[i] != non_empty[0]:
+                continue
+            file_idx = i + 1
+            ok = True
+            for k in range(1, n):
+                while file_idx < upper and not norm_file[file_idx]:
+                    file_idx += 1
+                if file_idx >= upper or norm_file[file_idx] != non_empty[k]:
+                    ok = False
+                    break
+                file_idx += 1
+            if ok:
+                matches.append((i, file_idx))
+        return matches
+
+    def _find_text_match_in_scope(
+        self,
+        lines: List[str],
+        pattern: str,
+        scope_start: int,
+        scope_end: int,
+        *,
+        line_hint: Optional[int] = None,
+        line_end: Optional[int] = None,
+        allow_indent_tolerance: bool = True,
+        allow_compat_fallback: bool = False,
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Single PRIMARY exact matcher (Tree-sitter is NOT invoked here).
+
+        Comparison is strict on content and tolerant only to leading/trailing
+        whitespace, tabs, ``\\r\\n``, ``\\xa0`` and a final newline. Forbidden
+        here: ``"``→``'`` replacement, whitespace removal, escape rewriting,
+        ``SequenceMatcher``, whole-node extension, bracket balancing.
+
+        With a ``line_hint`` (1-indexed): the hint must lie wholly inside the
+        scope; with ``line_end`` the inclusive ``[line_hint, line_end]`` range
+        is AUTHORITATIVE (``hint_end_exclusive == line_end``) — the pattern is
+        confirmed as an in-order line sequence inside the pinned range, but
+        the range is never shrunk to the pattern length and never extended.
+        Without ``line_end`` the returned end is the actual last matched
+        pattern line, never derived from ``code`` length. On mismatch there
+        is no whole-file search and no compat fallback.
+
+        Without a hint: 0 matches → ``None`` (caller maps to
+        ``Pattern ... not found``); exactly 1 → that range; 2+ → ``None``
+        (ambiguity is available to the caller via
+        ``_count_text_matches_in_scope``). "First hit" is forbidden.
+        ``allow_compat_fallback`` is only consulted by callers on a no-hint
+        legacy path; compat is always disabled when a valid hint exists.
+        """
+        del allow_indent_tolerance, allow_compat_fallback
+        if pattern is None:
+            return None
+        upper = max(0, min(scope_end, len(lines)))
+        lower = max(0, min(scope_start, upper))
+        pattern_lines_raw = self._split_pattern_into_lines(pattern)
+        non_empty_pat = [
+            t for t in (self._normalize_pattern_line(pl) for pl in pattern_lines_raw)
+            if t
+        ]
+        if not non_empty_pat:
+            return None
+
+        if line_hint is not None:
+            hint_start = line_hint - 1
+            if hint_start < lower or hint_start >= upper:
+                return None
+            if line_end is not None:
+                if line_end < line_hint or line_end > upper:
+                    return None
+                hint_end_exclusive = line_end
+                range_norm = [
+                    self._normalize_pattern_line(l)
+                    for l in lines[hint_start:hint_end_exclusive]
+                ]
+                range_non_empty = [t for t in range_norm if t]
+                # In-order subsequence confirmation inside the pinned range.
+                pi = 0
+                for ft in range_non_empty:
+                    if pi < len(non_empty_pat) and ft == non_empty_pat[pi]:
+                        pi += 1
+                if pi != len(non_empty_pat):
+                    return None
+                return (hint_start, hint_end_exclusive)
+            # No explicit end: match exactly the non-empty pattern lines in
+            # order starting at the hint line (blank file lines skipped).
+            if self._normalize_pattern_line(lines[hint_start]) != non_empty_pat[0]:
+                return None
+            file_idx = hint_start + 1
+            match_end = hint_start + 1
+            for p_txt in non_empty_pat[1:]:
+                while file_idx < upper and not self._normalize_pattern_line(lines[file_idx]):
+                    file_idx += 1
+                if file_idx >= upper:
+                    return None
+                if self._normalize_pattern_line(lines[file_idx]) != p_txt:
+                    return None
+                file_idx += 1
+                match_end = file_idx
+            if match_end > upper:
+                return None
+            return (hint_start, match_end)
+
+        # No hint: exact line-sequence count decides.
+        matches = self._count_text_matches_in_scope(lines, pattern, lower, upper)
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _find_compat_match_in_scope(
+        self,
+        lines: List[str],
+        pattern: str,
+        scope_start: int,
+        scope_end: int,
+    ) -> Optional[Tuple[int, int]]:
+        """
+        LEGACY compat matcher (functional preservation, never a PRIMARY path).
+
+        Preserves the legacy ``replace('"', "'")``, ``normalize_aggressive()``
+        (whitespace/quote removal) and the ``SequenceMatcher`` >= 0.90 fuzzy
+        candidate search. Returns a range only when exactly one candidate
+        exists inside the scope; zero or 2+ candidates → ``None``. A
+        successful compat match emits a diagnostic warning. Compat never
+        overrides a proven exact match, never runs with an explicit line hint
+        (callers enforce this) and never silently modifies a different
+        region. Callers remain responsible for all validation gates.
+        """
+        from difflib import SequenceMatcher
+
+        def _compat(s: str) -> str:
+            s = s.expandtabs(4).replace('\xa0', ' ').replace('"', "'")
             return ' '.join(s.split())
-        
-        
-        def normalize_aggressive(s: str) -> str:
-            # Even more aggressive: remove ALL whitespace for comparison
-            s = s.replace('\xa0', '').replace('"', "'").replace("'", '')
+
+        def _compat_aggressive(s: str) -> str:
+            s = s.expandtabs(4).replace('\xa0', '').replace('"', "'").replace("'", '')
             return ''.join(s.split())
 
-        # 1. Prepare pattern
-        pattern_lines = [normalize(line) for line in pattern.splitlines() if line.strip()]
-        
-        if not pattern_lines:
-            return (None, None)
-        
-        # 2. Case 1: Single-line pattern
-        if len(pattern_lines) == 1:
-            target = pattern_lines[0]
-            target_aggressive = normalize_aggressive(pattern)
-            
-            matches_idx = []
-            for i in range(start_idx, end_idx):
-                if i < len(source_lines):
-                    source_norm = normalize(source_lines[i])
-                    if target in source_norm:
-                        matches_idx.append(i)
-                        continue  # Don't check aggressive if normal matched
-                    source_aggressive = normalize_aggressive(source_lines[i])
-                    if target_aggressive in source_aggressive:
-                        matches_idx.append(i)
-            
-            if len(matches_idx) == 1:
-                return (matches_idx[0], matches_idx[0] + 1)
-            elif len(matches_idx) > 1:
-                logger.warning(
-                    f"_find_multiline_match: Ambiguous single-line pattern '{target[:40]}' "
-                    f"found {len(matches_idx)} times in range [{start_idx}:{end_idx}]. "
-                    f"Returning no match to prevent wrong replacement."
+        pat_lines = [ln for ln in (pattern or '').splitlines() if ln.strip()]
+        if not pat_lines:
+            return None
+        upper = max(0, min(scope_end, len(lines)))
+        lower = max(0, min(scope_start, upper))
+        candidates: List[Tuple[int, int]] = []
+
+        if len(pat_lines) == 1:
+            target = _compat(pat_lines[0])
+            target_aggr = _compat_aggressive(pat_lines[0])
+            for i in range(lower, upper):
+                if target and target in _compat(lines[i]):
+                    candidates.append((i, i + 1))
+                    continue
+                if target_aggr and target_aggr in _compat_aggressive(lines[i]):
+                    candidates.append((i, i + 1))
+        else:
+            window = len(pat_lines)
+            pat_joined = '\n'.join(_compat(ln) for ln in pat_lines)
+            pat_aggr_joined = ''.join(_compat_aggressive(ln) for ln in pat_lines)
+            for i in range(lower, max(lower, upper - window + 1)):
+                window_norm = '\n'.join(_compat(lines[i + j]) for j in range(window))
+                ratio = SequenceMatcher(None, pat_joined, window_norm).ratio()
+                if ratio >= 0.90:
+                    candidates.append((i, i + window))
+                    continue
+                window_aggr = ''.join(
+                    _compat_aggressive(lines[i + j]) for j in range(window)
                 )
-                return (None, None)
-            return (None, None)        
-        
-        
-        # 3. Case 2: Multi-line pattern - try exact match first
-        for i in range(start_idx, end_idx - len(pattern_lines) + 1):
-            match = True
-            for j, p_line in enumerate(pattern_lines):
-                if i + j >= len(source_lines):
-                    match = False
-                    break
-                s_line = normalize(source_lines[i + j])
-                if s_line != p_line:
-                    match = False
-                    break
-            
-            if match:
-                return (i, i + len(pattern_lines))
-        
-        # 4. Case 3: Multi-line fuzzy match (substring per line)
-        for i in range(start_idx, end_idx - len(pattern_lines) + 1):
-            match = True
-            for j, p_line in enumerate(pattern_lines):
-                if i + j >= len(source_lines):
-                    match = False
-                    break
-                s_line = normalize(source_lines[i + j])
-                # Use substring match instead of exact match
-                if p_line not in s_line and s_line not in p_line:
-                    match = False
-                    break
-            
-            if match:
-                return (i, i + len(pattern_lines))
-        
-        # 5. Case 4: Joined pattern search
-        # Join pattern lines into single string and search in joined source
-        pattern_joined = ' '.join(pattern_lines)
-        pattern_joined_aggressive = normalize_aggressive(pattern)
-        
-        for i in range(start_idx, end_idx):
-            # Try joining a window of source lines
-            for window_size in range(1, min(len(pattern_lines) + 2, end_idx - i + 1)):
-                if i + window_size > len(source_lines):
-                    break
-                source_window = ' '.join(normalize(source_lines[i + k]) for k in range(window_size))
-                if pattern_joined in source_window:
-                    return (i, i + window_size)
-                # Try aggressive match
-                source_window_aggressive = ''.join(normalize_aggressive(source_lines[i + k]) for k in range(window_size))
-                if pattern_joined_aggressive in source_window_aggressive:
-                    return (i, i + window_size)
-        
-        return (None, None)
+                if pat_aggr_joined and (
+                    pat_aggr_joined in window_aggr or window_aggr in pat_aggr_joined
+                ):
+                    candidates.append((i, i + window))
+
+        if len(candidates) == 1:
+            logger.warning(
+                f"Compat (legacy) pattern match used at lines "
+                f"{candidates[0][0] + 1}-{candidates[0][1]} — no exact match "
+                f"was available; all validation gates remain mandatory."
+            )
+            return candidates[0]
+        return None
+    def _extend_match_by_brackets(
+        self,
+        source_lines: List[str],
+        match_start: int,
+        match_end: int,
+        scope_end: int,
+    ) -> Tuple[int, int]:
+        """
+        Расширяет найденный диапазон [match_start, match_end) до конца полной
+        скобочно-сбалансированной конструкции () [] {}.
+
+        Если внутри найденного диапазона остаются незакрытые открывающие скобки
+        (типично, когда replace_pattern короче реального многострочного выражения
+        в файле и короче кода замены), двигает match_end вперёд до строки, где
+        баланс восстанавливается. Это гарантирует, что замена удалит ВСЁ старое
+        выражение целиком и после вставки более длинного кода не останется
+        «хвоста», который ломает отступы (unexpected indent).
+
+        Скобки внутри строк/комментариев игнорируются через _count_brace_delta.
+        Если баланс не закрывается в пределах scope_end — диапазон не меняется
+        (безопасный no-op, чтобы не вылезти за границы класса/метода).
+        """
+        balance = 0
+        for idx in range(match_start, min(match_end, len(source_lines))):
+            balance += self._count_brace_delta(source_lines[idx].rstrip('\r\n'))
+
+        # Скобки внутри найденного диапазона уже сбалансированы — расширять нечего
+        if balance <= 0:
+            return match_start, match_end
+
+        # Ищем строку, закрывающую оставшиеся открытые скобки
+        for idx in range(match_end, min(scope_end, len(source_lines))):
+            balance += self._count_brace_delta(source_lines[idx].rstrip('\r\n'))
+            if balance <= 0:
+                return match_start, idx + 1
+
+        # Не нашли закрытие в пределах области — оставляем как есть
+        return match_start, match_end    
+    
     
     def _expand_multiline_block(
         self,
@@ -5376,7 +6485,10 @@ class FileModifier:
             is needed.
         """
         # Only expand single-line matches
-        if match_end - match_start != 1:
+        # FIX: обрабатываем и однострочные, и многострочные совпадения.
+        # Если паттерн короче реального выражения в файле, нужно добить
+        # диапазон до закрывающей скобки.
+        if match_end <= match_start:
             return match_start, match_end
 
         line_text = lines[match_start] if match_start < len(lines) else ""
@@ -5434,15 +6546,21 @@ class FileModifier:
                     balance -= 1
                 i += 1
             return balance
+        
+        # baza
+        # FIX: считаем баланс по всему уже найденному диапазону,
+        # а не только по первой строке.
+        balance = 0
+        for idx in range(match_start, min(match_end, len(lines))):
+            balance += count_delimiters(lines[idx])
 
-        balance = count_delimiters(line_text)
-
-        # If balance <= 0, the line is self-contained (or closes something)
+        # Если внутри найденного диапазона скобки уже сбалансированы,
+        # расширять нечего.
         if balance <= 0:
             return match_start, match_end
 
-        # --- Scan forward to find the balancing close ---
-        for idx in range(match_start + 1, min(scope_end, len(lines))):
+        # --- Scan forward from current match end to find the balancing close ---
+        for idx in range(match_end, min(scope_end, len(lines))):
             balance += count_delimiters(lines[idx])
             if balance <= 0:
                 expanded_end = idx + 1
@@ -5451,6 +6569,7 @@ class FileModifier:
                     f"[{match_start+1}:{match_end}] to [{match_start+1}:{expanded_end}]"
                 )
                 return match_start, expanded_end
+
 
         # Could not find the closing delimiter within scope — don't expand
         # (let the original single-line match proceed to avoid data loss)
@@ -5543,53 +6662,101 @@ class FileModifier:
         pattern: str,
         line_number: int,
         line_end: Optional[int] = None,
+        *,
+        scope_start: Optional[int] = None,
+        scope_end: Optional[int] = None,
     ) -> Optional[Tuple[int, int]]:
         """
-        Проверяет совпадение паттерна на указанной строке (1-indexed).
-        Поддерживает диапазон: если line_end указан, замена покрывает
-        строки от line_number до line_end включительно.
-        Если первая непустая строка паттерна совпадает (substring match) с
-        указанной строкой файла — немедленно возвращает (match_start, match_end)
-        без полного поиска. Если не совпадает — возвращает None.
+        Проверяет совпадение паттерна на указанной строке (1-indexed) через
+        единый точный контракт: сравнение построчное, толерантное ТОЛЬКО к
+        граничным пробелам/табам/``\\r\\n`` (``_normalize_pattern_line``).
+
+        Возвращает `(match_start, match_end)` — 0-indexed границы, где
+        `match_end` exclusive — или None при несовпадении/невалидном хинте.
+
+        Явный `line_end` АВТОРИТАТЕН: весь закреплённый диапазон
+        `[line_number, line_end]` заменяется целиком, даже если
+        `replace_pattern`/`code` короче; конец НИКОГДА не выводится из длины
+        `code` или `replace_pattern`. Паттерн должен быть подтверждён как
+        упорядоченная последовательность строк внутри диапазона.
+
+        Keyword-only `scope_start`/`scope_end` (0-indexed, exclusive end)
+        ограничивают допустимую область; при нарушении возвращается None.
         """
         if line_number is None or line_number < 1:
             return None
         hint_start = line_number - 1
-        if hint_start < 0 or hint_start >= len(lines):
+        if hint_start >= len(lines):
             return None
-        pattern_lines = [line.strip() for line in pattern.splitlines() if line.strip()]
-        if not pattern_lines:
+
+        # === SCOPE validation for hint start ===
+        if scope_start is not None and hint_start < scope_start:
             return None
-        first_pattern_line = pattern_lines[0]
-        file_line = lines[hint_start].strip()
-        if first_pattern_line not in file_line and file_line not in first_pattern_line:
+        if scope_end is not None and hint_start >= scope_end:
             return None
-        # Если указан диапазон — используем его как match_end
+
+        pattern_lines_raw = self._split_pattern_into_lines(pattern)
+        non_empty_pat = [
+            t for t in (self._normalize_pattern_line(pl) for pl in pattern_lines_raw)
+            if t
+        ]
+        if not non_empty_pat:
+            return None
+
+        # Случай 1: явный диапазон — авторитарный, диапазон не сжимается
         if line_end is not None:
-            hint_end = min(line_end, len(lines))
-            if hint_end <= hint_start:
-                hint_end = hint_start + 1
-            return (hint_start, hint_end)
-        # Однострочный паттерн без диапазона
-        if len(pattern_lines) == 1:
-            return (hint_start, hint_start + 1)
-        # Многострочный паттерн — ищем продолжение
+            if line_end < line_number or line_end > len(lines):
+                return None
+            hint_end_exclusive = line_end
+            # Whole hint range must lie inside scope
+            if scope_end is not None and hint_end_exclusive > scope_end:
+                return None
+            range_norm = [
+                self._normalize_pattern_line(l)
+                for l in lines[hint_start:hint_end_exclusive]
+            ]
+            range_non_empty = [t for t in range_norm if t]
+            # In-order confirmation of the pattern inside the pinned range;
+            # a shorter pattern never requires equality of every file line.
+            pi = 0
+            for ft in range_non_empty:
+                if pi < len(non_empty_pat) and ft == non_empty_pat[pi]:
+                    pi += 1
+            if pi != len(non_empty_pat):
+                return None
+            return (hint_start, hint_end_exclusive)
+
+        # Случай 2: одиночная строка паттерна
+        if len(non_empty_pat) == 1:
+            if self._normalize_pattern_line(lines[hint_start]) == non_empty_pat[0]:
+                match_end = hint_start + 1
+                if match_end > len(lines):
+                    return None
+                if scope_end is not None and match_end > scope_end:
+                    return None
+                return (hint_start, match_end)
+            return None
+
+        # Случай 3: многострочный паттерн без явного конца
+        if self._normalize_pattern_line(lines[hint_start]) != non_empty_pat[0]:
+            return None
         file_idx = hint_start + 1
         match_end = hint_start + 1
-        for pattern_line in pattern_lines[1:]:
-            while file_idx < len(lines) and not lines[file_idx].strip():
+        for pattern_line in non_empty_pat[1:]:
+            while file_idx < len(lines) and not self._normalize_pattern_line(lines[file_idx]):
                 file_idx += 1
             if file_idx >= len(lines):
-                break
-            file_line = lines[file_idx].strip()
-            if pattern_line in file_line or file_line in pattern_line:
-                file_idx += 1
-                match_end = file_idx
-            else:
-                break
-        if match_end <= hint_start:
-            match_end = hint_start + 1
-        return (hint_start, match_end)    
+                return None
+            if self._normalize_pattern_line(lines[file_idx]) != pattern_line:
+                return None
+            file_idx += 1
+            match_end = file_idx
+
+        if match_end > len(lines):
+            return None
+        if scope_end is not None and match_end > scope_end:
+            return None
+        return (hint_start, match_end)
     
     def _replace_in_method(
         self,
@@ -5743,23 +6910,42 @@ class FileModifier:
                 lines, replace_pattern,
                 instruction.replace_pattern_line,
                 instruction.replace_pattern_line_end,
-            )            
+                scope_start=method_start,
+                scope_end=method_end,
+            )
             
             if hint_result is not None:
-                match_start, match_end = hint_result
-                # Расширяем match для покрытия составных блоков.
-                # Используем len(lines) вместо method_end, т.к. tree-sitter span
-                # может быть неточным (диагностика выше это показывает).
-                match_start, match_end = self._expand_multiline_block(
-                    lines, match_start, match_end, len(lines)
-                )
-                match_start, match_end = self._expand_compound_block_python(
-                    lines, match_start, match_end, len(lines)
-                )
-                logger.info(
-                    f"REPLACE_IN_METHOD: Line hint {instruction.replace_pattern_line} matched, "
-                    f"using direct replacement at lines {match_start + 1}-{match_end}"
-                )
+                if hint_result[0] < method_start or hint_result[1] > method_end:
+                    logger.debug(
+                        f"REPLACE_IN_METHOD: line hint {instruction.replace_pattern_line} "
+                        f"outside method bounds [{method_start}:{method_end}], ignored"
+                    )
+                    match_start = None
+                    match_end = None
+                else:
+                    match_start, match_end = hint_result
+                    if instruction.replace_pattern_line_end is None:
+                        # No explicit end: a proven single-line match may be
+                        # widened to the full expression/compound block, but
+                        # a proven match with a complete exact pattern and/or
+                        # a valid line_end must NOT be expanded to a whole
+                        # compound node, and an explicit range is never
+                        # compressed or extended by `code` length.
+                        match_start, match_end = self._expand_multiline_block(
+                            lines, match_start, match_end, method_end
+                        )
+                        match_start, match_end = self._expand_compound_block_python(
+                            lines, match_start, match_end, method_end
+                        )
+                    # Re-verify the (possibly widened) range stays inside the method.
+                    if match_start < method_start or match_end > method_end:
+                        match_start = None
+                        match_end = None
+                if match_start is not None:
+                    logger.info(
+                        f"REPLACE_IN_METHOD: Line hint {instruction.replace_pattern_line} matched, "
+                        f"using direct replacement at lines {match_start + 1}-{match_end}"
+                    )
 
         if match_start is None:
             # === ОГРАНИЧЕНИЕ ОБЛАСТИ ПОИСКА ЧЕРЕЗ insert_after / insert_before ===
@@ -5998,6 +7184,22 @@ class FileModifier:
             new_content = ''.join(fallback_lines)
             emitted_code = fallback_code
 
+            if not self._validate_full_content(new_content, file_path=None):
+                _replaced_target = f"{target_class}.{target_method}" if target_class else target_method
+                _pattern_preview = (replace_pattern or '')[:40]
+                logger.warning(
+                    f"REPLACE_IN_METHOD: raw fallback for target '{_replaced_target}' "
+                    f"(pattern '{_pattern_preview}') is still invalid — refusing the change"
+                )
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message=(
+                        f"REPLACE_IN_METHOD: raw fallback for target '{_replaced_target}' "
+                        f"(pattern '{_pattern_preview}') is still invalid — refusing the change"
+                    ),
+                )
+
 
         # Store inserted block info for SyntaxChecker
         FileModifier._last_inserted_block = {
@@ -6037,18 +7239,18 @@ class FileModifier:
         patch_instruction = ModifyInstruction(
             mode=ModifyMode.PATCH_METHOD,
             code=instruction.code,
-            target_method=instruction.target_function, # ВАЖНО: маппим сюда!
-            target_class=None,                         # Класса нет
+            target_method=instruction.target_function,  # ВАЖНО: маппим сюда!
+            target_class=None,                          # Класса нет
             insert_after=instruction.insert_after,
             insert_before=instruction.insert_before,
             replace_pattern=instruction.replace_pattern,
+            replace_pattern_line=instruction.replace_pattern_line,
+            replace_pattern_line_end=instruction.replace_pattern_line_end,
             preserve_imports=instruction.preserve_imports,
             auto_format=instruction.auto_format,
             skip_normalization=instruction.skip_normalization  # FIX: Propagate flag
         )
-        
-        
-        
+
         return self._patch_method(existing_content, patch_instruction)
 
     def _replace_in_function(
@@ -6193,28 +7395,38 @@ class FileModifier:
     ) -> ModifyResult:
         """
         Заменяет глобальную переменную/константу вне классов и функций.
-        
-        Использует Tree-sitter для корректной обработки многострочных выражений.
-        
-        Args:
-            instruction:
-                - replace_pattern: Что заменять
-                - code: На что заменять
+
+        Exact-pattern branch (FINAL when proven):
+          • With a line hint, the pattern is resolved against the pinned
+            line(s) via `_try_pattern_at_line`; an explicit `line_end` is
+            authoritative. On mismatch there is NO whole-file search — a
+            REPLACE_PATTERN_NOT_FOUND staging error with unchanged content is
+            returned. The inline-substring tier stays available for a
+            genuinely single-line fragment on a correct REPLACE_PATTERN_LINE
+            (`_find_inline_span` locates the exact pattern string with only
+            boundary-whitespace tolerance — no tokenisation via `split()`).
+          • Without a hint: unique exact match via `_count_text_matches_in_scope`;
+            2+ → AMBIGUOUS_REPLACE_PATTERN with unchanged content; only after
+            zero exact matches the legacy `_find_compat_match_in_scope` runs
+            (warning + full validation gates); the Tree-sitter whole-node
+            fallback remains LAST, only when neither exact nor compat matched.
+          • A proven match is FINAL: if validation fails it returns an error
+            and never falls through to the Tree-sitter whole-node fallback.
         """
         from app.agents.feedback_handler import StagingErrorType
-        
+
         replace_pattern = instruction.replace_pattern
         code = instruction.code
-        
+
         if not replace_pattern:
             return ModifyResult(
                 success=False,
                 new_content=existing_content,
                 message="replace_pattern required for REPLACE_GLOBAL",
             )
-        
+
         lines = existing_content.splitlines(keepends=True)
-        
+
         ts_parser = _get_tree_sitter_parser()
         if ts_parser is None:
             return ModifyResult(
@@ -6222,65 +7434,163 @@ class FileModifier:
                 new_content=existing_content,
                 message="Tree-sitter parser not available",
             )
-        
-        # Ne vkusno
+
+        def _build_replacement(s_idx: int, e_idx: int) -> Optional[ModifyResult]:
+            formatted_code = code
+            if not formatted_code.endswith('\n'):
+                formatted_code += '\n'
+            old_count = e_idx - s_idx
+            new_lines_list = lines[:s_idx] + [formatted_code] + lines[e_idx:]
+            nc = ''.join(new_lines_list)
+            _ok = self._validate_full_content(nc, file_path=None)
+            _struct_ok = _ok and self._validate_structural_integrity(existing_content, nc)
+            if not _ok or not _struct_ok:
+                return None
+            new_count = len(formatted_code.splitlines())
+            return ModifyResult(
+                success=True,
+                new_content=nc,
+                message="Replaced global statement",
+                changes_made=[f"Replaced global statement at lines {s_idx + 1}-{e_idx}"],
+                lines_added=max(0, new_count - old_count),
+                lines_removed=max(0, old_count - new_count),
+            )
+
+        def _build_inline_replacement(line_idx: int, char_start: int, char_end: int) -> Optional[ModifyResult]:
+            original_line = lines[line_idx]
+            new_line = original_line[:char_start] + code + original_line[char_end:]
+            new_lines_list = lines[:line_idx] + [new_line] + lines[line_idx + 1:]
+            nc = ''.join(new_lines_list)
+            _ok = self._validate_full_content(nc, file_path=None)
+            _struct_ok = _ok and self._validate_structural_integrity(existing_content, nc)
+            if not _ok or not _struct_ok:
+                return None
+            return ModifyResult(
+                success=True,
+                new_content=nc,
+                message="Replaced global statement (inline)",
+                changes_made=[f"Replaced fragment in line {line_idx + 1}"],
+                lines_added=0,
+                lines_removed=0,
+            )
+
+        def _find_inline_span(line_text: str, single_pattern_line: str) -> Optional[Tuple[int, int]]:
+            """Locate the exact pattern string with boundary-whitespace tolerance."""
+            pat = (single_pattern_line or '').strip()
+            if not pat:
+                return None
+            idx = line_text.find(pat)
+            if idx == -1:
+                return None
+            return (idx, idx + len(pat))
+
         try:
-            # ⭐ LINE-HINT: пробуем найти паттерн по номеру строки ДО Tree-sitter
+            proven_match = False
+            proven_result: Optional[ModifyResult] = None
+
+            # --- HINT PATH ---
             if instruction.replace_pattern_line is not None:
                 hint_result = self._try_pattern_at_line(
                     lines, replace_pattern,
                     instruction.replace_pattern_line,
                     instruction.replace_pattern_line_end,
+                    scope_start=0,
+                    scope_end=len(lines),
                 )
                 if hint_result is not None:
+                    proven_match = True
                     hint_start, hint_end = hint_result
-                    formatted_code = code
-                    if not formatted_code.endswith('\n'):
-                        formatted_code += '\n'
-                    old_lines_count = hint_end - hint_start
-                    new_lines = lines[:hint_start] + [formatted_code] + lines[hint_end:]
-                    new_content = ''.join(new_lines)
-                    new_lines_count = len(formatted_code.splitlines())
+                    proven_result = _build_replacement(hint_start, hint_end)
                     logger.info(
-                        f"REPLACE_GLOBAL: Line hint {instruction.replace_pattern_line}"
-                        f"{'-' + str(instruction.replace_pattern_line_end) if instruction.replace_pattern_line_end else ''} "
-                        f"matched, using direct replacement at lines {hint_start + 1}-{hint_end}"
+                        f"REPLACE_GLOBAL: Line hint {instruction.replace_pattern_line} matched, "
+                        f"using direct replacement at lines {hint_start + 1}-{hint_end}"
+                    )
+                else:
+                    # Tier (b): single-line exact substring match on the pinned line
+                    pat_lines = [ln for ln in replace_pattern.splitlines() if ln.strip()]
+                    if len(pat_lines) == 1:
+                        pinned_idx = instruction.replace_pattern_line - 1
+                        if 0 <= pinned_idx < len(lines):
+                            span = _find_inline_span(lines[pinned_idx], pat_lines[0])
+                            if span is not None:
+                                proven_match = True
+                                proven_result = _build_inline_replacement(
+                                    pinned_idx, span[0], span[1]
+                                )
+                                logger.info(
+                                    f"REPLACE_GLOBAL: in-line substring match at line "
+                                    f"{instruction.replace_pattern_line}"
+                                )
+                if not proven_match:
+                    # Hint authoritative: never search the whole file.
+                    logger.warning(
+                        "REPLACE_GLOBAL: line hint did not match exact pattern at pinned range"
                     )
                     return ModifyResult(
-                        success=True,
-                        new_content=new_content,
-                        message=f"Replaced global statement (via line hint)",
-                        changes_made=[f"Replaced lines {hint_start + 1} to {hint_end} (via line hint)"],
-                        lines_added=max(0, new_lines_count - old_lines_count),
-                        lines_removed=max(0, old_lines_count - new_lines_count),
+                        success=False,
+                        new_content=existing_content,
+                        message=(
+                            f"REPLACE_GLOBAL: line hint {instruction.replace_pattern_line} "
+                            f"did not match exact pattern at pinned range"
+                        ),
+                        error_type=StagingErrorType.REPLACE_PATTERN_NOT_FOUND,
                     )
-                # Хинт не совпал → fallback к Tree-sitter
-                logger.debug(
-                    f"REPLACE_GLOBAL: Line hint {instruction.replace_pattern_line} did not match, "
-                    f"falling back to Tree-sitter search"
+            else:
+                # --- NO HINT: unique exact match first ---
+                exact_matches = self._count_text_matches_in_scope(
+                    lines, replace_pattern, 0, len(lines)
+                )
+                if len(exact_matches) > 1:
+                    return ModifyResult(
+                        success=False,
+                        new_content=existing_content,
+                        message=(
+                            f"Ambiguous replace_pattern: {len(exact_matches)} occurrences "
+                            f"found in global scope"
+                        ),
+                        error_type=StagingErrorType.AMBIGUOUS_REPLACE_PATTERN,
+                    )
+                if len(exact_matches) == 1:
+                    proven_match = True
+                    _s, _e = exact_matches[0]
+                    proven_result = _build_replacement(_s, _e)
+                else:
+                    # Zero exact matches: legacy compat tier (warning inside).
+                    compat = self._find_compat_match_in_scope(
+                        lines, replace_pattern, 0, len(lines)
+                    )
+                    if compat is not None:
+                        proven_match = True
+                        proven_result = _build_replacement(compat[0], compat[1])
+
+            # A proven match is FINAL — never fall through to the whole-node fallback.
+            if proven_match:
+                if proven_result is not None:
+                    return proven_result
+                logger.warning(
+                    "REPLACE_GLOBAL: proven textual match produced invalid syntax; "
+                    "refusing whole-node fallback."
+                )
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    error_type=StagingErrorType.SYNTAX_VALIDATION_FAILED,
+                    message="REPLACE_GLOBAL produced invalid syntax",
                 )
 
+            # --- Legacy Tree-sitter whole-node fallback (last resort) ---
             parse_result = ts_parser.parse(existing_content)
-            # Итерируем по дочерним узлам корня (глобальный уровень)
-            target_node = None            
-            
+            target_node = None
             for child in parse_result.root_node.children:
-                # Пропускаем определения классов и функций
                 if child.type in ('class_definition', 'function_definition'):
                     continue
-                
-                # Вычисляем диапазон строк узла
                 start_line = child.start_point[0]
                 end_line = child.end_point[0]
-                
-                # Извлекаем текст узла из lines
                 node_text = ''.join(lines[start_line:end_line + 1])
-                
-                # Проверяем, содержит ли узел replace_pattern
                 if replace_pattern in node_text:
                     target_node = child
                     break
-            
+
             if target_node is None:
                 logger.warning(
                     f"[STAGING FAILED] REPLACE_GLOBAL: Pattern '{replace_pattern}' not found in global scope. "
@@ -6291,39 +7601,41 @@ class FileModifier:
                     new_content=existing_content,
                     message=f"Pattern '{replace_pattern}' not found in global scope",
                     error_type=StagingErrorType.REPLACE_PATTERN_NOT_FOUND,
-                )            
-            
-            
-            # Определяем точный диапазон замены
+                )
+
             start_line = target_node.start_point[0]
             end_line = target_node.end_point[0]
-            
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если узел заканчивается в начале строки (end_point[1] == 0),
-            # декрементируем end_line на 1
             if target_node.end_point[1] == 0:
                 end_line -= 1
-            
-            # Use code exactly as provided
+
             formatted_code = code
             if not formatted_code.endswith('\n'):
                 formatted_code += '\n'
-            
-            # Заменяем весь диапазон строк новым кодом
-            old_lines_count = end_line - start_line + 1
+
+            old_count = end_line - start_line + 1
             new_lines = lines[:start_line] + [formatted_code] + lines[end_line + 1:]
             new_content = ''.join(new_lines)
-            
-            new_lines_count = len(formatted_code.splitlines())
-            
+
+            _ok = self._validate_full_content(new_content, file_path=None)
+            _struct_ok = _ok and self._validate_structural_integrity(existing_content, new_content)
+            if not _ok or not _struct_ok:
+                return ModifyResult(
+                    success=False,
+                    new_content=existing_content,
+                    message="REPLACE_GLOBAL produced invalid syntax",
+                    error_type=StagingErrorType.UNKNOWN,
+                )
+
+            new_count = len(formatted_code.splitlines())
             return ModifyResult(
                 success=True,
                 new_content=new_content,
-                message=f"Replaced global statement",
+                message="Replaced global statement",
                 changes_made=[f"Replaced global statement at lines {start_line + 1}-{end_line + 1}"],
-                lines_added=max(0, new_lines_count - old_lines_count),
-                lines_removed=max(0, old_lines_count - new_lines_count),
+                lines_added=max(0, new_count - old_count),
+                lines_removed=max(0, old_count - new_count),
             )
-            
+
         except Exception as e:
             logger.error(f"Global replacement failed: {e}", exc_info=True)
             return ModifyResult(
@@ -6331,7 +7643,7 @@ class FileModifier:
                 new_content=existing_content,
                 message=f"Error replacing global: {e}",
                 error_type=StagingErrorType.UNKNOWN,
-            )    
+            )
     
     # ========================================================================
     # HELPER METHODS (большинство удалено)

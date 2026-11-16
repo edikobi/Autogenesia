@@ -1,0 +1,220 @@
+/* Autogenesia TUI — светлая сине-белая тема (Textual TCSS) */
+
+Screen {
+    background: $background;
+    color: $text;
+}
+
+Header {
+    background: $primary;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+Footer {
+    background: $surface;
+    color: $text;
+    border-top: solid $border;
+}
+
+#tabs {
+    background: $surface;
+}
+
+TabPane {
+    background: $background;
+    padding: 0 1;
+}
+
+/* Таблица изменений: обязательная жёлтая рамка */
+DataTable.diff-table {
+    border: solid $diff-border;
+    height: auto;
+    max-height: 40%;
+    margin: 0 1 0 1;
+}
+
+/* Постоянная красная кнопка Emergency Stop */
+#stop-btn {
+    background: $stop;
+    color: #FFFFFF;
+    border: none;
+    min-width: 18;
+    margin: 0 1 0 1;
+}
+
+#stop-btn:hover {
+    background: #8B1A1A;
+}
+
+#stop-btn:focus {
+    background: #B71C1C;
+    border: none;
+}
+
+/* Модальные диалоги: не пересекаются с основным экраном */
+ModalScreen {
+    align: center middle;
+}
+
+ModalScreen Vertical {
+    background: $surface;
+}
+
+#dialog-box {
+    width: 70%;
+    max-width: 92;
+    height: auto;
+    max-height: 85%;
+    border: thick $background 60%;
+    background: $surface;
+    padding: 1 2;
+}
+
+#dialog-label {
+    margin-bottom: 1;
+    color: $text;
+}
+
+#dialog-buttons {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+#dialog-buttons Button {
+    margin-left: 1;
+    color: #FFFFFF;
+}
+
+OptionList {
+    background: $background;
+    color: $text;
+}
+
+/* Воркспейс */
+#status-label {
+    height: 1;
+    margin: 0 1;
+    color: $text-muted;
+}
+
+#chat {
+    height: 1fr;
+    border: round $border;
+    margin: 0 1;
+}
+
+#action-panel {
+    height: auto;
+    margin: 0 1;
+}
+
+#action-panel Button {
+    margin-right: 1;
+    color: #FFFFFF;
+}
+
+#accept-btn {
+    background: $success;
+}
+
+#rework-btn {
+    background: $accent;
+}
+
+#cancel-btn {
+    background: $warning;
+    color: #FFFFFF;
+}
+
+#tester-btn {
+    background: $primary;
+}
+
+#diff-btn {
+    background: $primary;
+}
+
+#query-input {
+    margin: 0 1 1 1;
+    border: round $border;
+    background: $background;
+}
+
+/* Баннер / splash / about */
+#banner-art {
+    text-align: center;
+    color: $primary;
+    margin: 1 2;
+}
+
+#banner-title {
+    text-align: center;
+    color: $text-muted;
+    margin: 0 2 1 2;
+}
+
+/* Главное меню */
+#menu-box {
+    width: 64;
+    max-width: 92%;
+    height: auto;
+    border: thick $background 60%;
+    background: $surface;
+    padding: 1 2;
+}
+
+#menu-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Окно просмотра кода (Diff) */
+#diff-viewer {
+    width: 96%;
+    max-width: 170;
+    height: 90%;
+    border: thick $diff-border;
+    background: $surface;
+    padding: 0 1;
+}
+
+#diff-header {
+    height: auto;
+}
+
+#diff-title {
+    width: 1fr;
+    padding: 0 1;
+    color: $text;
+}
+
+/* ===== Session status bar & action bar ===== */
+#session-status {
+    height: 1;
+    color: #666666;
+}
+
+#action-bar {
+    height: auto;
+    align-horizontal: center;
+}
+
+#action-bar Button {
+    min-width: 12;
+    margin: 0 1;
+}
+
+/* ── Visual safety net: a dismissed/mis-stacked overlay must never render
+   as a black screen. Explicit non-transparent backgrounds only; the existing
+   Screen block, ModalScreen align rule, ModalScreen Vertical, #dialog-box and
+   all button/table colours remain unchanged. ── */
+SplashScreen {
+    background: $background;
+    color: $text;
+}
+
+ModalScreen {
+    background: $background 60%;
+}

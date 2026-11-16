@@ -237,24 +237,65 @@ async def orchestrate(
     available_tools = ORCHESTRATOR_TOOLS.copy()
     
     # Call LLM with tools
-    for iteration in range(MAX_TOOL_ITERATIONS):
+    active_model = orchestrator_model
+    active_provider = preferred_provider
+    _max_tool_iterations = MAX_TOOL_ITERATIONS
+    iteration = 0
+    while True:
+        if iteration >= _max_tool_iterations:
+            # === LIMIT-RECOVERY HOOK (tool iteration exhaustion) ===
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                _orch_limit_resolution = get_emergency_manager().handle_limit_reached(
+                    limit_type="tool_calls",
+                    current_value=iteration,
+                    max_value=_max_tool_iterations,
+                    agent_role="orchestrator",
+                    messages=messages,
+                    vfs=virtual_fs,
+                )
+
+                if asyncio.iscoroutine(_orch_limit_resolution):
+                    _orch_limit_resolution = await _orch_limit_resolution
+                if _orch_limit_resolution is not None:
+                    _orch_action = getattr(_orch_limit_resolution, "action", "")
+                    if _orch_action == "extra_quota":
+                        _orch_extra = getattr(_orch_limit_resolution, "extra_tool_calls", 0) or 10
+                        _max_tool_iterations += _orch_extra
+                        logger.info(
+                            f"Orchestrator: extra quota granted (+{_orch_extra} tool iterations, "
+                            f"new bound={_max_tool_iterations})"
+                        )
+                        continue
+                    if _orch_action == "end_session":
+                        return OrchestratorResult(
+                            analysis="Session ended due to tool iteration limit.",
+                            instruction="",
+                            tool_calls=all_tool_calls,
+                            raw_response="",
+                            tool_usage=tool_usage,
+                        )
+            except Exception as _orch_limit_err:
+                logger.warning(f"orchestrator limit hook failed: {_orch_limit_err}")
+            break
+        iteration += 1
         try:
             # Update available tools based on usage
             available_tools = _get_available_tools(tool_usage)
             
             # Cache optimization for Claude models
-            is_claude_model_check = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
+            is_claude_model_check = cfg.is_model(active_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             if is_claude_model_check:
                  _optimize_cache_by_size(messages, limit=3)
 
             response = await call_llm_with_tools(
-                model=orchestrator_model,
+                model=active_model,
                 messages=messages,
                 tools=available_tools,
                 temperature=0,
                 max_tokens=4000,
                 tool_choice="auto",
-                preferred_provider=preferred_provider,
+                preferred_provider=active_provider,
             )
             
             content = response.get("content", "")
@@ -280,15 +321,15 @@ async def orchestrate(
             logger.info(f"Orchestrator: executing {len(tool_calls)} tool call(s)")
             
             # Check if Claude model for caching
-            is_claude_model = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
+            is_claude_model = cfg.is_model(active_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             
             # Capture thinking content before tool calls
             # [UPDATED] Use reasoning_content if available (for DeepSeek), otherwise fallback to content
             current_thinking = reasoning_content if reasoning_content else (content if content else "")
             
             # === NEW: Use batch limit for specific models ===
-            if _should_use_batch_limit(orchestrator_model):
-                logger.info(f"Orchestrator: applying batch file limit for {cfg.get_model_display_name(orchestrator_model)}")
+            if _should_use_batch_limit(active_model):
+                logger.info(f"Orchestrator: applying batch file limit for {cfg.get_model_display_name(active_model)}")
                 
                 batch_tool_calls, assistant_tool_calls, tool_results = await _process_file_tools_with_batch_limit(
                     tool_calls=tool_calls,
@@ -413,7 +454,7 @@ async def orchestrate(
                 compact_index=compact_index,
                 project_map=project_map,
                 remaining_web_searches=tool_usage.get_remaining_web_searches(),
-                orchestrator_model_id=orchestrator_model,
+                orchestrator_model_id=active_model,
                 conversation_summary=conversation_summary,
                 prefilter_advice=prefilter_advice,
             )
@@ -425,13 +466,46 @@ async def orchestrate(
             continue
         except Exception as e:
             logger.error(f"Orchestrator LLM error: {e}")
+            try:
+                from app.services.emergency_recovery import (
+                    get_emergency_manager,
+                    get_inflight_model_swap,
+                )
+                resolution = await get_emergency_manager().handle_exception(
+                    e,
+                    messages=messages,
+                    agent_role="orchestrator",
+                )
+                if resolution is not None and getattr(resolution, "action", "") == "continue":
+                    _orchestrator_swap = get_inflight_model_swap(resolution)
+                    if _orchestrator_swap is not None:
+                        active_model = _orchestrator_swap["model"] or active_model
+                        active_provider = _orchestrator_swap["provider"]
+                        _refresh_prompts = format_orchestrator_prompt_ask(
+                            user_query=user_query,
+                            selected_chunks="",
+                            compact_index=compact_index,
+                            project_map=project_map,
+                            remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                            orchestrator_model_id=active_model,
+                            conversation_summary=conversation_summary,
+                            prefilter_advice=prefilter_advice,
+                        )
+                        messages[0]["content"] = _refresh_prompts["system"]
+                        logger.info(
+                            f"Orchestrator: in-flight model swap → "
+                            f"model={active_model}, provider={active_provider}"
+                        )
+                    continue
+            except Exception as emergency_err:
+                logger.warning(f"orchestrator emergency hook failed: {emergency_err}")
             return OrchestratorResult(
                 analysis=f"Error during analysis: {e}",
                 instruction="Unable to generate instruction due to error.",
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )    
+            )
     
     # =========================================================================
     # NEW: FORCED FINALIZATION - If no instruction section found after all iterations
@@ -457,11 +531,11 @@ async def orchestrate(
         # Final call WITHOUT tools - model MUST respond with text
         try:
             final_content = await call_llm(
-                model=orchestrator_model,
+                model=active_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=4000,
-                preferred_provider=preferred_provider,
+                preferred_provider=active_provider,
             )
             content = final_content
             logger.info("Orchestrator: Received forced final response")
@@ -728,16 +802,68 @@ async def orchestrate_new_project(
             "search_pypi",
             "list_installed_packages",
             "get_advice",
+            "ask_user",
+            "check_environment",
         ]
     ]
+
+    # MCP tools are available even for new projects (separate from project tools)
+    try:
+        from app.mcp.definitions import get_mcp_tool_definitions
+        new_project_tools.extend(get_mcp_tool_definitions(role="orchestrator"))
+    except Exception:
+        pass
         
     all_tool_calls: List[ToolCall] = []
     content = ""
     
     # Tool executor for web_search only
-    executor_instance = ToolExecutor(project_dir=project_dir or ".", index={}, virtual_fs=virtual_fs)
-    
-    for iteration in range(MAX_TOOL_ITERATIONS):
+    executor_instance = ToolExecutor(project_dir=project_dir or ".", index={}, virtual_fs=virtual_fs, role="orchestrator")
+    tool_executor = lambda name, args: executor_instance.execute(name, args)
+
+    active_model = orchestrator_model
+    active_provider = preferred_provider
+    _max_tool_iterations = MAX_TOOL_ITERATIONS
+    iteration = 0
+
+    while True:
+        if iteration >= _max_tool_iterations:
+            # === LIMIT-RECOVERY HOOK (new-project tool iteration exhaustion) ===
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                _np_limit_resolution = get_emergency_manager().handle_limit_reached(
+                    limit_type="tool_calls",
+                    current_value=iteration,
+                    max_value=_max_tool_iterations,
+                    agent_role="orchestrator",
+                    messages=messages,
+                    vfs=virtual_fs,
+                )
+
+                if asyncio.iscoroutine(_np_limit_resolution):
+                    _np_limit_resolution = await _np_limit_resolution
+                if _np_limit_resolution is not None:
+                    _np_action = getattr(_np_limit_resolution, "action", "")
+                    if _np_action == "extra_quota":
+                        _np_extra = getattr(_np_limit_resolution, "extra_tool_calls", 0) or 10
+                        _max_tool_iterations += _np_extra
+                        logger.info(
+                            f"Orchestrator (new project): extra quota granted "
+                            f"(+{_np_extra} tool iterations, new bound={_max_tool_iterations})"
+                        )
+                        continue
+                    if _np_action == "end_session":
+                        return OrchestratorResult(
+                            analysis="Session ended due to tool iteration limit.",
+                            instruction="",
+                            tool_calls=all_tool_calls,
+                            raw_response="",
+                            tool_usage=tool_usage,
+                        )
+            except Exception as _np_limit_err:
+                logger.warning(f"orchestrator (new project) limit hook failed: {_np_limit_err}")
+            break
+        iteration += 1
         try:
             # Check if web_search is still available
             if not tool_usage.can_use_web_search():
@@ -747,22 +873,22 @@ async def orchestrate_new_project(
             
             if available_tools:
                 response = await call_llm_with_tools(
-                    model=orchestrator_model,
+                    model=active_model,
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
                     max_tokens=55000,
                     tool_choice="auto",
-                    preferred_provider=preferred_provider,
+                    preferred_provider=active_provider,
                 )
             else:
                 # No tools available, just call without tools
                 response_content = await call_llm(
-                    model=orchestrator_model,
+                    model=active_model,
                     messages=messages,
                     temperature=0,
                     max_tokens=55000,
-                    preferred_provider=preferred_provider,
+                    preferred_provider=active_provider,
                 )
                 response = {"content": response_content, "tool_calls": []}
             
@@ -828,13 +954,44 @@ async def orchestrate_new_project(
             continue
         except Exception as e:
             logger.error(f"Orchestrator error (new project): {e}")
+            try:
+                from app.services.emergency_recovery import (
+                    get_emergency_manager,
+                    get_inflight_model_swap,
+                )
+                _np_resolution = await get_emergency_manager().handle_exception(
+                    e,
+                    messages=messages,
+                    agent_role="orchestrator",
+                )
+                if _np_resolution is not None and getattr(_np_resolution, "action", "") == "continue":
+                    _np_swap = get_inflight_model_swap(_np_resolution)
+                    if _np_swap is not None:
+                        active_model = _np_swap["model"] or active_model
+                        active_provider = _np_swap["provider"]
+                        try:
+                            _np_prompts = format_orchestrator_prompt_new_project(
+                                user_query=user_query,
+                                remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                                orchestrator_model_id=active_model,
+                            )
+                            messages[0]["content"] = _np_prompts["system"]
+                        except Exception as _np_prompts_err:
+                            logger.debug(f"new project prompt refresh failed: {_np_prompts_err}")
+                        logger.info(
+                            f"Orchestrator (new project): in-flight model swap → "
+                            f"model={active_model}, provider={active_provider}"
+                        )
+                    continue
+            except Exception as emergency_err:
+                logger.warning(f"orchestrator (new project) emergency hook failed: {emergency_err}")
             return OrchestratorResult(
                 analysis=f"Error: {e}",
                 instruction="",
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )    
+            )
     
     
     # =========================================================================
@@ -860,11 +1017,11 @@ async def orchestrate_new_project(
         
         try:
             final_content = await call_llm(
-                model=orchestrator_model,
+                model=active_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=55000,
-                preferred_provider=preferred_provider,
+                preferred_provider=active_provider,
             )
             content = final_content
             logger.info("Orchestrator (new project): Received forced final response")
@@ -935,7 +1092,15 @@ def _get_available_tools(tool_usage: ToolUsageStats) -> List[Dict[str, Any]]:
         
         available.append(tool)
     
+    # MCP tools: appended after project tools, kept fully separate; no usage limits apply
+    try:
+        from app.mcp.definitions import get_mcp_tool_definitions
+        available.extend(get_mcp_tool_definitions(role="orchestrator"))
+    except Exception:
+        pass
+    
     return available
+
 
 
 def _format_web_search_limit_error(tool_usage: ToolUsageStats) -> str:
@@ -1510,7 +1675,7 @@ class GeneralChatOrchestrator:
                              func_args["max_results"] = 10 # Помогаем модели брать больше
 
                         tool_result = await self._execute_general_tool(func_name, func_args)
-                        success = not tool_result.startswith("<!--ERROR-->")
+                        success = not (tool_result.startswith("<!--ERROR-->") or tool_result.startswith("<!-- ERROR"))
                         
                         # Обновляем статистику (general_web_search = web_search в статистике)
                         if func_name == "general_web_search":
@@ -1584,6 +1749,24 @@ class GeneralChatOrchestrator:
                 continue
             except Exception as e:
                 logger.error(f"General Chat LLM error: {e}")
+                try:
+                    resolution = await self._emergency_llm_error(e, messages, agent_role="orchestrator")
+                    if resolution is not None and getattr(resolution, "action", "") == "continue":
+                        try:
+                            from app.services.emergency_recovery import get_inflight_model_swap
+                            _gc_swap = get_inflight_model_swap(resolution)
+                            if _gc_swap is not None:
+                                self.model = _gc_swap["model"] or self.model
+                                self.preferred_provider = _gc_swap["provider"]
+                                logger.info(
+                                    f"General Chat: in-flight model swap → "
+                                    f"model={self.model}, provider={self.preferred_provider}"
+                                )
+                        except Exception as _gc_swap_err:
+                            logger.debug(f"general chat model swap failed: {_gc_swap_err}")
+                        continue
+                except Exception as emergency_err:
+                    logger.warning(f"general chat emergency hook failed: {emergency_err}")
                 return GeneralChatResult(
                     response=f"Произошла ошибка при обработке запроса: {e}",
                     raw_response=str(e),
@@ -1610,10 +1793,40 @@ class GeneralChatOrchestrator:
         if tool_usage.can_use_web_search():
             tools.append(GENERAL_WEB_SEARCH_TOOL)
         
+        # MCP tools: appended after general tools, kept fully separate; no usage limits apply
+        try:
+            from app.mcp.definitions import get_mcp_tool_definitions
+            tools.extend(get_mcp_tool_definitions(role="orchestrator"))
+        except Exception:
+            pass
+        
         return tools
     
     async def _execute_general_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
             """Выполняет инструмент для General Chat"""
+            # MCP-маршрутизация: диспетчер синхронный и потокобезопасный
+            # (менеджер владеет собственным фоновым потоком), to_thread не блокирует event loop.
+            if tool_name.startswith("mcp__"):
+                try:
+                    from app.mcp.definitions import dispatch_mcp_tool
+                    return await asyncio.to_thread(
+                        dispatch_mcp_tool, tool_name, args, role="orchestrator"
+                    )
+                except Exception as e:
+                    return f"<!-- ERROR -->\n<error>\n  <message>MCP tool '{tool_name}' error: {e}</message>\n</error>"
+            
+            if tool_name == "ask_user":
+                try:
+                    from app.tools.ask_user import ask_user_tool
+                    return await asyncio.to_thread(
+                        ask_user_tool,
+                        args.get("question", ""),
+                        args.get("options"),
+                        args.get("context"),
+                    )
+                except Exception as e:
+                    return f"<!-- ERROR -->\n<error>\n  <message>ask_user failed: {e}</message>\n</error>"
+            
             if tool_name == "general_web_search":
                 from app.tools.general_web_search import (
                     async_general_web_search, 
@@ -1645,6 +1858,32 @@ class GeneralChatOrchestrator:
                     return format_error(f"Search failed: {e}")
             else:
                 return f"<!--ERROR-->Unknown tool: {tool_name}"
+
+    async def _emergency_llm_error(
+        self,
+        exc: Exception,
+        messages: List[Dict[str, Any]],
+        agent_role: str = "orchestrator",
+    ):
+        """Deterministic helper: dispatch an LLM/provider exception to the emergency manager.
+
+        Never calls an LLM. Returns an ``EmergencyResolution`` or ``None`` on
+        failure. Does not mutate ``messages``.
+        """
+        try:
+            from app.services.emergency_recovery import get_emergency_manager
+            return await get_emergency_manager().handle_exception(
+                exc,
+                messages=messages,
+                agent_role=agent_role,
+            )
+        except Exception as e:
+            logger.warning(f"_emergency_llm_error failed: {e}")
+            try:
+                from app.services.emergency_recovery import EmergencyResolution
+                return EmergencyResolution(action="propagate")
+            except Exception:
+                return None
 
 
 # ============================================================================
@@ -1698,7 +1937,9 @@ async def orchestrate_agent(
     """
     logger.info(f"Agent Mode: starting with {cfg.get_model_display_name(orchestrator_model)}")
     
-    compressor = get_compressor(orchestrator_model)
+    active_model = orchestrator_model
+    active_provider = preferred_provider
+    compressor = get_compressor(active_model)
     tool_usage = ToolUsageStats()
     
     # === Build initial context ===
@@ -1762,15 +2003,41 @@ async def orchestrate_agent(
     
     AGENT_MAX_ITERATIONS = 100
     iteration = 0
-    
+
     while iteration < AGENT_MAX_ITERATIONS:
         iteration += 1
+
+        # === LIMIT-RECOVERY HOOK (agent tool iteration exhaustion) ===
+        if iteration >= AGENT_MAX_ITERATIONS:
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                _agent_limit_resolution = await get_emergency_manager().handle_limit_reached(
+                    limit_type="tool_calls",
+                    current_value=iteration,
+                    max_value=AGENT_MAX_ITERATIONS,
+                    agent_role="orchestrator",
+                    messages=messages,
+                    vfs=virtual_fs,
+                )
+                if _agent_limit_resolution is not None:
+                    _agent_limit_action = getattr(_agent_limit_resolution, "action", "")
+                    if _agent_limit_action == "extra_quota":
+                        _agent_extra = getattr(_agent_limit_resolution, "extra_tool_calls", 0) or 10
+                        AGENT_MAX_ITERATIONS += _agent_extra
+                        logger.info(
+                            f"Agent Mode: extra quota granted (+{_agent_extra} tool iterations, "
+                            f"new bound={AGENT_MAX_ITERATIONS})"
+                        )
+                    elif _agent_limit_action == "end_session":
+                        break
+            except Exception as _agent_limit_err:
+                logger.warning(f"Agent Mode: limit hook failed: {_agent_limit_err}")
         
         try:
             available_tools = _get_available_tools(tool_usage)
             
             # Claude cache optimization
-            is_claude_model = cfg.is_model(orchestrator_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
+            is_claude_model = cfg.is_model(active_model, cfg.MODEL_OPUS_4_5, cfg.MODEL_SONNET_4_5, cfg.MODEL_SONNET_4_6, cfg.MODEL_OPUS_4_8)
             if is_claude_model:
                 _optimize_cache_by_size(messages, limit=3)
             
@@ -1785,31 +2052,31 @@ async def orchestrate_agent(
 # === LLM call with error handling ===
             try:
                 response = await call_llm_with_tools(
-                    model=orchestrator_model,
+                    model=active_model,
                     messages=messages,
                     tools=available_tools,
                     temperature=0,
                     max_tokens=55000,
                     tool_choice="auto",
-                    preferred_provider=preferred_provider,
+                    preferred_provider=active_provider,
                     on_delta=on_token,
                 )
             except Exception as e:
                 # Check for context overflow (reactive compression for all models)
                 if is_context_overflow_error(e):
-                    logger.warning(f"Context overflow for {orchestrator_model}, applying emergency compression...")
+                    logger.warning(f"Context overflow for {active_model}, applying emergency compression...")
                     messages, emergency_result = await compressor.emergency_compress(messages)
                     logger.info(f"Emergency: {emergency_result.original_tokens} → {emergency_result.compressed_tokens} tokens")
                     
 # Retry after compression
                     response = await call_llm_with_tools(
-                        model=orchestrator_model,
+                        model=active_model,
                         messages=messages,
                         tools=available_tools,
                         temperature=0,
                         max_tokens=55000,
                         tool_choice="auto",
-                        preferred_provider=preferred_provider,
+                        preferred_provider=active_provider,
                         on_delta=on_token,
                     )
                 else:
@@ -1836,8 +2103,8 @@ async def orchestrate_agent(
             current_thinking = reasoning_content if reasoning_content else (content if content else "")
             
             # === NEW: Use batch limit for specific models ===
-            if _should_use_batch_limit(orchestrator_model):
-                logger.info(f"Agent Mode: applying batch file limit for {cfg.get_model_display_name(orchestrator_model)}")
+            if _should_use_batch_limit(active_model):
+                logger.info(f"Agent Mode: applying batch file limit for {cfg.get_model_display_name(active_model)}")
                 
                 batch_tool_calls, assistant_tool_calls, tool_results = await _process_file_tools_with_batch_limit(
                     tool_calls=tool_calls,
@@ -1948,7 +2215,7 @@ async def orchestrate_agent(
                 updated_prompts = format_orchestrator_prompt_new_project_agent(
                     user_query=user_query,
                     remaining_web_searches=tool_usage.get_remaining_web_searches(),
-                    orchestrator_model_id=orchestrator_model,
+                    orchestrator_model_id=active_model,
                     conversation_summary=conversation_summary,
                 )
             else:
@@ -1958,7 +2225,7 @@ async def orchestrate_agent(
                     compact_index=compact_index,
                     project_map=project_map,
                     remaining_web_searches=tool_usage.get_remaining_web_searches(),
-                    orchestrator_model_id=orchestrator_model,
+                    orchestrator_model_id=active_model,
                     conversation_summary=conversation_summary,
                     prefilter_advice=prefilter_advice,
                 )
@@ -1970,18 +2237,62 @@ async def orchestrate_agent(
             continue
         except Exception as e:
             logger.error(f"Agent Mode error: {e}")
+            try:
+                from app.services.emergency_recovery import (
+                    get_emergency_manager,
+                    get_inflight_model_swap,
+                )
+                resolution = await get_emergency_manager().handle_exception(
+                    e,
+                    messages=messages,
+                    agent_role="orchestrator",
+                )
+                if resolution is not None and getattr(resolution, "action", "") == "continue":
+                    _agent_swap = get_inflight_model_swap(resolution)
+                    if _agent_swap is not None:
+                        active_model = _agent_swap["model"] or active_model
+                        active_provider = _agent_swap["provider"]
+                        try:
+                            compressor = get_compressor(active_model)
+                        except Exception as _comp_err:
+                            logger.debug(f"Agent Mode compressor refresh failed: {_comp_err}")
+                        try:
+                            if is_new_project:
+                                _agent_refresh = format_orchestrator_prompt_new_project_agent(
+                                    user_query=user_query,
+                                    remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                                    orchestrator_model_id=active_model,
+                                    conversation_summary=conversation_summary,
+                                )
+                            else:
+                                _agent_refresh = format_orchestrator_prompt_ask_agent(
+                                    user_query=user_query,
+                                    selected_chunks="",
+                                    compact_index=compact_index,
+                                    project_map=project_map,
+                                    remaining_web_searches=tool_usage.get_remaining_web_searches(),
+                                    orchestrator_model_id=active_model,
+                                    conversation_summary=conversation_summary,
+                                    prefilter_advice=prefilter_advice,
+                                )
+                            messages[0]["content"] = _agent_refresh["system"]
+                        except Exception as _agent_refresh_err:
+                            logger.debug(f"Agent Mode prompt refresh failed: {_agent_refresh_err}")
+                        logger.info(
+                            f"Agent Mode: in-flight model swap → "
+                            f"model={active_model}, provider={active_provider}"
+                        )
+                    continue
+            except Exception as emergency_err:
+                logger.warning(f"orchestrator emergency hook failed: {emergency_err}")
             return OrchestratorResult(
                 analysis=f"Error during analysis: {e}",
                 instruction="Unable to generate instruction due to error.",
                 tool_calls=all_tool_calls,
                 raw_response="",
                 tool_usage=tool_usage,
-            )    
+            )
 
-    else:
-        # while loop completed without break (hit iteration limit)
-        logger.warning(f"Agent Mode: reached max iterations ({AGENT_MAX_ITERATIONS})")
-    
     # === Forced finalization if no instruction ===
     if not _has_instruction_section(content):
         logger.warning("Agent Mode: No instruction section, requesting final response")
@@ -2005,11 +2316,11 @@ async def orchestrate_agent(
             messages, _ = await compressor.check_and_compress(messages)
             
             final_content = await call_llm(
-                model=orchestrator_model,
+                model=active_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=55000,
-                preferred_provider=preferred_provider,
+                preferred_provider=active_provider,
                 on_delta=on_token,
             )
             content = final_content
@@ -2018,11 +2329,11 @@ async def orchestrate_agent(
             if is_context_overflow_error(e):
                 messages, _ = await compressor.emergency_compress(messages)
                 final_content = await call_llm(
-                    model=orchestrator_model,
+                    model=active_model,
                     messages=messages,
                     temperature=0,
                     max_tokens=55000,
-                    preferred_provider=preferred_provider,
+                    preferred_provider=active_provider,
                     on_delta=on_token,
                 )
                 content = final_content

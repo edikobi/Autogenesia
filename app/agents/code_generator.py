@@ -22,7 +22,7 @@ import logging
 import re
 from app.services.file_modifier import ParsedCodeBlock
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 
 from config.settings import cfg
 from app.llm.api_client import call_llm, get_model_for_role, ServerOverloadError
@@ -679,6 +679,18 @@ async def generate_code(
             return CodeGeneratorResult(success=False, error=f"Server overload: {e}", model_used=model)
         except Exception as e:
             logger.error(f"Code Generator (ASK) error: {e}")
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                resolution = await get_emergency_manager().handle_exception(
+                    e,
+                    messages=messages,
+                    agent_role="generator",
+                    instruction=instruction,
+                )
+                if resolution is not None and getattr(resolution, "action", "") == "continue":
+                    continue
+            except Exception as emergency_err:
+                logger.warning(f"generator emergency hook failed: {emergency_err}")
             return CodeGeneratorResult(
                 success=False,
                 error=str(e),
@@ -861,6 +873,31 @@ async def generate_code_agent_mode(
     
     # All attempts exhausted or non-retryable error
     logger.error(f"Code Generator (Agent Mode) failed after {CODE_GENERATOR_MAX_RETRIES} attempts: {last_error}")
+    if last_error is not None:
+        try:
+            from app.services.emergency_recovery import get_emergency_manager
+            resolution = await get_emergency_manager().handle_exception(
+                last_error,
+                messages=messages,
+                agent_role="generator",
+                instruction=instruction,
+            )
+            if resolution is not None and getattr(resolution, "action", "") == "continue":
+                try:
+                    response = await call_llm(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        preferred_provider=preferred_provider,
+                        on_delta=on_token,
+                    )
+                    blocks = parse_agent_code_blocks(response)
+                    return blocks, response
+                except Exception as retry_err:
+                    logger.warning(f"generator emergency retry failed: {retry_err}")
+        except Exception as emergency_err:
+            logger.warning(f"generator emergency hook failed: {emergency_err}")
     return [], ""
 # ============================================================================
 # PARSING FUNCTIONS
@@ -1572,15 +1609,83 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
         insert_after_target = _extract_field(block_content, "INSERT_AFTER_TARGET")
         insert_before_target = _extract_field(block_content, "INSERT_BEFORE_TARGET")
         replace_pattern = _extract_field(block_content, "REPLACE_PATTERN")
+
+        # ANCHOR_PATTERN: маппинг в существующие поля якоря по режиму
+        # (без нового поля в ParsedCodeBlock).
+        _anchor_pattern = _extract_field(block_content, "ANCHOR_PATTERN")
+        if _anchor_pattern:
+            _mode_u = (mode or "").upper()
+            if insert_after is None and _mode_u in (
+                "INSERT_AFTER", "INSERT_CLASS", "ADD_METHOD", "INSERT_FILE",
+                "ADD_FUNCTION", "INSERT_IMPORT", "INSERT_IN_CLASS",
+                "INSERT_IN_FUNCTION", "PATCH_METHOD", "ADD_NEW_FUNCTION",
+                "ADD_ATTRIBUTE", "INSERT_INTO_METHOD", "ADD_LINES",
+                "INSERT_INTO_CLASS",
+            ):
+                insert_after = _anchor_pattern
+            elif insert_before is None and _mode_u in (
+                "INSERT_BEFORE", "INSERT_BEFORE_TARGET",
+            ):
+                insert_before = _anchor_pattern
+            elif replace_pattern is None:
+                replace_pattern = _anchor_pattern
         
         # ⭐ Извлекаем опциональный номер строки (1-indexed) или диапазон "начало-конец"
         replace_pattern_line_str = _extract_field(block_content, "REPLACE_PATTERN_LINE")
+        # Conflict guard: both INSERT_AFTER_LINE and INSERT_BEFORE_LINE present -> ignore hint
+        _ia_line = _extract_field(block_content, "INSERT_AFTER_LINE")
+        _ib_line = _extract_field(block_content, "INSERT_BEFORE_LINE")
+        _hint_conflict = bool(_ia_line) and bool(_ib_line)
+        if _hint_conflict:
+            logger.warning(
+                f"CODE_BLOCK for {file_path} has both INSERT_AFTER_LINE and INSERT_BEFORE_LINE — ignoring line hint"
+            )
+        # Алиасы: если REPLACE_PATTERN_LINE отсутствует — берём первое непустое из альтернатив
+        if not replace_pattern_line_str and not _hint_conflict:
+            for _alias in ("INSERT_AFTER_LINE", "INSERT_BEFORE_LINE", "ANCHOR_LINE"):
+                _val = _extract_field(block_content, _alias)
+                if _val:
+                    replace_pattern_line_str = _val
+                    break
+        # Отдельно извлекаем конец диапазона
+        replace_pattern_line_end_str = None
+        for _end_alias in (
+            "REPLACE_PATTERN_LINE_END",
+            "INSERT_AFTER_LINE_END",
+            "INSERT_BEFORE_LINE_END",
+            "ANCHOR_LINE_END",
+        ):
+            _end_val = _extract_field(block_content, _end_alias)
+            if _end_val:
+                replace_pattern_line_end_str = _end_val
+                break
         replace_pattern_line = None
         replace_pattern_line_end = None
+        # Сначала парсим отдельный end-хинт (если был)
+        if replace_pattern_line_end_str:
+            _end_parsed = _parse_line_hint(replace_pattern_line_end_str, file_path)
+            replace_pattern_line_end = _end_parsed[0] if _end_parsed else None
+        # Затем — основной хинт (может содержать встроенный диапазон "42-45")
         if replace_pattern_line_str:
-            replace_pattern_line, replace_pattern_line_end = _parse_line_hint(replace_pattern_line_str, file_path)        
+            _start_parsed, _inline_end = _parse_line_hint(replace_pattern_line_str, file_path)
+            replace_pattern_line = _start_parsed
+            if _inline_end is not None:
+                replace_pattern_line_end = _inline_end
+        # Sanity-проверка: если конец < начало — меняем местами
+        if replace_pattern_line is not None and replace_pattern_line_end is not None:
+            if replace_pattern_line_end < replace_pattern_line:
+                replace_pattern_line, replace_pattern_line_end = (
+                    replace_pattern_line_end,
+                    replace_pattern_line,
+                )
         
         
+        # Диагностический лог: НИКОГДА не логируем полный паттерн.
+        logger.debug(
+            f"CODE_BLOCK parsed: file_path={file_path!r}, mode={mode!r}, "
+            f"line_hint=({replace_pattern_line}, {replace_pattern_line_end}), "
+            f"real_newline_pattern={bool(replace_pattern and chr(10) in replace_pattern)}"
+        )
         # Извлекаем код из code fence
         code, language = _extract_code_from_block(block_content)        
         
@@ -1625,35 +1730,39 @@ def parse_agent_code_blocks(response: str) -> List[ParsedCodeBlock]:
 
 def _extract_field(content: str, field_name: str) -> Optional[str]:
     """
-    Извлекает значение поля из CODE_BLOCK.
-    
-    Поддерживает форматы:
-    - FIELD: value
-    - FIELD:value
-    - **FIELD:** value (markdown bold)
-    
-    Для REPLACE_PATTERN, INSERT_AFTER, INSERT_BEFORE дополнительно
-    поддерживает многострочные значения: захват продолжается до
-    следующего поля или начала code fence.
+    Extract a metadata field value from a CODE_BLOCK payload.
+
+    Contract unchanged: signature, ``_MULTILINE_FIELDS``, ``_KNOWN_FIELDS``,
+    the multiline regex (``re.MULTILINE | re.IGNORECASE | re.DOTALL``), the
+    three single-line fallback patterns and the final ``return None`` are
+    preserved. Value processing is escape-aware:
+
+    - ``_strip_wrapping_backticks`` removes only one genuinely enclosing
+      backtick pair, preserving quotes/backslashes/inner backticks;
+    - ``_decode_escaped_newlines`` preserves physical newlines as line
+      separators, keeps ``\\n``, ``\\\\n``, ``\\\\\\\\n`` and ``\\r\\n`` inside
+      string literals as literal characters, and only converts an active,
+      unescaped legacy ``\\n`` marker located outside any string literal.
+      Correct AI input (escaped ``\\n`` inside a literal) passes through
+      unchanged.
+
+    Both helpers are defined later in this same module and resolve at call
+    time; they never raise.
     """
-    # Поля, которые могут быть многострочными
-    _MULTILINE_FIELDS = {'REPLACE_PATTERN', 'INSERT_AFTER', 'INSERT_BEFORE'}
-    
-    # === Многострочный захват для указанных полей ===
+    _MULTILINE_FIELDS = {'REPLACE_PATTERN', 'INSERT_AFTER', 'INSERT_BEFORE', 'ANCHOR_PATTERN'}
+
     if field_name.upper() in _MULTILINE_FIELDS:
-        # Поля, которые могут следовать после данного в CODE_BLOCK
         _KNOWN_FIELDS = (
             'FILE', 'MODE', 'TARGET_CLASS', 'TARGET_METHOD', 'TARGET_FUNCTION',
             'TARGET_ATTRIBUTE', 'INSERT_AFTER', 'INSERT_BEFORE',
             'INSERT_AFTER_TARGET', 'INSERT_BEFORE_TARGET',
             'REPLACE_PATTERN', 'REPLACE_PATTERN_LINE',
+            'REPLACE_PATTERN_LINE_END',
+            'INSERT_AFTER_LINE', 'INSERT_AFTER_LINE_END',
+            'INSERT_BEFORE_LINE', 'INSERT_BEFORE_LINE_END',
+            'ANCHOR_LINE', 'ANCHOR_LINE_END',
         )
         _fields_alt = '|'.join(re.escape(f) for f in _KNOWN_FIELDS)
-        # Захватываем всё после "FIELD:" до:
-        # - строки, начинающейся с известного поля и ":"
-        # - строки, начинающейся с ``` (code fence)
-        # - маркера ### END_CODE_BLOCK
-        # - конца блока
         _escaped_field = re.escape(field_name)
         _ml_pattern = (
             rf'^{_escaped_field}:\s*'
@@ -1665,35 +1774,29 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
         )
         if _ml_match:
             _ml_value = _ml_match.group(1).strip()
-            _ml_value = _ml_value.strip('`')
-            # Декодируем литеральный \n (совместимость с однострочным форматом)
-            if '\\n' in _ml_value:
-                _ml_value = _ml_value.replace('\\n', '\n')
+            _ml_value = _strip_wrapping_backticks(_ml_value)
+            _ml_value = _decode_escaped_newlines(_ml_value)
             if _ml_value:
                 return _ml_value
-        # Если многострочный захват не дал результата,
-        # переходим к однострочным паттернам ниже (fallback)
-    
-    # === Общий случай: однострочный захват ===
+
     patterns = [
         rf'^{field_name}:\s*(.+?)$',
         rf'^\*\*{field_name}:\*\*\s*(.+?)$',
         rf'^{field_name}\s*:\s*(.+?)$',
     ]
-    
+
     for pattern in patterns:
         match = re.search(pattern, content, re.MULTILINE | re.IGNORECASE)
         if match:
             value = match.group(1).strip()
-            value = value.strip('`')
-            
-            # Декодируем литеральный \n для многострочных полей
-            if field_name.upper() in _MULTILINE_FIELDS and '\\n' in value:
-                value = value.replace('\\n', '\n')
-            
+            value = _strip_wrapping_backticks(value)
+            if field_name.upper() in _MULTILINE_FIELDS:
+                value = _decode_escaped_newlines(value)
             return value
-    
+
     return None
+
+
 
 def _extract_code_from_block(content: str) -> Tuple[Optional[str], str]:
     """
@@ -1773,6 +1876,120 @@ def _parse_line_hint(raw: str, file_path: str = "") -> tuple:
             f"Invalid REPLACE_PATTERN_LINE value: '{raw}' in CODE_BLOCK for {file_path}"
         )
         return (None, None)
+
+
+
+def _decode_escaped_newlines(value: str) -> str:
+    """
+    Escape-aware decoder of legacy literal ``\\n`` markers into real newlines.
+
+    Physical line separators (``\\n`` / ``\\r\\n``) always remain real line
+    separators. Backslash-n escape text is converted to a physical newline
+    ONLY when it is an active, unescaped legacy marker located outside any
+    Python string literal and not protected by an odd number of consecutive
+    preceding backslashes. Sequences inside single/double/triple-quoted
+    string literals (including ``\\n``, ``\\\\n``, ``\\\\\\\\n`` and ``\\r\\n``
+    written as escape text) are preserved verbatim as literal characters.
+
+    The helper never raises and returns the input unchanged when no active
+    legacy marker exists. It never performs an unconditional
+    ``str.replace('\\n', '\\n')``.
+    """
+    if not value:
+        return value
+    out: List[str] = []
+    i = 0
+    n = len(value)
+    in_string = False
+    string_char: Optional[str] = None
+    is_triple = False
+    while i < n:
+        ch = value[i]
+        if not in_string:
+            if ch in ('"', "'"):
+                if value[i:i + 3] in ('"""', "'''"):
+                    in_string = True
+                    string_char = ch
+                    is_triple = True
+                    out.append(value[i:i + 3])
+                    i += 3
+                    continue
+                in_string = True
+                string_char = ch
+                is_triple = False
+                out.append(ch)
+                i += 1
+                continue
+            if ch == '\\':
+                run = 0
+                while i + run < n and value[i + run] == '\\':
+                    run += 1
+                followed_by_n = (i + run < n and value[i + run] == 'n')
+                is_crlf_escape = (i >= 2 and value[i - 2:i] == '\\r')
+                if (
+                    followed_by_n
+                    and not is_crlf_escape
+                    and (run - 1) % 2 == 0
+                ):
+                    # Active legacy marker: keep the pairing backslashes and
+                    # convert only the final backslash-n into a real newline.
+                    if run > 1:
+                        out.append('\\' * (run - 1))
+                    out.append('\n')
+                    i += run + 1
+                    continue
+                # Protected (odd preceding parity), part of a \r\n escape
+                # pair, or not an \n marker at all — preserve verbatim.
+                out.append(value[i:i + run])
+                i += run
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        # Inside a string literal: escape-aware pass-through, never convert.
+        if ch == '\\' and i + 1 < n:
+            out.append(value[i:i + 2])
+            i += 2
+            continue
+        if is_triple:
+            if value[i:i + 3] == string_char * 3:
+                in_string = False
+                string_char = None
+                is_triple = False
+                out.append(value[i:i + 3])
+                i += 3
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        if ch == string_char:
+            in_string = False
+            string_char = None
+            is_triple = False
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+def _strip_wrapping_backticks(value: str) -> str:
+    """
+    Remove only a single pair of genuinely enclosing Markdown backticks.
+
+    Surrounding whitespace is tolerated around the pair; all quotes,
+    backslashes, pattern characters and any inner backticks are preserved
+    byte-for-byte. Unlike ``str.strip('`')`` this never eats leading or
+    trailing content characters beyond the one enclosing pair.
+    """
+    if not value:
+        return value
+    stripped = value.strip()
+    if (
+        len(stripped) >= 2
+        and stripped.startswith('`')
+        and stripped.endswith('`')
+    ):
+        return stripped[1:-1]
+    return stripped
 
 
 def format_code_blocks_summary(blocks: List[ParsedCodeBlock]) -> str:

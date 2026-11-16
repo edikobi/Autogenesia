@@ -12,6 +12,10 @@ from typing import Dict, Any, Optional, Callable
 from pathlib import Path
 from app.advice.advice_loader import execute_get_advice
 from app.tools.read_line_context import read_line_context_tool
+from app.tools.file_version_diff import file_version_diff_tool
+from app.tools.ask_user import ask_user_tool
+from app.tools.environment_info import collect_environment_info, format_environment_xml
+from app.tools.threat_scan import threat_scan_tool
 
 from app.tools.read_file import read_file_tool
 from app.tools.list_files import list_files_tool
@@ -54,17 +58,22 @@ class ToolExecutor:
         project_dir: str,
         index: Optional[Dict[str, Any]] = None,
         virtual_fs: Optional[Any] = None,  # NEW: VirtualFileSystem instance
+        role: Optional[str] = "orchestrator",
     ):
         """
         Initialize tool executor.
-        
+
         Args:
             project_dir: Path to project root (for file operations)
             index: Project semantic index (for code search)
+            virtual_fs: Optional VirtualFileSystem instance
+            role: Optional role identifier used to scope MCP tool access
+                  ("orchestrator", "tester", "pre_filter", or None).
         """
         self.project_dir = project_dir
         self.index = index or {}
         self.virtual_fs = virtual_fs  # NEW
+        self.role = role
         self._custom_tools: Dict[str, Callable] = {}
     
     
@@ -82,6 +91,11 @@ class ToolExecutor:
             Tool output as string (usually XML-formatted)
         """
         logger.info(f"Executing tool: {tool_name} with args: {list(arguments.keys())}")
+
+        # MCP tools are routed to the isolated MCP subsystem (prefix mcp__)
+        if tool_name.startswith("mcp__"):
+            from app.mcp.definitions import dispatch_mcp_tool
+            return dispatch_mcp_tool(tool_name, arguments, role=self.role)
         
         try:
             # Check custom tools first
@@ -123,6 +137,18 @@ class ToolExecutor:
                 return self._execute_show_file_relations(arguments)
             elif tool_name == "read_line_context":
                 return self._execute_read_line_context(arguments)
+            elif tool_name == "get_file_version_diff":
+                return self._execute_get_file_version_diff(arguments)
+            elif tool_name == "ask_user":
+                return ask_user_tool(
+                    question=arguments.get("question", ""),
+                    options=arguments.get("options"),
+                    context=arguments.get("context"),
+                )
+            elif tool_name == "check_environment":
+                return self._execute_check_environment(arguments)
+            elif tool_name == "scan_file_threats":
+                return self._execute_scan_file_threats(arguments)
             else:
                 return self._format_error(f"Unknown tool: {tool_name}")
                 
@@ -408,6 +434,56 @@ class ToolExecutor:
     def _execute_extract_media(self, arguments: Dict[str, Any]) -> str:
         return extract_media_tool(**arguments)
 
+    def _execute_check_environment(self, arguments: Dict[str, Any]) -> str:
+        """Execute check_environment tool: shared read-only environment report."""
+        try:
+            project_python = None
+            if self.virtual_fs is not None:
+                try:
+                    getter = getattr(self.virtual_fs, "get_project_python", None)
+                    if callable(getter):
+                        project_python = getter()
+                except Exception:
+                    project_python = None
+            info = collect_environment_info(
+                project_dir=self.project_dir,
+                project_python_path=project_python,
+            )
+            return format_environment_xml(info)
+        except Exception as e:
+            logger.error(f"check_environment failed: {e}")
+            return self._format_error(f"check_environment failed: {e}")
+
+    def _execute_scan_file_threats(self, arguments: Dict[str, Any]) -> str:
+        """Execute scan_file_threats tool via the local offline scanner."""
+        try:
+            file_path = arguments.get("file_path")
+            if not file_path:
+                return self._format_error("file_path is required")
+
+            python_path = None
+            if self.virtual_fs is not None:
+                try:
+                    getter = getattr(self.virtual_fs, "get_project_python", None)
+                    if callable(getter):
+                        python_path = getter()
+                except Exception:
+                    python_path = None
+
+            return threat_scan_tool(
+                file_path=file_path,
+                project_dir=self.project_dir,
+                virtual_fs=self.virtual_fs,
+                python_path=python_path,
+                role=(self.role or "orchestrator"),
+                severity=arguments.get("severity", "ERROR"),
+                max_findings=arguments.get("max_findings", 20),
+                include_context=arguments.get("include_context", False),
+            )
+        except Exception as e:
+            logger.error(f"scan_file_threats failed: {e}")
+            return self._format_error(f"scan_file_threats failed: {e}")
+
     def _execute_read_line_context(self, arguments: Dict[str, Any]) -> str:
         """
         Execute read_line_context tool.
@@ -422,6 +498,44 @@ class ToolExecutor:
             direction=arguments.get("direction", "after"),
             project_dir=self.project_dir,
             virtual_fs=self.virtual_fs
+        )
+
+    def _execute_get_file_version_diff(self, arguments: Dict[str, Any]) -> str:
+        """
+        Execute get_file_version_diff tool.
+
+        Returns a read-only unified diff (previous_vs_latest / disk_vs_latest / history)
+        for a file staged in the current VFS session. Delegates the actual work
+        to file_version_diff_tool after normalising and validating the path.
+        """
+        from pathlib import PurePosixPath
+
+        file_path = arguments.get("file_path", "")
+        mode = arguments.get("mode", "previous_vs_latest")
+
+        if not file_path:
+            return self._format_error("file_path is required")
+
+        normalized = str(file_path).replace("\\", "/")
+
+        if (
+            PurePosixPath(normalized).is_absolute()
+            or normalized.startswith("/")
+            or (len(normalized) >= 2 and normalized[1] == ":")
+        ):
+            return self._format_error(f"Absolute paths are not allowed: {file_path}")
+
+        if ".." in PurePosixPath(normalized).parts:
+            return self._format_error(f"Path traversal is not allowed: {file_path}")
+
+        if self.virtual_fs is None:
+            return self._format_error("VirtualFileSystem is not available in this session")
+
+        return file_version_diff_tool(
+            file_path=normalized,
+            mode=mode,
+            project_dir=self.project_dir,
+            virtual_fs=self.virtual_fs,
         )
 
 
@@ -446,6 +560,16 @@ class ToolExecutor:
     def update_virtual_fs(self, virtual_fs: Any) -> None:
         """Update the VirtualFileSystem instance"""
         self.virtual_fs = virtual_fs
+
+    def update_mcp(self) -> None:
+        """No-op symmetric with ``update_virtual_fs``.
+
+        The MCP subsystem is self-contained: a singleton manager owns its
+        own background thread and MCP tools are routed through the
+        ``mcp__`` prefix inside :meth:`execute`. No executor state needs to
+        be refreshed, so this method intentionally does nothing.
+        """
+        pass
     
     def _format_error(self, message: str) -> str:
         """Format error message"""

@@ -441,3 +441,39 @@ def check_translation_available() -> bool:
     except ImportError as e:
         logger.warning(f"Translation imports failed: {e}")
         return False
+
+
+async def translate_with_timeout(
+    text: str,
+    context: str = "AI agent reasoning",
+    timeout: float = 10.0
+) -> str:
+    """
+    Переводит текст на русский язык с ограничением по времени (таймаутом).
+
+    Обёртка над translate_to_russian: если перевод не укладывается в `timeout`
+    секунд или завершается любой ошибкой — возвращается исходный текст.
+    Повторные попытки (retry) НЕ выполняются. Быстрые проверки
+    (is_mostly_russian, _contains_only_code, короткий текст) не дублируются —
+    они уже выполняются внутри translate_to_russian.
+
+    Args:
+        text: Текст для перевода
+        context: Контекст для модели (что именно переводим)
+        timeout: Максимальное время ожидания перевода в секундах
+
+    Returns:
+        Переведённый текст или оригинал. Всегда str,
+        никогда не пробрасывает исключения наружу.
+    """
+    try:
+        return await asyncio.wait_for(
+            translate_to_russian(text, context),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"Translation timed out after {timeout}s, returning original text")
+        return text
+    except Exception as e:
+        logger.warning(f"Translation failed ({type(e).__name__}: {e}), returning original text")
+        return text

@@ -8,8 +8,62 @@ Each tool has:
 - description: What the tool does (for LLM to understand)
 - parameters: JSON Schema of accepted parameters
 """
-from pathlib import Path
+# from pathlib import Path  # (removed: unused import, F401)
 from typing import List, Dict, Any
+
+
+# ============================================================================
+# ASK_USER TOOL (clarification channel — genuine blockers only)
+# ============================================================================
+
+ASK_USER_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "ask_user",
+        "description": (
+            "Ask the user a clarifying question and receive their answer as the "
+            "tool result. The session is never terminated — the answer is appended "
+            "as a normal tool message and execution continues.\n\n"
+            "USE THIS TOOL AGGRESSIVELY WHEN THE ANSWER CHANGES THE ENTIRE EXECUTION:\n"
+            "• The core goal, desired behaviour, or architectural direction is unclear.\n"
+            "• Instructions from the user contradict each other or the project state.\n"
+            "• The request fundamentally mismatches the actual project state and no "
+            "safe implementation is possible without a user decision.\n\n"
+            "You may offer UP TO 5 selectable options, but the user can ALWAYS answer "
+            "with free-form text — never force the user into pre-canned answers.\n\n"
+            "STEER AWAY from trivial questions and from facts you can discover yourself "
+            "via read_file / grep_search / search_code / read_code_chunk. Those tools "
+            "MUST be exhausted first. ask_user is for genuine blockers that no code "
+            "inspection can resolve — treat it as the last resort before guessing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The clarifying question to ask the user.",
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 5,
+                    "description": (
+                        "Optional list (up to 5) of suggested answers. The user "
+                        "can still reply in free form."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "Optional short context explaining WHY clarification is "
+                        "needed (what you already inspected, what is unknown)."
+                    ),
+                },
+            },
+            "required": ["question"],
+        },
+    },
+}
 
 
 # ============================================================================
@@ -770,6 +824,131 @@ LIST_FILES_TOOL: Dict[str, Any] = {
 
 
 # ============================================================================
+# FILE VERSION DIFF TOOL (intra-session version control)
+# ============================================================================
+
+FILE_VERSION_DIFF_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_file_version_diff",
+        "description": (
+            "STRICTLY READ-ONLY: this tool writes NOTHING to the disk and NOTHING to the VFS. "
+            "It shows the exact added and removed lines between versions of a file that were "
+            "staged in the current session's VFS, rendered as a unified diff with '-' (removed) "
+            "and '+' (added) line markers. "
+            "It accounts for the original on-disk file snapshot AND every staged state, including "
+            "auto-formatting, AI-repair, language-adapter rewrites and rollback. "
+            "Mode semantics: 'previous_vs_latest' (default) — the effect of the most recent "
+            "staging operation on this file, including any lines that operation deleted; use this "
+            "to analyse the last change. 'disk_vs_latest' — the cumulative difference between the "
+            "current on-disk content and the latest staged version. 'history' — the complete "
+            "evolution of the file with metadata for every recorded version and sequential diffs "
+            "from one version to the next. "
+            "STRONGLY RECOMMENDED to call after ANY code deletion, whenever you suspect functionality "
+            "may have been accidentally lost, and BEFORE rewriting a file — this surfaces disappeared "
+            "lines so they can be restored precisely. "
+            "This tool does NOT replace read_file: it answers 'what changed', not 'how the file looks now'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": (
+                        "Relative path to the file whose versions should be compared "
+                        "(e.g. 'app/services/auth.py'). Absolute paths and '..' traversal are rejected."
+                    )
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["previous_vs_latest", "disk_vs_latest", "history"],
+                    "description": (
+                        "Diff mode. 'previous_vs_latest' — the effect of the last staging "
+                        "operation on this file (including deleted lines); default for analysing "
+                        "the last change. 'disk_vs_latest' — the cumulative difference between the "
+                        "current on-disk content and the latest staged version. 'history' — the "
+                        "full evolution of the file with metadata for every version and sequential "
+                        "diffs between them."
+                    ),
+                    "default": "previous_vs_latest"
+                }
+            },
+            "required": ["file_path"]
+        }
+    }
+}
+
+
+SCAN_FILE_THREATS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "scan_file_threats",
+        "description": (
+            "Static, local, OFFLINE, high-signal suspicious/malicious-code pattern scan "
+            "(Semgrep CE). NOT an antivirus, NOT a sandbox, and NOT a verdict. It never "
+            "executes the scanned file and does not prove the absence of malware. "
+            "Scannable inputs: text sources (.py .js .jsx .ts .tsx .go .java .c .cpp .cs "
+            ".rb .php .sh .bash .ps1 .yml .yaml .json .toml .xml .html .sql), configs, "
+            "manifests, Dockerfile, CI workflows. Unscannable/limited inputs: binaries "
+            "(.exe/.dll/.so/.dylib), .zip, .pdf, .docx, .xlsx, images, archives, "
+            "encrypted/minified/huge files, files outside project_dir, absolute paths, "
+            "'..', symlink escapes. VFS-staged files are scanned via a temporary "
+            "materialized copy without writing to the project. INFO/WARNING severities "
+            "are only returned when explicitly requested. "
+            "FINDINGS ARE SUSPICIOUS PATTERNS, NOT A VERDICT. Explain the evidence and "
+            "recommend manual review; do not claim the file is definitely infected."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file relative to the project root.",
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["ERROR", "WARNING", "INFO"],
+                    "description": "Minimum severity floor. Default: ERROR.",
+                    "default": "ERROR",
+                },
+                "max_findings": {
+                    "type": "integer",
+                    "description": "Maximum number of findings to return. Default: 20.",
+                    "default": 20,
+                },
+                "include_context": {
+                    "type": "boolean",
+                    "description": "Include extra evidence context in findings. Default: false.",
+                    "default": False,
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
+}
+
+
+CHECK_ENVIRONMENT_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "check_environment",
+        "description": (
+            "Use to see the user's OS, local date/time, timezone and installed "
+            "versions of 10 popular runtimes/compilers before choosing commands, "
+            "tests or dependencies. Read-only; never executes project code. "
+            "Reports versions of Python, Node.js/JavaScript, TypeScript, Java, Go, "
+            "Rust, C, C++, C#/.NET and PHP, plus CPU/RAM/disk resources."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
+
+# ============================================================================
 # COMBINED TOOLS LIST
 # ============================================================================
 
@@ -791,6 +970,10 @@ ORCHESTRATOR_TOOLS: List[Dict[str, Any]] = [
     CHECK_SECURITY_TOOL,
     EXTRACT_MEDIA_TOOL,
     READ_LINE_CONTEXT_TOOL,
+    FILE_VERSION_DIFF_TOOL,
+    ASK_USER_TOOL,
+    CHECK_ENVIRONMENT_TOOL,
+    SCAN_FILE_THREATS_TOOL,
 ]
 
 
@@ -813,15 +996,21 @@ def get_tool_by_name(name: str) -> Dict[str, Any]:
         "list_installed_packages": LIST_INSTALLED_PACKAGES_TOOL,
         "install_dependency": INSTALL_DEPENDENCY_TOOL,
         "search_pypi": SEARCH_PYPI_TOOL,
-        "fetch_webpage": FETCH_WEBPAGE_TOOL,        # <-- добавить
-        "analyze_webpage": ANALYZE_WEBPAGE_TOOL,    # <-- добавить
-        "check_security": CHECK_SECURITY_TOOL,      # <-- добавить
-"extract_media": EXTRACT_MEDIA_TOOL,
+        "fetch_webpage": FETCH_WEBPAGE_TOOL,
+        "analyze_webpage": ANALYZE_WEBPAGE_TOOL,
+        "check_security": CHECK_SECURITY_TOOL,
+        "extract_media": EXTRACT_MEDIA_TOOL,
         "read_line_context": READ_LINE_CONTEXT_TOOL,
+        "get_file_version_diff": FILE_VERSION_DIFF_TOOL,
+            "ask_user": ASK_USER_TOOL,
+        "check_environment": CHECK_ENVIRONMENT_TOOL,
+        "scan_file_threats": SCAN_FILE_THREATS_TOOL,
     }
     if name not in tools_map:
         raise ValueError(f"Unknown tool: {name}")
     return tools_map[name]
+
+
 
 
 
@@ -832,7 +1021,7 @@ def get_tool_names() -> List[str]:
         "read_code_chunk",
         "read_file",
         "search_code",
-        "grep_search",  # ДОБАВЛЕНО
+        "grep_search",
         "show_file_relations",
         "web_search",
         "general_web_search",
@@ -840,20 +1029,106 @@ def get_tool_names() -> List[str]:
         "list_installed_packages",
         "install_dependency",
         "search_pypi",
-        "fetch_webpage",        # <-- добавить
-        "analyze_webpage",       # <-- добавить
-        "check_security",        # <-- добавить
-"extract_media",
+        "fetch_webpage",
+        "analyze_webpage",
+        "check_security",
+        "extract_media",
         "read_line_context",
+        "get_file_version_diff",
+            "ask_user",
+        "check_environment",
+        "scan_file_threats",
     ]
 
-# Re-export Tester tools for unified access
-from app.tools.tester_tool_definitions import (  # noqa: E402, F401
-    RUFF_TOOL,
-    CHECK_ENVIRONMENT_TOOL,
-    COMPILE_CODE_TOOL,
-    RUN_CODE_TOOL,
-    GIT_DIFF_VFS_DISK_TOOL,
-    WRITE_TEST_FILE_TOOL,
-    TESTER_TOOLS,
+
+
+# Re-export Tester tools for unified access via PEP 562 lazy resolution.
+# A lazy __getattr__ breaks the circular import with tester_tool_definitions.py
+# which imports from this module at top level.
+_TESTER_REEXPORT_NAMES = (
+    "RUFF_TOOL",
+    "COMPILE_CODE_TOOL",
+    "RUN_CODE_TOOL",
+    "GIT_DIFF_VFS_DISK_TOOL",
+    "WRITE_TEST_FILE_TOOL",
+    "TESTER_TOOLS",
 )
+
+
+def __getattr__(name: str):
+    """Lazily resolve legacy Tester tool re-exports (PEP 562)."""
+    if name in _TESTER_REEXPORT_NAMES:
+        from app.tools import tester_tool_definitions as _ttd
+
+        return getattr(_ttd, name)
+    raise AttributeError(name)
+
+
+
+# SCAN_FILE_THREATS_TOOL: Dict[str, Any] = {
+#     "type": "function",
+#     "function": {
+#         "name": "scan_file_threats",
+#         "description": (
+#             "Static, local, OFFLINE, high-signal suspicious/malicious-code pattern scan "
+#             "(Semgrep CE). NOT an antivirus, NOT a sandbox, and NOT a verdict. It never "
+#             "executes the scanned file and does not prove the absence of malware. "
+#             "Scannable inputs: text sources (.py .js .jsx .ts .tsx .go .java .c .cpp .cs "
+#             ".rb .php .sh .bash .ps1 .yml .yaml .json .toml .xml .html .sql), configs, "
+#             "manifests, Dockerfile, CI workflows. Unscannable/limited inputs: binaries "
+#             "(.exe/.dll/.so/.dylib), .zip, .pdf, .docx, .xlsx, images, archives, "
+#             "encrypted/minified/huge files, files outside project_dir, absolute paths, "
+#             "'..', symlink escapes. VFS-staged files are scanned via a temporary "
+#             "materialized copy without writing to the project. INFO/WARNING severities "
+#             "are only returned when explicitly requested. "
+#             "FINDINGS ARE SUSPICIOUS PATTERNS, NOT A VERDICT. Explain the evidence and "
+#             "recommend manual review; do not claim the file is definitely infected."
+#         ),
+#         "parameters": {
+#             "type": "object",
+#             "properties": {
+#                 "file_path": {
+#                     "type": "string",
+#                     "description": "Path to the file relative to the project root.",
+#                 },
+#                 "severity": {
+#                     "type": "string",
+#                     "enum": ["ERROR", "WARNING", "INFO"],
+#                     "description": "Minimum severity floor. Default: ERROR.",
+#                     "default": "ERROR",
+#                 },
+#                 "max_findings": {
+#                     "type": "integer",
+#                     "description": "Maximum number of findings to return. Default: 20.",
+#                     "default": 20,
+#                 },
+#                 "include_context": {
+#                     "type": "boolean",
+#                     "description": "Include extra evidence context in findings. Default: false.",
+#                     "default": False,
+#                 },
+#             },
+#             "required": ["file_path"],
+#         },
+#     },
+# }
+
+
+# CHECK_ENVIRONMENT_TOOL: Dict[str, Any] = {
+#     "type": "function",
+#     "function": {
+#         "name": "check_environment",
+#         "description": (
+#             "Use to see the user's OS, local date/time, timezone and installed "
+#             "versions of 10 popular runtimes/compilers before choosing commands, "
+#             "tests or dependencies. Read-only; never executes project code. "
+#             "Reports versions of Python, Node.js/JavaScript, TypeScript, Java, Go, "
+#             "Rust, C, C++, C#/.NET and PHP, plus CPU/RAM/disk resources."
+#         ),
+#         "parameters": {
+#             "type": "object",
+#             "properties": {},
+#             "required": [],
+#         },
+#     },
+# }

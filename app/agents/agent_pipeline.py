@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING, Union, Set
+from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING, Union, Set, Tuple
 import pycodestyle
 from app.services.tree_sitter_parser import MultiLanguageParser, FaultTolerantParser
 from config.settings import cfg
@@ -81,6 +81,7 @@ from app.utils.validation_logger import get_validation_logger, log_validation_er
 from app.services.change_validator import ChangeValidator, ValidationResult, ValidationLevel, IssueSeverity
 if TYPE_CHECKING:
     from app.history.storage import Thread
+    from app.services.change_validator import ValidationIssue
 
 logger = logging.getLogger(__name__)
 
@@ -850,8 +851,11 @@ class AgentPipeline:
             on_stage: Optional[OnStageCallback] = None,
             on_user_decision: Optional[OnUserDecisionCallback] = None,
                 on_token: Optional[Callable[[str], None]] = None,
-                prefilter_advice: str = "",
-            ) -> PipelineResult:
+                    prefilter_advice: str = "",
+                    *,
+                        _preserve_vfs: bool = False,
+                        _direct_answer_retry_depth: int = 0,
+                        ) -> PipelineResult:
             """
             Process a user request through the complete pipeline with feedback loops.
         
@@ -921,8 +925,11 @@ class AgentPipeline:
             self._pending_changes = []
             self._pending_user_request = user_request
             self._current_generated_code = ""  # Track generated code for feedback
-            self.vfs.discard_all()
+            if not _preserve_vfs:
+                self.vfs.discard_all()
+                self.vfs.reset_version_history()
         
+            # Reset feedback loader for new session
             # Reset feedback loader for new session
             reset_feedback_loader()
         
@@ -1039,7 +1046,63 @@ class AgentPipeline:
                             self._notify_stage("DIRECT_ANSWER", "Оркестратор отвечает напрямую (без генерации кода)", {
                                 "answer_preview": direct_answer[:200] if direct_answer else "",
                             })
-                        
+
+                            # === Agent-mode DIRECT_ANSWER confirmation ===
+                            _needs_confirmation = (
+                                mode == PipelineMode.AGENT
+                                and iteration == 1
+                                and not (orchestrator_result.instruction or "").strip()
+                                and self._on_user_decision is not None
+                                and _direct_answer_retry_depth < 2
+                            )
+                            if _needs_confirmation:
+                                _da_reply = await self._on_user_decision(
+                                    "direct_answer_confirmation",
+                                    {
+                                        "analysis": direct_answer or orchestrator_result.analysis,
+                                        "raw_response": orchestrator_result.raw_response,
+                                        "mode": "agent",
+                                    },
+                                )
+                                _normalized_reply = (_da_reply or "").strip()
+                                if _normalized_reply and _normalized_reply.lower() not in ("accept", "proceed"):
+                                    import xml.sax.saxutils as _sax
+                                    _escaped_user = _sax.escape(_normalized_reply)
+                                    _system_injection = (
+                                        "<system_direct_answer_retry>\n"
+                                        "This injection applies ONLY because the Orchestrator "
+                                        "previously chose DIRECT_ANSWER without a code instruction. "
+                                        "The following user message is a NEW request. The normal "
+                                        "pipeline restarts from its first iteration. The previous "
+                                        "direct answer is not final. The Orchestrator system prompt "
+                                        "must not be modified.\n"
+                                        "</system_direct_answer_retry>"
+                                    )
+                                    _user_block = (
+                                        f'<user_message author="user">{_escaped_user}</user_message>'
+                                    )
+                                    working_history.append(
+                                        {"role": "system", "content": _system_injection}
+                                    )
+                                    working_history.append(
+                                        {"role": "user", "content": _user_block}
+                                    )
+                                    return await self.process_request(
+                                        user_request=user_request,
+                                        history=working_history,
+                                        mode=mode,
+                                        on_thinking=on_thinking,
+                                        on_tool_call=on_tool_call,
+                                        on_validation=on_validation,
+                                        on_status=on_status,
+                                        on_stage=on_stage,
+                                        on_user_decision=on_user_decision,
+                                        on_token=on_token,
+                                        prefilter_advice=prefilter_advice,
+                                        _preserve_vfs=True,
+                                        _direct_answer_retry_depth=_direct_answer_retry_depth + 1,
+                                    )
+
                             # Return successful result with direct answer
                             result.success = True
                             result.status = PipelineStatus.COMPLETED
@@ -2086,12 +2149,114 @@ class AgentPipeline:
                 result.duration_ms = (time.time() - start_time) * 1000
                 vlog.log_complete(False, result.duration_ms)
             
+                # === LIMIT-RECOVERY HOOK (max iterations reached) ===
+                # Deterministic: never raises, never calls an LLM.
+                if "get_emergency_manager" not in locals():
+                    try:
+                        from app.services.emergency_recovery import get_emergency_manager
+                        _limit_resolution = await get_emergency_manager().handle_limit_reached(
+                            limit_type="iterations",
+                            current_value=self.MAX_FEEDBACK_ITERATIONS,
+                            max_value=self.MAX_FEEDBACK_ITERATIONS,
+                            agent_role="pipeline",
+                            messages=working_history,
+                            vfs=self.vfs,
+                            history=history,
+                            thread_id=self.thread_id,
+                            history_manager=self.history_manager,
+                            project_dir=self.project_dir,
+                        )
+                        if _limit_resolution is not None and getattr(_limit_resolution, "action", "") == "extra_quota":
+                            _extra_iter = getattr(_limit_resolution, "extra_iterations", 0) or 5
+                            self.MAX_FEEDBACK_ITERATIONS += _extra_iter
+                            if self.feedback_loop is not None:
+                                try:
+                                    self.feedback_loop.max_orchestrator_revisions = (
+                                        getattr(self.feedback_loop, "max_orchestrator_revisions", 0)
+                                        + _extra_iter
+                                    )
+                                    self.feedback_loop.max_validator_retries = (
+                                        getattr(self.feedback_loop, "max_validator_retries", 0)
+                                        + _extra_iter
+                                    )
+                                except Exception:
+                                    pass
+                            return await self.process_request(
+                                user_request=user_request,
+                                history=working_history,
+                                mode=mode,
+                                on_thinking=on_thinking,
+                                on_tool_call=on_tool_call,
+                                on_validation=on_validation,
+                                on_status=on_status,
+                                on_stage=on_stage,
+                                on_user_decision=on_user_decision,
+                                on_token=on_token,
+                                prefilter_advice=prefilter_advice,
+                                _preserve_vfs=True,
+                            )
+                    except Exception as _emergency_err:
+                        logger.warning(f"process_request limit hook failed: {_emergency_err}")
                 trace.set_error(f"Max iterations ({self.MAX_FEEDBACK_ITERATIONS}) reached")
                 trace.complete(success=False, status="max_iterations", duration_ms=result.duration_ms)
             
                 return result
             
             except Exception as e:
+
+                # === EMERGENCY RECOVERY HOOK (top-level except) ===
+                # Deterministic recovery: never raises, never calls an LLM.
+                if "get_emergency_manager" not in locals():
+                    try:
+                        from app.services.emergency_recovery import get_emergency_manager
+                        _emergency_resolution = await get_emergency_manager().handle_exception(
+                            e,
+                            messages=working_history,
+                            vfs=self.vfs,
+                            agent_role="pipeline",
+                            instruction=getattr(self, "_pending_orchestrator_instruction", "") or "",
+                            prefilter_advice=prefilter_advice,
+                            history=history,
+                            thread_id=self.thread_id,
+                            history_manager=self.history_manager,
+                            project_dir=self.project_dir,
+                        )
+                        if _emergency_resolution is not None:
+                            _em_action = getattr(_emergency_resolution, "action", "")
+                            _em_orch_model = getattr(_emergency_resolution, "orchestrator_model", None)
+                            _em_orch_provider = getattr(_emergency_resolution, "orchestrator_provider", None)
+                            _em_gen_model = getattr(_emergency_resolution, "generator_model", None)
+                            _em_gen_provider = getattr(_emergency_resolution, "generator_provider", None)
+                            if _em_orch_model:
+                                self.set_orchestrator_model(_em_orch_model)
+                            if _em_orch_provider:
+                                self.set_orchestrator_provider(_em_orch_provider)
+                            if _em_gen_model:
+                                self.set_generator_model(_em_gen_model)
+                            if _em_gen_provider:
+                                self.set_generator_provider(_em_gen_provider)
+                            if _em_action == "continue":
+                                return await self.process_request(
+                                    user_request=user_request,
+                                    history=working_history,
+                                    mode=mode,
+                                    on_thinking=on_thinking,
+                                    on_tool_call=on_tool_call,
+                                    on_validation=on_validation,
+                                    on_status=on_status,
+                                    on_stage=on_stage,
+                                    on_user_decision=on_user_decision,
+                                    on_token=on_token,
+                                    prefilter_advice=prefilter_advice,
+                                    _preserve_vfs=True,
+                                )
+                            if _em_action == "end_session":
+                                result.status = PipelineStatus.FAILED
+                                self._clear_vfs_on_terminal_failure()
+                                return result
+                    except Exception as _emergency_err:
+                        logger.warning(f"process_request emergency hook failed: {_emergency_err}")
+                self._clear_vfs_on_terminal_failure()
                 logger.error(f"Pipeline error: {e}", exc_info=True)
                 vlog.log_error("PIPELINE", e)
                 result.errors.append(str(e))
@@ -2488,6 +2653,64 @@ class AgentPipeline:
             }
         
         # Max iterations reached
+
+        # === LIMIT-RECOVERY HOOK (_validation_loop max iterations) ===
+        # Deterministic: never raises, never calls an LLM.
+        if "get_emergency_manager" not in locals():
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                _val_limit_resolution = await get_emergency_manager().handle_limit_reached(
+                    limit_type="iterations",
+                    current_value=max_iterations,
+                    max_value=max_iterations,
+                    agent_role="pipeline",
+                    messages=None,
+                    vfs=self.vfs,
+                    history=history,
+                    thread_id=self.thread_id,
+                    history_manager=self.history_manager,
+                    project_dir=self.project_dir,
+                )
+                if _val_limit_resolution is not None and getattr(_val_limit_resolution, "action", "") == "extra_quota":
+                    _val_extra = getattr(_val_limit_resolution, "extra_iterations", 0) or 5
+                    max_iterations += _val_extra
+                    self.MAX_FEEDBACK_ITERATIONS += _val_extra
+                    if self.feedback_loop is not None:
+                        try:
+                            self.feedback_loop.max_orchestrator_revisions = (
+                                getattr(self.feedback_loop, "max_orchestrator_revisions", 0)
+                                + _val_extra
+                            )
+                            self.feedback_loop.max_validator_retries = (
+                                getattr(self.feedback_loop, "max_validator_retries", 0)
+                                + _val_extra
+                            )
+                        except Exception:
+                            pass
+                    return await self._validation_loop(
+                        user_request=user_request,
+                        history=history,
+                        initial_instruction=current_instruction,
+                        target_file=target_file,
+                        target_files=target_files,
+                        vlog=vlog,
+                    )
+                elif _val_limit_resolution is not None and getattr(_val_limit_resolution, "action", "") == "end_session":
+                    try:
+                        from app.services.emergency_recovery import save_emergency_snapshot
+                        save_emergency_snapshot(
+                            messages=None,
+                            history=history,
+                            vfs=self.vfs,
+                            thread_id=self.thread_id,
+                            history_manager=self.history_manager,
+                            project_dir=self.project_dir,
+                        )
+                    except Exception as _snap_err:
+                        logger.debug(f"_validation_loop end_session snapshot failed: {_snap_err}")
+                    self._clear_vfs_on_terminal_failure()
+            except Exception as _emergency_err:
+                logger.warning(f"_validation_loop emergency hook failed: {_emergency_err}")
         self._notify_stage("LOOP", f"❌ Достигнут лимит итераций ({max_iterations})", None)
         return None
 
@@ -2525,6 +2748,20 @@ class AgentPipeline:
         # Initialize validation logger
         vlog = get_validation_logger(self.current_session_id or "feedback-cycle")
         vlog.log_stage("USER_FEEDBACK", f"User feedback cycle started: {user_feedback[:100]}...", None)
+
+        # === Initialize trace logger for this rework cycle ===
+        trace = PipelineTraceLogger(
+            user_request=f"[USER FEEDBACK / REWORK] {user_feedback}",
+            project_dir=str(self.vfs.project_root),
+            model=self._orchestrator_model or "auto",
+        )
+        # Preserve metadata of previous pending changes keyed by file_path
+        blocks_by_file: Dict[str, ParsedCodeBlock] = {
+            pc.file_path: pc.code_block
+            for pc in (self._pending_changes or [])
+            if getattr(pc, "code_block", None) is not None
+        }
+        trace_accumulated = False
         
         # === CRITICAL: Use existing feedback_loop, do NOT create new one ===
         if self.feedback_loop:
@@ -2580,222 +2817,273 @@ Please analyze this feedback and provide a revised instruction.""",
             status=PipelineStatus.ANALYZING,
         )
         
-        # === MAIN LOOP — same as process_request ===
-        iteration = 0
-        max_iterations = self.MAX_FEEDBACK_ITERATIONS
-        
-        while iteration < max_iterations:
-            iteration += 1
+        try:
+            # === MAIN LOOP — same as process_request ===
+            iteration = 0
+            max_iterations = self.MAX_FEEDBACK_ITERATIONS
             
+            while iteration < max_iterations:
+                iteration += 1
+                trace.start_iteration(iteration)
+                
 # (can_revise_instruction check removed — iteration < max_iterations is the sole limiter)
-            # if not self.feedback_loop.can_revise_instruction():
-            #     logger.warning(f"run_feedback_cycle: Max revisions reached")
-            #     result.status = PipelineStatus.FAILED
-            #     result.errors.append("Max revision iterations reached")
-            #     result.duration_ms = (time.time() - start_time) * 1000
-            #     return result
-            if not self.feedback_loop.can_revise_instruction():
-                logger.warning(f"run_feedback_cycle: Max revisions reached")
-                result.status = PipelineStatus.FAILED
-                result.errors.append("Max revision iterations reached")
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            self._notify_stage("ITERATION", f"Итерация обратной связи {iteration}/{max_iterations}", {
-                "iteration": iteration,
-                "total_revisions": self.feedback_loop.orchestrator_revisions,
-            })
-            
-            # ==============================================================
-            # STEP 1: ORCHESTRATOR
-            # ==============================================================
-            self._update_status(PipelineStatus.ANALYZING, f"Processing user feedback (iteration {iteration})...")
-            self._notify_stage("ORCHESTRATOR", "Оркестратор анализирует вашу критику...", None)
-            
-            try:
-                orchestrator_result = await self._run_orchestrator(
-                    user_request=self._pending_user_request,
-                    history=working_history,
-                    orchestrator_model=self._orchestrator_model,
-                )
-                vlog.log_orchestrator(self._pending_user_request, self._orchestrator_model or "auto", orchestrator_result)
-            except Exception as e:
-                vlog.log_error("ORCHESTRATOR", e)
-                result.errors.append(f"Orchestrator error: {e}")
-                result.status = PipelineStatus.FAILED
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            result.analysis = orchestrator_result.analysis
-            result.instruction = orchestrator_result.instruction
-            self._pending_orchestrator_instruction = orchestrator_result.instruction
-            
-            # Check for empty instruction
-            if not orchestrator_result.instruction.strip():
-                logger.warning("run_feedback_cycle: Orchestrator returned empty instruction")
-                working_history.append({
-                    "role": "user",
-                    "content": "[ERROR] Your response did not contain a proper instruction. Please provide a `## Instruction for Code Generator` section.",
-                })
-                continue
-            
-            # Record revision
-            self.feedback_loop.record_orchestrator_revision(
-                reason=f"User feedback: {user_feedback[:100]}...",
-                previous_instruction=self._pending_orchestrator_instruction or "",
-                new_instruction=orchestrator_result.instruction,
-            )
-            
-            self._notify_stage("INSTRUCTION", "Новая инструкция от Оркестратора", {
-                "instruction": orchestrator_result.instruction[:500],
-            })
-            
-            # ==============================================================
-            # STEP 2: CODE GENERATOR
-            # ==============================================================
-            self._update_status(PipelineStatus.GENERATING, "Generating code...")
-            self._notify_stage("CODE_GEN", "Генерация кода...", None)
-            
-            try:
-                code_blocks, raw_response = await self._run_code_generator(
-                    instruction=orchestrator_result.instruction,
-                    target_file=orchestrator_result.target_file,
-                    target_files=orchestrator_result.target_files,
-                )
-                vlog.log_code_generation(orchestrator_result.instruction, code_blocks)
-                self._current_generated_code = self._format_generated_code_for_context(code_blocks)
-            except Exception as e:
-                vlog.log_error("CODE_GENERATOR", e)
-                result.errors.append(f"Code Generator error: {e}")
-                result.status = PipelineStatus.FAILED
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            if not code_blocks:
-                staged_files = self.vfs.get_staged_files()
-                if staged_files:
-                    logger.info(f"Code Generator did not produce new code, but VFS has {len(staged_files)} staged files")
-                    result.code_blocks = []
-                else:
-                    logger.warning("Code Generator did not produce code and VFS is empty")
-                    working_history.append({
-                        "role": "user",
-                        "content": "[ERROR] Code Generator did not produce any code. Please provide a valid instruction.",
-                    })
-                    continue
-            else:
-                result.code_blocks = code_blocks
-                self._notify_stage("CODE_GEN", f"Сгенерировано {len(code_blocks)} блок(ов) кода", {
-                    "files": [b.file_path for b in code_blocks],
-                })
-            
-            # ==============================================================
-            # STEP 3: STAGING CORRECTION LOOP (3 attempts)
-            # ==============================================================
-            staging_attempt = 0
-            MAX_STAGING_ATTEMPTS = 3
-            apply_errors_data = []
-            
-            while staging_attempt < MAX_STAGING_ATTEMPTS:
-                apply_errors_data = await self._stage_code_blocks(code_blocks)
+                # if not self.feedback_loop.can_revise_instruction():
+                #     logger.warning(f"run_feedback_cycle: Max revisions reached")
+                #     result.status = PipelineStatus.FAILED
+                #     result.errors.append("Max revision iterations reached")
+                #     result.duration_ms = (time.time() - start_time) * 1000
+                #     return result
+                if not self.feedback_loop.can_revise_instruction():
+                    logger.warning(f"run_feedback_cycle: Max revisions reached")
+                    result.status = PipelineStatus.FAILED
+                    result.errors.append("Max revision iterations reached")
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
                 
-                if not apply_errors_data:
-                    break
-                
-                staging_attempt += 1
-                
-                self._notify_stage("STAGING", f"❌ Ошибки стейджинга (попытка {staging_attempt}/{MAX_STAGING_ATTEMPTS})", {
-                    "errors": apply_errors_data,
-                    "error_count": len(apply_errors_data),
+                self._notify_stage("ITERATION", f"Итерация обратной связи {iteration}/{max_iterations}", {
+                    "iteration": iteration,
+                    "total_revisions": self.feedback_loop.orchestrator_revisions,
                 })
                 
-                if staging_attempt >= MAX_STAGING_ATTEMPTS:
-                    break
-                
-                # Add staging errors to feedback
-                self._add_staging_errors_to_feedback(apply_errors_data)                
-                
-                
-                feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
-                staging_text = feedback_dump.get("staging_errors", "")
-                self.feedback_loop.feedback_handler.clear_feedback()
-                
-                working_history.append({
-                    "role": "user",
-                    "content": f"[STAGING ERRORS - REVISE TARGETS]\n{staging_text}\n\nPlease revise your instruction to fix these targeting errors."
-                })
-                
-                self._notify_stage("ORCHESTRATOR", "Оркестратор исправляет ошибки стейджинга...", None)
+                # ==============================================================
+                # STEP 1: ORCHESTRATOR
+                # ==============================================================
+                self._update_status(PipelineStatus.ANALYZING, f"Processing user feedback (iteration {iteration})...")
+                self._notify_stage("ORCHESTRATOR", "Оркестратор анализирует вашу критику...", None)
                 
                 try:
-                    # Run Orchestrator for fix
                     orchestrator_result = await self._run_orchestrator(
                         user_request=self._pending_user_request,
                         history=working_history,
                         orchestrator_model=self._orchestrator_model,
                     )
+                    vlog.log_orchestrator(self._pending_user_request, self._orchestrator_model or "auto", orchestrator_result)
                     
-                    # Update pending instruction
-                    self._pending_orchestrator_instruction = orchestrator_result.instruction
-                    
-                    # Add response to history
+                    # === Trace: log tool calls ===
+                    for tc in orchestrator_result.tool_calls:
+                        _tc_target = (
+                            tc.arguments.get("file_path")
+                            or tc.arguments.get("query")
+                            or tc.arguments.get("chunk_name")
+                            or ""
+                        )
+                        trace.add_tool_call(tc.name, str(_tc_target)[:200], tc.success)
+                except Exception as e:
+                    vlog.log_error("ORCHESTRATOR", e)
+                    result.errors.append(f"Orchestrator error: {e}")
+                    result.status = PipelineStatus.FAILED
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
+                
+                result.analysis = orchestrator_result.analysis
+                result.instruction = orchestrator_result.instruction
+                self._pending_orchestrator_instruction = orchestrator_result.instruction
+                
+                # === Trace: log instruction ===
+                trace.set_instruction(orchestrator_result.instruction or "[No instruction]")
+                
+                # Check for empty instruction
+                if not orchestrator_result.instruction.strip():
+                    logger.warning("run_feedback_cycle: Orchestrator returned empty instruction")
                     working_history.append({
-                        "role": "assistant",
-                        "content": orchestrator_result.raw_response
+                        "role": "user",
+                        "content": "[ERROR] Your response did not contain a proper instruction. Please provide a `## Instruction for Code Generator` section.",
                     })
-                    
-                    if not orchestrator_result.instruction.strip():
-                        logger.warning("Orchestrator returned empty instruction during staging fix")
-                        break
-                        
-                    # 5. Generate new code
-                    self._notify_stage("CODE_GEN", "Генерация исправленного кода...", None)
+                    continue
+                
+                # Record revision
+                self.feedback_loop.record_orchestrator_revision(
+                    reason=f"User feedback: {user_feedback[:100]}...",
+                    previous_instruction=self._pending_orchestrator_instruction or "",
+                    new_instruction=orchestrator_result.instruction,
+                )
+                
+                self._notify_stage("INSTRUCTION", "Новая инструкция от Оркестратора", {
+                    "instruction": orchestrator_result.instruction[:500],
+                })
+                
+                # ==============================================================
+                # STEP 2: CODE GENERATOR
+                # ==============================================================
+                self._update_status(PipelineStatus.GENERATING, "Generating code...")
+                self._notify_stage("CODE_GEN", "Генерация кода...", None)
+                
+                try:
                     code_blocks, raw_response = await self._run_code_generator(
                         instruction=orchestrator_result.instruction,
                         target_file=orchestrator_result.target_file,
                         target_files=orchestrator_result.target_files,
                     )
+                    vlog.log_code_generation(orchestrator_result.instruction, code_blocks)
                     
-                    # Continue loop to stage new blocks
+                    # === Trace: log generated code + update blocks_by_file ===
+                    for _b in code_blocks:
+                        trace.add_generated_code(_b.file_path, _b.mode, _b.code or "")
+                        blocks_by_file[_b.file_path] = _b
                     
+                    self._current_generated_code = self._format_generated_code_for_context(code_blocks)
                 except Exception as e:
-                    logger.error(f"Error in staging correction loop: {e}")
-                    break
+                    vlog.log_error("CODE_GENERATOR", e)
+                    result.errors.append(f"Code Generator error: {e}")
+                    result.status = PipelineStatus.FAILED
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
+                
+                if not code_blocks:
+                    staged_files = self.vfs.get_staged_files()
+                    if staged_files:
+                        logger.info(f"Code Generator did not produce new code, but VFS has {len(staged_files)} staged files")
+                        result.code_blocks = []
+                    else:
+                        logger.warning("Code Generator did not produce code and VFS is empty")
+                        working_history.append({
+                            "role": "user",
+                            "content": "[ERROR] Code Generator did not produce any code. Please provide a valid instruction.",
+                        })
+                        continue
+                else:
+                    result.code_blocks = code_blocks
+                    self._notify_stage("CODE_GEN", f"Сгенерировано {len(code_blocks)} блок(ов) кода", {
+                        "files": [b.file_path for b in code_blocks],
+                    })
+                
+                # ==============================================================
+                # STEP 3: STAGING CORRECTION LOOP (3 attempts)
+                # ==============================================================
+                staging_attempt = 0
+                MAX_STAGING_ATTEMPTS = 3
+                apply_errors_data = []
+                
+                while staging_attempt < MAX_STAGING_ATTEMPTS:
+                    apply_errors_data = await self._stage_code_blocks(code_blocks)
+                    
+                    if not apply_errors_data:
+                        break
+                    
+                    staging_attempt += 1
+                    
+                    self._notify_stage("STAGING", f"❌ Ошибки стейджинга (попытка {staging_attempt}/{MAX_STAGING_ATTEMPTS})", {
+                        "errors": apply_errors_data,
+                        "error_count": len(apply_errors_data),
+                    })
+                    
+                    # === Trace: staging errors (immediately persisted) ===
+                    for err_item in apply_errors_data:
+                        trace.add_staging_error(
+                            file_path=err_item.get("file_path", ""),
+                            mode=err_item.get("mode", ""),
+                            error=err_item.get("error", ""),
+                            error_type=str(err_item.get("error_type")) if err_item.get("error_type") else None,
+                            target_class=err_item.get("target_class"),
+                            target_method=err_item.get("target_method"),
+                            target_function=err_item.get("target_function"),
+                            code_preview=err_item.get("full_code"),
+                        )
+                        trace.dump_staging_error_report(err_item)
+                    
+                    if staging_attempt >= MAX_STAGING_ATTEMPTS:
+                        break
+                    
+                    # Add staging errors to feedback
+                    self._add_staging_errors_to_feedback(apply_errors_data)                
+                    
+                    
+                    feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
+                    staging_text = feedback_dump.get("staging_errors", "")
+                    self.feedback_loop.feedback_handler.clear_feedback()
+                    
+                    working_history.append({
+                        "role": "user",
+                        "content": f"[STAGING ERRORS - REVISE TARGETS]\n{staging_text}\n\nPlease revise your instruction to fix these targeting errors."
+                    })
+                    
+                    self._notify_stage("ORCHESTRATOR", "Оркестратор исправляет ошибки стейджинга...", None)
+                    
+                    try:
+                        # Run Orchestrator for fix
+                        orchestrator_result = await self._run_orchestrator(
+                            user_request=self._pending_user_request,
+                            history=working_history,
+                            orchestrator_model=self._orchestrator_model,
+                        )
+                        
+                        # Update pending instruction
+                        self._pending_orchestrator_instruction = orchestrator_result.instruction
+                        
+                        # === Trace: log tool calls + instruction ===
+                        for tc in orchestrator_result.tool_calls:
+                            _tc_target = (
+                                tc.arguments.get("file_path")
+                                or tc.arguments.get("query")
+                                or tc.arguments.get("chunk_name")
+                                or ""
+                            )
+                            trace.add_tool_call(tc.name, str(_tc_target)[:200], tc.success)
+                        trace.set_instruction(orchestrator_result.instruction or "[No instruction]")
+                        
+                        # Add response to history
+                        working_history.append({
+                            "role": "assistant",
+                            "content": orchestrator_result.raw_response
+                        })
+                        
+                        if not orchestrator_result.instruction.strip():
+                            logger.warning("Orchestrator returned empty instruction during staging fix")
+                            break
+                            
+                        # 5. Generate new code
+                        self._notify_stage("CODE_GEN", "Генерация исправленного кода...", None)
+                        code_blocks, raw_response = await self._run_code_generator(
+                            instruction=orchestrator_result.instruction,
+                            target_file=orchestrator_result.target_file,
+                            target_files=orchestrator_result.target_files,
+                        )
+                        
+                        # === Trace: log generated code + update blocks_by_file ===
+                        for _b in code_blocks:
+                            trace.add_generated_code(_b.file_path, _b.mode, _b.code or "")
+                            blocks_by_file[_b.file_path] = _b
+                        
+                        # Continue loop to stage new blocks
+                        
+                    except Exception as e:
+                        logger.error(f"Error in staging correction loop: {e}")
+                        break
 
-            if apply_errors_data:
-                # 1. Логируем в консоль/уведомления
-                error_msgs = [f"{e['file_path']}: {e['error']}" for e in apply_errors_data]
-                result.errors.extend(error_msgs)
+                if apply_errors_data:
+                    # 1. Логируем в консоль/уведомления
+                    error_msgs = [f"{e['file_path']}: {e['error']}" for e in apply_errors_data]
+                    result.errors.extend(error_msgs)
+                    
+                    self._notify_stage("STAGING", f"❌ Не удалось исправить ошибки стейджинга: {len(apply_errors_data)}", {
+                        "errors": apply_errors_data,
+                    })
+                    
+                    # 2. Добавляем в FeedbackHandler (для следующей большой итерации)
+                    self._add_staging_errors_to_feedback(apply_errors_data)                
+                    
+                    # 3. Формируем сообщение для истории
+                    feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
+                    staging_text = feedback_dump.get("staging_errors", "")
+                    
+                    working_history.append({
+                        "role": "user",
+                        "content": f"[CRITICAL ERRORS - STAGING FAILED]\n\n{staging_text}\n\nPlease revise your instruction.",
+                    })
+                    
+                    # 4. Записываем ревизию и идем на следующий круг (основной цикл)
+                    self.feedback_loop.record_orchestrator_revision(
+                        reason=f"Staging failed after {staging_attempt} attempts: {len(apply_errors_data)} errors",
+                        previous_instruction=self._pending_orchestrator_instruction or "",
+                        new_instruction="[pending - next iteration]",
+                    )
+                    
+                    # Очищаем перед следующим циклом
+                    self.feedback_loop.feedback_handler.clear_feedback()
+                    
+                    continue
                 
-                self._notify_stage("STAGING", f"❌ Не удалось исправить ошибки стейджинга: {len(apply_errors_data)}", {
-                    "errors": apply_errors_data,
-                })
-                
-                # 2. Добавляем в FeedbackHandler (для следующей большой итерации)
-                self._add_staging_errors_to_feedback(apply_errors_data)                
-                
-                # 3. Формируем сообщение для истории
-                feedback_dump = self.feedback_loop.get_feedback_for_orchestrator()
-                staging_text = feedback_dump.get("staging_errors", "")
-                
-                working_history.append({
-                    "role": "user",
-                    "content": f"[CRITICAL ERRORS - STAGING FAILED]\n\n{staging_text}\n\nPlease revise your instruction.",
-                })
-                
-                # 4. Записываем ревизию и идем на следующий круг (основной цикл)
-                self.feedback_loop.record_orchestrator_revision(
-                    reason=f"Staging failed after {staging_attempt} attempts: {len(apply_errors_data)} errors",
-                    previous_instruction=self._pending_orchestrator_instruction or "",
-                    new_instruction="[pending - next iteration]",
-                )
-                
-                # Очищаем перед следующим циклом
-                self.feedback_loop.feedback_handler.clear_feedback()
-                
-                continue
-            
-# ==============================================================
+                # ==============================================================
                 # STEP 3.5: PRE-INSTALL REQUIREMENTS.TXT DEPENDENCIES
                 # ==============================================================
                 try:
@@ -2820,153 +3108,179 @@ Please analyze this feedback and provide a revised instruction.""",
                         )
                 except Exception as e:
                     logger.warning(f"Failed to pre-install from requirements.txt: {e}")
-            
-            # ==============================================================
-            # STEP 4: TECHNICAL VALIDATION (without tests/runtime)
-            # ==============================================================
-            self._update_status(PipelineStatus.VALIDATING, "Validating code...")
-            self._notify_stage("VALIDATION", "Техническая проверка кода...", {
-                "levels": ["syntax", "imports", "integration"]
-            })
-            
-            try:
-                validation_result = await self._run_validation(include_tests=False)
-                vlog.log_validation("TECHNICAL", validation_result)
-            except Exception as e:
-                vlog.log_error("VALIDATION", e)
-                result.errors.append(f"Validation error: {e}")
-                result.status = PipelineStatus.FAILED
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            result.validation_result = validation_result.to_dict()
-            
-            if self._on_validation:
-                self._on_validation(validation_result.to_dict())
-            
-            self._notify_stage("VALIDATION", "Результаты технической валидации", {
-                "success": validation_result.success,
-                "error_count": validation_result.error_count,
-                "warning_count": validation_result.warning_count,
-            })
-            
-            # ==============================================================
-            # STEP 4.5: CHECK FOR BLOCKING ERRORS
-            # ==============================================================
-            if validation_result.error_count > 0:
-                blocking_errors = [
-                    issue for issue in validation_result.issues
-                    if issue.severity == IssueSeverity.ERROR
-                    and issue.level in (
-                        ValidationLevel.SYNTAX, 
-                        ValidationLevel.IMPORTS,
-                        ValidationLevel.INTEGRATION,
-                    )
-                ]
                 
-                if blocking_errors:
-                    self._notify_stage(
-                        "VALIDATION", 
-                        f"❌ {len(blocking_errors)} критических ошибок обнаружено", 
-                        {
-                            "blocking": True,
-                            "error_count": len(blocking_errors),
-                            "errors": [
-                                {
-                                    "file": e.file_path, 
-                                    "line": e.line, 
-                                    "message": e.message, 
-                                    "level": e.level.value if hasattr(e.level, 'value') else str(e.level)
-                                } 
-                                for e in blocking_errors[:10]
-                            ],
-                        }
-                    )
+                # ==============================================================
+                # STEP 4: TECHNICAL VALIDATION (without tests/runtime)
+                # ==============================================================
+                self._update_status(PipelineStatus.VALIDATING, "Validating code...")
+                self._notify_stage("VALIDATION", "Техническая проверка кода...", {
+                    "levels": ["syntax", "imports", "integration"]
+                })
+                
+                try:
+                    validation_result = await self._run_validation(include_tests=False)
+                    vlog.log_validation("TECHNICAL", validation_result)
                     
-                    # Include generated code in feedback
-
-                    # === NEW: Route Java syntax errors through dedicated feedback channel ===
-                    java_syntax_issues = [
-                    issue for issue in blocking_errors
-                    if getattr(issue, 'code', None) == "java_syntax_error"
-                    and getattr(issue, 'language', None) == "java"
+                    # === Trace: technical validation ===
+                    # ValidationResult.summary is a bound method (not a string
+                    # property) — calling set_tech_validation with it stores
+                    # the "<bound method …>" repr in the trace. Resolve the
+                    # value defensively before passing it downstream: falsy →
+                    # ""; callable → call it (exception → "" and debug log);
+                    # finally str(...) or "".
+                    _raw_tech_summary = getattr(validation_result, "summary", "") or ""
+                    if callable(_raw_tech_summary):
+                        try:
+                            _raw_tech_summary = _raw_tech_summary()
+                        except Exception as _tech_summary_err:
+                            logger.debug(
+                                f"run_feedback_cycle: callable summary failed: "
+                                f"{_tech_summary_err}"
+                            )
+                            _raw_tech_summary = ""
+                    _tech_summary_str = (
+                        str(_raw_tech_summary) if _raw_tech_summary else ""
+                    )
+                    trace.set_tech_validation(
+                        success=validation_result.success,
+                        errors=validation_result.error_count,
+                        summary=_tech_summary_str,
+                    )
+                except Exception as e:
+                    vlog.log_error("VALIDATION", e)
+                    result.errors.append(f"Validation error: {e}")
+                    result.status = PipelineStatus.FAILED
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
+                
+                result.validation_result = validation_result.to_dict()
+                
+                if self._on_validation:
+                    self._on_validation(validation_result.to_dict())
+                
+                self._notify_stage("VALIDATION", "Результаты технической валидации", {
+                    "success": validation_result.success,
+                    "error_count": validation_result.error_count,
+                    "warning_count": validation_result.warning_count,
+                })
+                
+                # ==============================================================
+                # STEP 4.5: CHECK FOR BLOCKING ERRORS
+                # ==============================================================
+                if validation_result.error_count > 0:
+                    blocking_errors = [
+                        issue for issue in validation_result.issues
+                        if issue.severity == IssueSeverity.ERROR
+                        and issue.level in (
+                            ValidationLevel.SYNTAX, 
+                            ValidationLevel.IMPORTS,
+                            ValidationLevel.INTEGRATION,
+                        )
                     ]
+                    
+                    if blocking_errors:
+                        self._notify_stage(
+                            "VALIDATION", 
+                            f"❌ {len(blocking_errors)} критических ошибок обнаружено", 
+                            {
+                                "blocking": True,
+                                "error_count": len(blocking_errors),
+                                "errors": [
+                                    {
+                                        "file": e.file_path, 
+                                        "line": e.line, 
+                                        "message": e.message, 
+                                        "level": e.level.value if hasattr(e.level, 'value') else str(e.level)
+                                    } 
+                                    for e in blocking_errors[:10]
+                                ],
+                            }
+                        )
+                        
+                        # Include generated code in feedback
 
-                    if java_syntax_issues:
-                        # Group by file_path
-                        from collections import defaultdict
-                        issues_by_file = defaultdict(list)
-                        for issue in java_syntax_issues:
-                            issues_by_file[issue.file_path].append(issue)
+                        # === NEW: Route Java syntax errors through dedicated feedback channel ===
+                        java_syntax_issues = [
+                        issue for issue in blocking_errors
+                        if getattr(issue, 'code', None) == "java_syntax_error"
+                        and getattr(issue, 'language', None) == "java"
+                        ]
 
-                            # Route each file's errors through dedicated channel
-                            for file_path, file_issues in issues_by_file.items():
-                                self.feedback_loop.add_java_syntax_error(
-                                file_path=file_path,
-                                errors=[i.message for i in file_issues],
-                                error_lines=[i.line for i in file_issues],
-                                )
+                        if java_syntax_issues:
+                            # Group by file_path
+                            from collections import defaultdict
+                            issues_by_file = defaultdict(list)
+                            for issue in java_syntax_issues:
+                                issues_by_file[issue.file_path].append(issue)
 
-                                logger.info(f"[PIPELINE] Routing {len(java_syntax_issues)} Java syntax errors through dedicated feedback channel")
+                                # Route each file's errors through dedicated channel
+                                for file_path, file_issues in issues_by_file.items():
+                                    self.feedback_loop.add_java_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                    )
+
+                                    logger.info(f"[PIPELINE] Routing {len(java_syntax_issues)} Java syntax errors through dedicated feedback channel")
 
 # === Route JS syntax errors through dedicated feedback channel ===
-                    js_syntax_issues = [
-                        issue for issue in blocking_errors
-                        if getattr(issue, 'code', None) == "javascript_syntax_error"
-                        and getattr(issue, 'language', None) == "javascript"
-                    ]
-                    if js_syntax_issues:
-                        from collections import defaultdict
-                        js_issues_by_file = defaultdict(list)
-                        for issue in js_syntax_issues:
-                            js_issues_by_file[issue.file_path].append(issue)
-                        for file_path, file_issues in js_issues_by_file.items():
-                            self.feedback_loop.add_js_syntax_error(
-                                file_path=file_path,
-                                errors=[i.message for i in file_issues],
-                                error_lines=[i.line for i in file_issues],
-                            )
-                        logger.info(f"[PIPELINE] Routing {len(js_syntax_issues)} JS syntax errors through dedicated feedback channel")
+                        js_syntax_issues = [
+                            issue for issue in blocking_errors
+                            if getattr(issue, 'code', None) == "javascript_syntax_error"
+                            and getattr(issue, 'language', None) == "javascript"
+                        ]
+                        if js_syntax_issues:
+                            from collections import defaultdict
+                            js_issues_by_file = defaultdict(list)
+                            for issue in js_syntax_issues:
+                                js_issues_by_file[issue.file_path].append(issue)
+                            for file_path, file_issues in js_issues_by_file.items():
+                                self.feedback_loop.add_js_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                )
+                            logger.info(f"[PIPELINE] Routing {len(js_syntax_issues)} JS syntax errors through dedicated feedback channel")
 
-                    # === Route TS syntax errors through dedicated feedback channel ===
-                    ts_syntax_issues = [
-                        issue for issue in blocking_errors
-                        if getattr(issue, 'code', None) == "typescript_syntax_error"
-                        and getattr(issue, 'language', None) == "typescript"
-                    ]
-                    if ts_syntax_issues:
-                        from collections import defaultdict
-                        ts_issues_by_file = defaultdict(list)
-                        for issue in ts_syntax_issues:
-                            ts_issues_by_file[issue.file_path].append(issue)
-                        for file_path, file_issues in ts_issues_by_file.items():
-                            self.feedback_loop.add_ts_syntax_error(
-                                file_path=file_path,
-                                errors=[i.message for i in file_issues],
-                                error_lines=[i.line for i in file_issues],
-                            )
-                        logger.info(f"[PIPELINE] Routing {len(ts_syntax_issues)} TS syntax errors through dedicated feedback channel")
+                        # === Route TS syntax errors through dedicated feedback channel ===
+                        ts_syntax_issues = [
+                            issue for issue in blocking_errors
+                            if getattr(issue, 'code', None) == "typescript_syntax_error"
+                            and getattr(issue, 'language', None) == "typescript"
+                        ]
+                        if ts_syntax_issues:
+                            from collections import defaultdict
+                            ts_issues_by_file = defaultdict(list)
+                            for issue in ts_syntax_issues:
+                                ts_issues_by_file[issue.file_path].append(issue)
+                            for file_path, file_issues in ts_issues_by_file.items():
+                                self.feedback_loop.add_ts_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                )
+                            logger.info(f"[PIPELINE] Routing {len(ts_syntax_issues)} TS syntax errors through dedicated feedback channel")
 
-                    # === Route Go syntax errors through dedicated feedback channel ===
-                    go_syntax_issues = [
-                        issue for issue in blocking_errors
-                        if getattr(issue, 'code', None) == "go_syntax_error"
-                        and getattr(issue, 'language', None) == "go"
-                    ]
-                    if go_syntax_issues:
-                        from collections import defaultdict
-                        go_issues_by_file = defaultdict(list)
-                        for issue in go_syntax_issues:
-                            go_issues_by_file[issue.file_path].append(issue)
-                        for file_path, file_issues in go_issues_by_file.items():
-                            self.feedback_loop.add_go_syntax_error(
-                                file_path=file_path,
-                                errors=[i.message for i in file_issues],
-                                error_lines=[i.line for i in file_issues],
-                            )
-                        logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
-                    
-                    
+                        # === Route Go syntax errors through dedicated feedback channel ===
+                        go_syntax_issues = [
+                            issue for issue in blocking_errors
+                            if getattr(issue, 'code', None) == "go_syntax_error"
+                            and getattr(issue, 'language', None) == "go"
+                        ]
+                        if go_syntax_issues:
+                            from collections import defaultdict
+                            go_issues_by_file = defaultdict(list)
+                            for issue in go_syntax_issues:
+                                go_issues_by_file[issue.file_path].append(issue)
+                            for file_path, file_issues in go_issues_by_file.items():
+                                self.feedback_loop.add_go_syntax_error(
+                                    file_path=file_path,
+                                    errors=[i.message for i in file_issues],
+                                    error_lines=[i.line for i in file_issues],
+                                )
+                            logger.info(f"[PIPELINE] Routing {len(go_syntax_issues)} Go syntax errors through dedicated feedback channel")
+                        
+                        
                         # === Route TSX syntax errors through dedicated feedback channel ===
                         tsx_syntax_issues = [
                             issue for issue in blocking_errors
@@ -2985,271 +3299,368 @@ Please analyze this feedback and provide a revised instruction.""",
                                     error_lines=[i.line for i in file_issues],
                                 )
                             logger.info(f"[PIPELINE] Routing {len(tsx_syntax_issues)} TSX syntax errors through dedicated feedback channel")                            
+                        
+                        
+                        feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
+                        
+                        working_history.append({
+                            "role": "user",
+                            "content": feedback_msg,
+                        })
+                        
+                        # Записываем в feedback loop
+                        self.feedback_loop.add_validation_errors(validation_result.to_dict())
+                        self.feedback_loop.record_orchestrator_revision(
+                            reason=f"Validation failed: {len(blocking_errors)} blocking errors",
+                            previous_instruction=self._pending_orchestrator_instruction or "",
+                            new_instruction="[pending - next iteration]",
+                        )
+                        
+                        logger.warning(
+                            f"Iteration {iteration}: Validation failed with {len(blocking_errors)} errors, "
+                            f"returning to Orchestrator"
+                        )
+                        
+                        # Возврат к Оркестратору — следующая итерация цикла
+                        continue
+                
+                # ==============================================================
+                # STEP 5: AI VALIDATION
+                # ==============================================================
+                self._notify_stage("AI_VALIDATION", "AI Validator проверяет соответствие задаче...", None)
+                
+                try:
+                    ai_result = await self._run_ai_validation(
+                        user_request=self._pending_user_request,
+                        instruction=orchestrator_result.instruction,
+                        code_blocks=code_blocks,
+                    )
+                    vlog.log_ai_validation(ai_result)
                     
+                    # === Trace: AI validation ===
+                    trace.set_ai_validation(
+                        approved=ai_result.approved,
+                        confidence=ai_result.confidence,
+                        verdict=ai_result.verdict,
+                        issues=ai_result.critical_issues,
+                    )
+                except Exception as e:
+                    vlog.log_error("AI_VALIDATION", e)
+                    result.errors.append(f"AI Validation error: {e}")
+                    result.status = PipelineStatus.FAILED
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
+                
+                result.ai_validation_result = ai_result.to_dict()
+                
+                self._notify_stage("AI_VALIDATION",
+                    "✅ ОДОБРЕНО" if ai_result.approved else "❌ ОТКЛОНЕНО",
+                    {
+                        "approved": ai_result.approved,
+                        "confidence": ai_result.confidence,
+                        "verdict": ai_result.verdict,
+                        "critical_issues": ai_result.critical_issues,
+                    }
+                )
+                
+                # ==============================================================
+                # ==============================================================
+                # STEP 5.5: ORCHESTRATOR DECISION (if AI rejected)
+                # ==============================================================
+                
+                # === ПРОВЕРКА НА PARSE ERROR ===
+                if ai_result.parse_error:
+                    logger.warning(
+                        f"AI Validator had parse error: {ai_result.parse_error}. "
+                        f"Skipping orchestrator decision, proceeding to tests."
+                    )
+                    self._notify_stage(
+                        "AI_VALIDATION", 
+                        "⚠️ Валидатор не смог сформировать ответ — переходим к тестам",
+                        {
+                            "parse_error": ai_result.parse_error,
+                            "raw_response_preview": ai_result.raw_response[:200] if ai_result.raw_response else "",
+                        }
+                    )
+                
+                elif not ai_result.approved:
+                    logger.info("AI Validator rejected code, asking Orchestrator for decision")
+                    self._notify_stage("FEEDBACK", "Отправка критики AI Validator Оркестратору...", None)
                     
-                    feedback_msg = self._format_errors_for_orchestrator(blocking_errors, code_blocks)
+                    # Orchestrator decides: ACCEPT (revise) or OVERRIDE (disagree)
+                    try:
+                        orchestrator_decision = await self._get_orchestrator_decision_on_ai_feedback(
+                            ai_result=ai_result,
+                            code_blocks=code_blocks,
+                            working_history=working_history,
+                        )
+                    except Exception as e:
+                        logger.error(f"Orchestrator decision error: {e}")
+                        orchestrator_decision = OrchestratorFeedbackDecision(
+                            decision="OVERRIDE",
+                            reasoning=f"Error getting decision: {e}. Proceeding to tests.",
+                        )
+                    
+                    result.orchestrator_decision = orchestrator_decision
+                    
+                    # === Trace: orchestrator decision ===
+                    trace.set_orchestrator_decision(
+                        orchestrator_decision.decision,
+                        orchestrator_decision.reasoning,
+                    )
+                    
+                    self._notify_stage("ORCHESTRATOR_DECISION",
+                        f"Решение Оркестратора: {orchestrator_decision.decision}",
+                        {
+                            "decision": orchestrator_decision.decision,
+                            "reasoning": orchestrator_decision.reasoning,
+                        }
+                    )
+                    
+                    # === ACCEPT: Оркестратор СОГЛАСЕН с валидатором ===
+                    if orchestrator_decision.decision == "ACCEPT":
+                        logger.info("Orchestrator accepts AI Validator feedback, looping back")
+                        
+                        # Include generated code in feedback
+                        feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
+                        working_history.append({
+                            "role": "user",
+                            "content": feedback_msg,
+                        })
+                        
+                        self.feedback_loop.add_validator_feedback(
+                            approved=ai_result.approved,
+                            confidence=ai_result.confidence,
+                            verdict=ai_result.verdict,
+                            critical_issues=ai_result.critical_issues,
+                            model_used=ai_result.model_used,
+                        )
+                        
+                        # Continue to next iteration
+                        continue
+                    
+                    # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
+                    elif orchestrator_decision.decision == "OVERRIDE":
+                        logger.info("Orchestrator wants to override AI Validator")
+                        # ══════════════════════════════════════════════════════════
+                        # FIX: Добавлен callback к пользователю (как в process_request)
+                        # ══════════════════════════════════════════════════════════
+                        if self._on_user_decision:
+                            user_choice = await self._on_user_decision(
+                                "orchestrator_override",
+                                {
+                                    "ai_result": ai_result.to_dict(),
+                                    "orchestrator_reasoning": orchestrator_decision.reasoning,
+                                    "code_blocks": [
+                                        {"file": b.file_path, "mode": b.mode}
+                                        for b in code_blocks
+                                    ],
+                                }
+                            )
+                            logger.info(f"User decision on override (feedback_cycle): {user_choice}")
+
+                            if user_choice == "cancel":
+                                await self.discard_pending_changes()
+                                result.status = PipelineStatus.CANCELLED
+                                result.errors.append("User cancelled request after orchestrator override")
+                                result.duration_ms = (time.time() - start_time) * 1000
+                                return result
+
+                            elif user_choice == "force_fix":
+                                # Пользователь считает критику обоснованной — заставляем исправить
+                                feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
+                                working_history.append({
+                                    "role": "user",
+                                    "content": f"[USER OVERRIDE - MUST FIX]\n{feedback_msg}",
+                                })
+                                continue  # ← Возврат к Оркестратору
+
+                            elif user_choice == "proceed":
+                                logger.info("User trusts Orchestrator override, proceeding to tests")
+                                self.feedback_loop.validator_overrides_count += 1
+
+                            else:
+                                logger.warning(f"Unknown user choice: {user_choice}, proceeding to tests")
+                                self.feedback_loop.validator_overrides_count += 1
+                        else:
+                            logger.info("No user decision callback in feedback_cycle, auto-proceeding")
+                            self.feedback_loop.validator_overrides_count += 1
+                        # ══════════════════════════════════════════════════════════
+                    
+                    else:
+                        logger.warning(
+                            f"Unknown orchestrator decision: {orchestrator_decision.decision}, "
+                            f"proceeding to tests"
+                        )
+                        self.feedback_loop.validator_overrides_count += 1
+                
+                # ==============================================================
+                # STEP 6: TESTS + RUNTIME
+                # ==============================================================
+                self._update_status(PipelineStatus.VALIDATING, "Running tests...")
+                self._notify_stage("TESTS", "Запуск тестов и runtime проверок...", None)
+                
+                try:
+                    validation_with_tests = await self._run_validation(include_tests=True)
+                    vlog.log_validation("WITH_TESTS", validation_with_tests)
+                    
+                    # === Trace: runtime results + tests ===
+                    _trace_runtime_skipped = getattr(validation_with_tests, 'runtime_files_skipped', 0)
+                    if _trace_runtime_skipped == 0 and validation_with_tests.runtime_test_summary:
+                        _results_list = validation_with_tests.runtime_test_summary.get("results", [])
+                        _trace_runtime_skipped = sum(1 for r in _results_list if r.get("status") == "skipped")
+                    
+                    trace.set_runtime_results(
+                        files_checked=validation_with_tests.runtime_files_checked,
+                        files_passed=validation_with_tests.runtime_files_passed,
+                        files_failed=validation_with_tests.runtime_files_failed,
+                        files_skipped=_trace_runtime_skipped,
+                        summary=validation_with_tests.runtime_test_summary,
+                    )
+                    _trace_test_errors = [
+                        i for i in validation_with_tests.issues
+                        if i.level == ValidationLevel.TESTS and i.severity == IssueSeverity.ERROR
+                    ]
+                    trace.set_tests(
+                        passed=(
+                            (validation_with_tests.tests_failed == 0 and validation_with_tests.tests_run > 0)
+                            or (validation_with_tests.tests_run == 0 and validation_with_tests.runtime_files_failed == 0)
+                        ),
+                        output=(
+                            f"pytest: {validation_with_tests.tests_passed}/{validation_with_tests.tests_run}, "
+                            f"runtime: {validation_with_tests.runtime_files_passed}/{validation_with_tests.runtime_files_checked}"
+                        ),
+                        failed=[i.message for i in _trace_test_errors][:10] if _trace_test_errors else [],
+                    )
+                except Exception as e:
+                    vlog.log_error("TESTS", e)
+                    result.errors.append(f"Tests error: {e}")
+                    result.status = PipelineStatus.FAILED
+                    result.duration_ms = (time.time() - start_time) * 1000
+                    return result
+                
+                result.validation_result = validation_with_tests.to_dict()
+                
+                if self._on_validation:
+                    self._on_validation(validation_with_tests.to_dict())
+                
+                # === NEW: Notify RUNTIME results separately ===
+                runtime_skipped = getattr(validation_with_tests, 'runtime_files_skipped', 0)
+                if runtime_skipped == 0 and validation_with_tests.runtime_test_summary:
+                    results_list = validation_with_tests.runtime_test_summary.get("results", [])
+                    runtime_skipped = sum(1 for r in results_list if r.get("status") == "skipped")
+                
+                # Build failures list for display
+                runtime_failures = []
+                if validation_with_tests.runtime_test_summary:
+                    for r in validation_with_tests.runtime_test_summary.get("results", []):
+                        if r.get("status") in ("failed", "error", "timeout"):
+                            runtime_failures.append({
+                                "file_path": r.get("file_path", "?"),
+                                "message": r.get("message", "")[:100],
+                                "status": r.get("status"),
+                            })
+                
+                self._notify_stage("RUNTIME", "Результаты runtime тестирования", {
+                    "files_checked": validation_with_tests.runtime_files_checked,
+                    "files_passed": validation_with_tests.runtime_files_passed,
+                    "files_failed": validation_with_tests.runtime_files_failed,
+                    "files_skipped": runtime_skipped,
+                    "success": validation_with_tests.runtime_files_failed == 0,
+                    "failures": runtime_failures[:5],
+                    "skipped_reasons": _count_skipped_reasons(validation_with_tests.runtime_test_summary),
+                })
+                
+                # ==============================================================
+                # STEP 6.5: CHECK TEST AND RUNTIME RESULTS
+                # ==============================================================
+                test_errors = [
+                    i for i in validation_with_tests.issues 
+                    if i.level == ValidationLevel.TESTS and i.severity == IssueSeverity.ERROR
+                ]
+                runtime_errors = [
+                    i for i in validation_with_tests.issues 
+                    if i.level == ValidationLevel.RUNTIME and i.severity == IssueSeverity.ERROR
+                ]
+                
+                all_blocking_errors = test_errors + runtime_errors
+                
+                tests_expected_but_not_run = (
+                    validation_with_tests.tests_run == 0 
+                    and len(getattr(validation_with_tests, 'test_files_found', [])) > 0
+                )
+                
+                if all_blocking_errors or tests_expected_but_not_run:
+                    error_details = []
+                    
+                    if test_errors:
+                        error_details.append(f"{len(test_errors)} test failures")
+                    if runtime_errors:
+                        error_details.append(f"{len(runtime_errors)} runtime errors")
+                    if tests_expected_but_not_run:
+                        error_details.append("tests found but not executed")
+                    
+                    self._notify_stage(
+                        "TESTS", 
+                        f"❌ Ошибки: {', '.join(error_details)}", 
+                        {
+                            "success": False,
+                            "test_failures": len(test_errors),
+                            "runtime_errors": len(runtime_errors),
+                            "tests_run": validation_with_tests.tests_run,
+                            "tests_passed": validation_with_tests.tests_passed,
+                            "tests_failed": validation_with_tests.tests_failed,
+                            "test_files_found": len(getattr(validation_with_tests, 'test_files_found', [])),
+                            "runtime_files_checked": validation_with_tests.runtime_files_checked,
+                            "runtime_files_passed": validation_with_tests.runtime_files_passed,
+                            "runtime_files_failed": validation_with_tests.runtime_files_failed,
+                            "runtime_failures": runtime_failures[:5],
+                        }
+                    )
+                    
+                    # Include generated code in test feedback
+                    feedback_msg = self._format_test_errors_for_orchestrator(
+                        test_errors=test_errors,
+                        runtime_errors=runtime_errors,
+                        validation_result=validation_with_tests,
+                        code_blocks=code_blocks,
+                    )
                     
                     working_history.append({
                         "role": "user",
                         "content": feedback_msg,
                     })
                     
-                    # Записываем в feedback loop
-                    self.feedback_loop.add_validation_errors(validation_result.to_dict())
+                    self.feedback_loop.add_test_failures({
+                        "test_errors": [e.to_dict() for e in test_errors],
+                        "runtime_errors": [e.to_dict() for e in runtime_errors],
+                        "tests_run": validation_with_tests.tests_run,
+                        "tests_passed": validation_with_tests.tests_passed,
+                        "tests_failed": validation_with_tests.tests_failed,
+                        "runtime_checked": validation_with_tests.runtime_files_checked,
+                        "runtime_passed": validation_with_tests.runtime_files_passed,
+                        "runtime_failed": validation_with_tests.runtime_files_failed,
+                    })
+                    
                     self.feedback_loop.record_orchestrator_revision(
-                        reason=f"Validation failed: {len(blocking_errors)} blocking errors",
-                        previous_instruction=self._pending_orchestrator_instruction or "",
+                        reason=f"Tests/Runtime failed: {len(test_errors)} test errors, {len(runtime_errors)} runtime errors",
+                        previous_instruction=self._pending_orchestrator_instruction,
                         new_instruction="[pending - next iteration]",
                     )
                     
                     logger.warning(
-                        f"Iteration {iteration}: Validation failed with {len(blocking_errors)} errors, "
-                        f"returning to Orchestrator"
+                        f"Iteration {iteration}: Tests/Runtime failed, returning to Orchestrator. "
+                        f"Test errors: {len(test_errors)}, Runtime errors: {len(runtime_errors)}"
                     )
                     
-                    # Возврат к Оркестратору — следующая итерация цикла
-                    continue
-            
-            # ==============================================================
-            # STEP 5: AI VALIDATION
-            # ==============================================================
-            self._notify_stage("AI_VALIDATION", "AI Validator проверяет соответствие задаче...", None)
-            
-            try:
-                ai_result = await self._run_ai_validation(
-                    user_request=self._pending_user_request,
-                    instruction=orchestrator_result.instruction,
-                    code_blocks=code_blocks,
-                )
-                vlog.log_ai_validation(ai_result)
-            except Exception as e:
-                vlog.log_error("AI_VALIDATION", e)
-                result.errors.append(f"AI Validation error: {e}")
-                result.status = PipelineStatus.FAILED
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            result.ai_validation_result = ai_result.to_dict()
-            
-            self._notify_stage("AI_VALIDATION",
-                "✅ ОДОБРЕНО" if ai_result.approved else "❌ ОТКЛОНЕНО",
-                {
-                    "approved": ai_result.approved,
-                    "confidence": ai_result.confidence,
-                    "verdict": ai_result.verdict,
-                    "critical_issues": ai_result.critical_issues,
-                }
-            )
-            
-            # ==============================================================
-            # ==============================================================
-            # STEP 5.5: ORCHESTRATOR DECISION (if AI rejected)
-            # ==============================================================
-            
-            # === ПРОВЕРКА НА PARSE ERROR ===
-            if ai_result.parse_error:
-                logger.warning(
-                    f"AI Validator had parse error: {ai_result.parse_error}. "
-                    f"Skipping orchestrator decision, proceeding to tests."
-                )
-                self._notify_stage(
-                    "AI_VALIDATION", 
-                    "⚠️ Валидатор не смог сформировать ответ — переходим к тестам",
-                    {
-                        "parse_error": ai_result.parse_error,
-                        "raw_response_preview": ai_result.raw_response[:200] if ai_result.raw_response else "",
-                    }
-                )
-            
-            elif not ai_result.approved:
-                logger.info("AI Validator rejected code, asking Orchestrator for decision")
-                self._notify_stage("FEEDBACK", "Отправка критики AI Validator Оркестратору...", None)
-                
-                # Orchestrator decides: ACCEPT (revise) or OVERRIDE (disagree)
-                try:
-                    orchestrator_decision = await self._get_orchestrator_decision_on_ai_feedback(
-                        ai_result=ai_result,
-                        code_blocks=code_blocks,
-                        working_history=working_history,
-                    )
-                except Exception as e:
-                    logger.error(f"Orchestrator decision error: {e}")
-                    orchestrator_decision = OrchestratorFeedbackDecision(
-                        decision="OVERRIDE",
-                        reasoning=f"Error getting decision: {e}. Proceeding to tests.",
-                    )
-                
-                result.orchestrator_decision = orchestrator_decision
-                
-                self._notify_stage("ORCHESTRATOR_DECISION",
-                    f"Решение Оркестратора: {orchestrator_decision.decision}",
-                    {
-                        "decision": orchestrator_decision.decision,
-                        "reasoning": orchestrator_decision.reasoning,
-                    }
-                )
-                
-                # === ACCEPT: Оркестратор СОГЛАСЕН с валидатором ===
-                if orchestrator_decision.decision == "ACCEPT":
-                    logger.info("Orchestrator accepts AI Validator feedback, looping back")
-                    
-                    # Include generated code in feedback
-                    feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
-                    working_history.append({
-                        "role": "user",
-                        "content": feedback_msg,
-                    })
-                    
-                    self.feedback_loop.add_validator_feedback(
-                        approved=ai_result.approved,
-                        confidence=ai_result.confidence,
-                        verdict=ai_result.verdict,
-                        critical_issues=ai_result.critical_issues,
-                        model_used=ai_result.model_used,
-                    )
-                    
-                    # Continue to next iteration
                     continue
                 
-                # === OVERRIDE: Оркестратор НЕ СОГЛАСЕН с валидатором ===
-                elif orchestrator_decision.decision == "OVERRIDE":
-                    logger.info("Orchestrator wants to override AI Validator")
-                    # ══════════════════════════════════════════════════════════
-                    # FIX: Добавлен callback к пользователю (как в process_request)
-                    # ══════════════════════════════════════════════════════════
-                    if self._on_user_decision:
-                        user_choice = await self._on_user_decision(
-                            "orchestrator_override",
-                            {
-                                "ai_result": ai_result.to_dict(),
-                                "orchestrator_reasoning": orchestrator_decision.reasoning,
-                                "code_blocks": [
-                                    {"file": b.file_path, "mode": b.mode}
-                                    for b in code_blocks
-                                ],
-                            }
-                        )
-                        logger.info(f"User decision on override (feedback_cycle): {user_choice}")
-
-                        if user_choice == "cancel":
-                            await self.discard_pending_changes()
-                            result.status = PipelineStatus.CANCELLED
-                            result.errors.append("User cancelled request after orchestrator override")
-                            result.duration_ms = (time.time() - start_time) * 1000
-                            return result
-
-                        elif user_choice == "force_fix":
-                            # Пользователь считает критику обоснованной — заставляем исправить
-                            feedback_msg = self._format_ai_validator_feedback(ai_result, code_blocks)
-                            working_history.append({
-                                "role": "user",
-                                "content": f"[USER OVERRIDE - MUST FIX]\n{feedback_msg}",
-                            })
-                            continue  # ← Возврат к Оркестратору
-
-                        elif user_choice == "proceed":
-                            logger.info("User trusts Orchestrator override, proceeding to tests")
-                            self.feedback_loop.validator_overrides_count += 1
-
-                        else:
-                            logger.warning(f"Unknown user choice: {user_choice}, proceeding to tests")
-                            self.feedback_loop.validator_overrides_count += 1
-                    else:
-                        logger.info("No user decision callback in feedback_cycle, auto-proceeding")
-                        self.feedback_loop.validator_overrides_count += 1
-                    # ══════════════════════════════════════════════════════════
-                
-                else:
-                    logger.warning(
-                        f"Unknown orchestrator decision: {orchestrator_decision.decision}, "
-                        f"proceeding to tests"
-                    )
-                    self.feedback_loop.validator_overrides_count += 1
-            
-            # ==============================================================
-            # STEP 6: TESTS + RUNTIME
-            # ==============================================================
-            self._update_status(PipelineStatus.VALIDATING, "Running tests...")
-            self._notify_stage("TESTS", "Запуск тестов и runtime проверок...", None)
-            
-            try:
-                validation_with_tests = await self._run_validation(include_tests=True)
-                vlog.log_validation("WITH_TESTS", validation_with_tests)
-            except Exception as e:
-                vlog.log_error("TESTS", e)
-                result.errors.append(f"Tests error: {e}")
-                result.status = PipelineStatus.FAILED
-                result.duration_ms = (time.time() - start_time) * 1000
-                return result
-            
-            result.validation_result = validation_with_tests.to_dict()
-            
-            if self._on_validation:
-                self._on_validation(validation_with_tests.to_dict())
-            
-            # === NEW: Notify RUNTIME results separately ===
-            runtime_skipped = getattr(validation_with_tests, 'runtime_files_skipped', 0)
-            if runtime_skipped == 0 and validation_with_tests.runtime_test_summary:
-                results_list = validation_with_tests.runtime_test_summary.get("results", [])
-                runtime_skipped = sum(1 for r in results_list if r.get("status") == "skipped")
-            
-            # Build failures list for display
-            runtime_failures = []
-            if validation_with_tests.runtime_test_summary:
-                for r in validation_with_tests.runtime_test_summary.get("results", []):
-                    if r.get("status") in ("failed", "error", "timeout"):
-                        runtime_failures.append({
-                            "file_path": r.get("file_path", "?"),
-                            "message": r.get("message", "")[:100],
-                            "status": r.get("status"),
-                        })
-            
-            self._notify_stage("RUNTIME", "Результаты runtime тестирования", {
-                "files_checked": validation_with_tests.runtime_files_checked,
-                "files_passed": validation_with_tests.runtime_files_passed,
-                "files_failed": validation_with_tests.runtime_files_failed,
-                "files_skipped": runtime_skipped,
-                "success": validation_with_tests.runtime_files_failed == 0,
-                "failures": runtime_failures[:5],
-                "skipped_reasons": _count_skipped_reasons(validation_with_tests.runtime_test_summary),
-            })
-            
-            # ==============================================================
-            # STEP 6.5: CHECK TEST AND RUNTIME RESULTS
-            # ==============================================================
-            test_errors = [
-                i for i in validation_with_tests.issues 
-                if i.level == ValidationLevel.TESTS and i.severity == IssueSeverity.ERROR
-            ]
-            runtime_errors = [
-                i for i in validation_with_tests.issues 
-                if i.level == ValidationLevel.RUNTIME and i.severity == IssueSeverity.ERROR
-            ]
-            
-            all_blocking_errors = test_errors + runtime_errors
-            
-            tests_expected_but_not_run = (
-                validation_with_tests.tests_run == 0 
-                and len(getattr(validation_with_tests, 'test_files_found', [])) > 0
-            )
-            
-            if all_blocking_errors or tests_expected_but_not_run:
-                error_details = []
-                
-                if test_errors:
-                    error_details.append(f"{len(test_errors)} test failures")
-                if runtime_errors:
-                    error_details.append(f"{len(runtime_errors)} runtime errors")
-                if tests_expected_but_not_run:
-                    error_details.append("tests found but not executed")
-                
+                # === SUCCESS — тесты прошли ===
                 self._notify_stage(
                     "TESTS", 
-                    f"❌ Ошибки: {', '.join(error_details)}", 
+                    f"✅ Тесты пройдены", 
                     {
-                        "success": False,
-                        "test_failures": len(test_errors),
-                        "runtime_errors": len(runtime_errors),
+                        "success": True,
                         "tests_run": validation_with_tests.tests_run,
                         "tests_passed": validation_with_tests.tests_passed,
                         "tests_failed": validation_with_tests.tests_failed,
@@ -3257,122 +3668,154 @@ Please analyze this feedback and provide a revised instruction.""",
                         "runtime_files_checked": validation_with_tests.runtime_files_checked,
                         "runtime_files_passed": validation_with_tests.runtime_files_passed,
                         "runtime_files_failed": validation_with_tests.runtime_files_failed,
-                        "runtime_failures": runtime_failures[:5],
+                        "runtime_files_skipped": runtime_skipped,
                     }
                 )
                 
-                # Include generated code in test feedback
-                feedback_msg = self._format_test_errors_for_orchestrator(
-                    test_errors=test_errors,
-                    runtime_errors=runtime_errors,
-                    validation_result=validation_with_tests,
-                    code_blocks=code_blocks,
+                logger.info(
+                    f"Iteration {iteration}: All tests passed "
+                    f"(pytest: {validation_with_tests.tests_passed}/{validation_with_tests.tests_run}, "
+                    f"runtime: {validation_with_tests.runtime_files_passed}/{validation_with_tests.runtime_files_checked})"
                 )
                 
-                working_history.append({
-                    "role": "user",
-                    "content": feedback_msg,
-                })
+                # ==============================================================
+                # STEP 7: SUCCESS - PREPARE FOR USER CONFIRMATION
+                # ==============================================================
+                self._update_status(PipelineStatus.AWAITING_CONFIRMATION, "Ready for your review")
                 
-                self.feedback_loop.add_test_failures({
-                    "test_errors": [e.to_dict() for e in test_errors],
-                    "runtime_errors": [e.to_dict() for e in runtime_errors],
-                    "tests_run": validation_with_tests.tests_run,
-                    "tests_passed": validation_with_tests.tests_passed,
-                    "tests_failed": validation_with_tests.tests_failed,
-                    "runtime_checked": validation_with_tests.runtime_files_checked,
-                    "runtime_passed": validation_with_tests.runtime_files_passed,
-                    "runtime_failed": validation_with_tests.runtime_files_failed,
-                })
-                
-                self.feedback_loop.record_orchestrator_revision(
-                    reason=f"Tests/Runtime failed: {len(test_errors)} test errors, {len(runtime_errors)} runtime errors",
-                    previous_instruction=self._pending_orchestrator_instruction,
-                    new_instruction="[pending - next iteration]",
+                self._pending_changes = await self._build_pending_changes(
+                    code_blocks=result.code_blocks,
+                    validation_passed=validation_with_tests.success,
+                    ai_validation_passed=ai_result.approved if ai_result else True,
                 )
                 
-                logger.warning(
-                    f"Iteration {iteration}: Tests/Runtime failed, returning to Orchestrator. "
-                    f"Test errors: {len(test_errors)}, Runtime errors: {len(runtime_errors)}"
-                )
+                result.pending_changes = self._pending_changes
+                result.diffs = self.vfs.get_all_diffs()
                 
-                continue
-            
-            # === SUCCESS — тесты прошли ===
-            self._notify_stage(
-                "TESTS", 
-                f"✅ Тесты пройдены", 
-                {
-                    "success": True,
-                    "tests_run": validation_with_tests.tests_run,
-                    "tests_passed": validation_with_tests.tests_passed,
-                    "tests_failed": validation_with_tests.tests_failed,
-                    "test_files_found": len(getattr(validation_with_tests, 'test_files_found', [])),
-                    "runtime_files_checked": validation_with_tests.runtime_files_checked,
-                    "runtime_files_passed": validation_with_tests.runtime_files_passed,
-                    "runtime_files_failed": validation_with_tests.runtime_files_failed,
-                    "runtime_files_skipped": runtime_skipped,
+                # === Accumulation from VFS (source of truth) ===
+                self._accumulate_result_from_vfs(
+                    result,
+                    blocks_by_file,
+                    validation_with_tests.success,
+                    ai_result.approved if ai_result else True,
+                )
+                trace_accumulated = True
+                
+                result.success = True
+                result.feedback_iterations = iteration
+                
+                # Build runtime summary for COMPLETE stage
+                runtime_summary_for_complete = {
+                    "checked": validation_with_tests.runtime_files_checked,
+                    "passed": validation_with_tests.runtime_files_passed,
+                    "failed": validation_with_tests.runtime_files_failed,
+                    "skipped": runtime_skipped,
                 }
-            )
-            
-            logger.info(
-                f"Iteration {iteration}: All tests passed "
-                f"(pytest: {validation_with_tests.tests_passed}/{validation_with_tests.tests_run}, "
-                f"runtime: {validation_with_tests.runtime_files_passed}/{validation_with_tests.runtime_files_checked})"
-            )
+                
+                tests_summary_for_complete = {
+                    "run": validation_with_tests.tests_run,
+                    "passed": validation_with_tests.tests_passed,
+                    "failed": validation_with_tests.tests_failed,
+                }
+                
+                self._notify_stage("COMPLETE", f"✅ Готово! {len(self._pending_changes)} файл(ов) к изменению", {
+                    "files": [c.file_path for c in self._pending_changes],
+                    "iterations": iteration,
+                    "duration_ms": (time.time() - start_time) * 1000,
+                    "runtime_summary": runtime_summary_for_complete,
+                    "tests_summary": tests_summary_for_complete,
+                })
+                
+                result.duration_ms = (time.time() - start_time) * 1000
+                vlog.log_complete(result.success, result.duration_ms)
+                
+                return result
             
             # ==============================================================
-            # STEP 7: SUCCESS - PREPARE FOR USER CONFIRMATION
+            # MAX ITERATIONS REACHED (outside while loop)
             # ==============================================================
-            self._update_status(PipelineStatus.AWAITING_CONFIRMATION, "Ready for your review")
-            
-            self._pending_changes = await self._build_pending_changes(
-                code_blocks=result.code_blocks,
-                validation_passed=validation_with_tests.success,
-                ai_validation_passed=ai_result.approved if ai_result else True,
-            )
-            
-            result.pending_changes = self._pending_changes
-            result.diffs = self.vfs.get_all_diffs()
-            result.success = True
-            result.feedback_iterations = iteration
-            
-            # Build runtime summary for COMPLETE stage
-            runtime_summary_for_complete = {
-                "checked": validation_with_tests.runtime_files_checked,
-                "passed": validation_with_tests.runtime_files_passed,
-                "failed": validation_with_tests.runtime_files_failed,
-                "skipped": runtime_skipped,
-            }
-            
-            tests_summary_for_complete = {
-                "run": validation_with_tests.tests_run,
-                "passed": validation_with_tests.tests_passed,
-                "failed": validation_with_tests.tests_failed,
-            }
-            
-            self._notify_stage("COMPLETE", f"✅ Готово! {len(self._pending_changes)} файл(ов) к изменению", {
-                "files": [c.file_path for c in self._pending_changes],
-                "iterations": iteration,
-                "duration_ms": (time.time() - start_time) * 1000,
-                "runtime_summary": runtime_summary_for_complete,
-                "tests_summary": tests_summary_for_complete,
-            })
-            
+            result.status = PipelineStatus.FAILED
+
+            # === LIMIT-RECOVERY HOOK (run_feedback_cycle max iterations) ===
+            # Deterministic: never raises, never calls an LLM.
+            if "get_emergency_manager" not in locals():
+                try:
+                    from app.services.emergency_recovery import get_emergency_manager
+                    _fb_limit_resolution = await get_emergency_manager().handle_limit_reached(
+                        limit_type="iterations",
+                        current_value=self.MAX_FEEDBACK_ITERATIONS,
+                        max_value=self.MAX_FEEDBACK_ITERATIONS,
+                        agent_role="pipeline",
+                        messages=working_history,
+                        vfs=self.vfs,
+                        history=history,
+                        thread_id=self.thread_id,
+                        history_manager=self.history_manager,
+                        project_dir=self.project_dir,
+                    )
+                    if _fb_limit_resolution is not None and getattr(_fb_limit_resolution, "action", "") == "extra_quota":
+                        _fb_extra = getattr(_fb_limit_resolution, "extra_iterations", 0) or 5
+                        self.MAX_FEEDBACK_ITERATIONS += _fb_extra
+                        if self.feedback_loop is not None:
+                            try:
+                                self.feedback_loop.max_orchestrator_revisions = (
+                                    getattr(self.feedback_loop, "max_orchestrator_revisions", 0)
+                                    + _fb_extra
+                                )
+                                self.feedback_loop.max_validator_retries = (
+                                    getattr(self.feedback_loop, "max_validator_retries", 0)
+                                    + _fb_extra
+                                )
+                            except Exception:
+                                pass
+                        return await self.run_feedback_cycle(
+                            user_feedback=user_feedback,
+                            history=working_history,
+                            on_user_decision=on_user_decision,
+                        )
+                    elif _fb_limit_resolution is not None and getattr(_fb_limit_resolution, "action", "") == "end_session":
+                        try:
+                            from app.services.emergency_recovery import save_emergency_snapshot
+                            save_emergency_snapshot(
+                                messages=working_history,
+                                history=history,
+                                vfs=self.vfs,
+                                thread_id=self.thread_id,
+                                history_manager=self.history_manager,
+                                project_dir=self.project_dir,
+                            )
+                        except Exception as _snap_err:
+                            logger.debug(f"run_feedback_cycle end_session snapshot failed: {_snap_err}")
+                        self._clear_vfs_on_terminal_failure()
+                except Exception as _emergency_err:
+                    logger.warning(f"run_feedback_cycle emergency hook failed: {_emergency_err}")
+            result.errors.append(f"Max iterations ({self.MAX_FEEDBACK_ITERATIONS}) reached without success")
             result.duration_ms = (time.time() - start_time) * 1000
-            vlog.log_complete(result.success, result.duration_ms)
+            vlog.log_complete(False, result.duration_ms)
             
             return result
-        
-        # ==============================================================
-        # MAX ITERATIONS REACHED (outside while loop)
-        # ==============================================================
-        result.status = PipelineStatus.FAILED
-        result.errors.append(f"Max iterations ({self.MAX_FEEDBACK_ITERATIONS}) reached without success")
-        result.duration_ms = (time.time() - start_time) * 1000
-        vlog.log_complete(False, result.duration_ms)
-        
-        return result
+        finally:
+            # === Trace finalization: always close the trace at most once ===
+            try:
+                duration_ms = (time.time() - start_time) * 1000
+                
+                if not trace_accumulated:
+                    # Existing staged changes must not vanish from result/TUI on failure
+                    self._accumulate_result_from_vfs(result, blocks_by_file, False, False)
+                
+                # Single-shot error annotation before complete (never overwrite existing)
+                if not result.success:
+                    current_error = getattr(trace.trace, "error_message", "")
+                    if not current_error and result.errors:
+                        trace.set_error("; ".join(str(e) for e in result.errors[:5]))
+                
+                trace.complete(
+                    success=bool(result.success),
+                    status=str(getattr(result.status, "value", result.status)),
+                    duration_ms=duration_ms,
+                )
+            except Exception as _trace_cleanup_err:
+                logger.warning(f"run_feedback_cycle: trace cleanup failed: {_trace_cleanup_err}")
 
 
     async def _request_instruction_fix(
@@ -3689,6 +4132,43 @@ Remember: You can override the validator if you believe the critique is incorrec
         self._pending_changes = []
         self._update_status(PipelineStatus.CANCELLED, "Changes discarded")
         logger.info("Pending changes discarded")
+
+    def _clear_vfs_on_terminal_failure(self) -> None:
+        """Best-effort discard of the staged VFS tree on terminal failure.
+
+        Clears ``self.vfs.discard_all()`` and empties ``self._pending_changes``
+        then logs the action. Never raises into the caller.
+
+        Critical constraints:
+        - MUST NOT call ``self.vfs.reset_version_history()`` (version
+          history is a separate contract verified by
+          ``tests/test_session_file_versions.py``).
+        - MUST NOT delete snapshot files.
+        - MUST NOT clear or mutate ``working_history``, ``history``,
+          ``self._pending_user_request``, ``self._pending_orchestrator_instruction``,
+          ``self.thread_id``, ``self.history_manager`` or ``self.current_session_id``.
+
+        Context/messages survive because they are persisted earlier by
+        ``save_emergency_snapshot()`` (inside ``handle_exception``) and by
+        ``HistoryManager``.
+        """
+        try:
+            try:
+                self.vfs.discard_all()
+            except Exception as discard_err:
+                logger.warning(
+                    f"_clear_vfs_on_terminal_failure: vfs.discard_all failed: {discard_err}"
+                )
+            try:
+                self._pending_changes = []
+            except Exception:
+                pass
+            logger.info(
+                "_clear_vfs_on_terminal_failure: VFS staged tree discarded and "
+                "pending changes cleared"
+            )
+        except Exception as exc:
+            logger.warning(f"_clear_vfs_on_terminal_failure failed: {exc}")
 
     async def run_tester(
             self,
@@ -4532,6 +5012,8 @@ Remember: You can override the validator if you believe the critique is incorrec
                 insert_after=err_item.get("insert_after"),
                 insert_before=err_item.get("insert_before"),
                 replace_pattern=err_item.get("replace_pattern"),
+
+                replace_pattern_line=err_item.get("replace_pattern_line"),
                 replace_pattern_line_end=err_item.get("replace_pattern_line_end"),
                 full_code=err_item.get("full_code"),
                 ai_fixed_code=err_item.get("ai_fixed_code"),
@@ -4598,30 +5080,48 @@ Remember: You can override the validator if you believe the critique is incorrec
             insertion_line = None
             content_lines = existing_content.splitlines()
             is_python = language.lower() == 'python'
-            
-            if block.insert_after is not None:
-                for i, line in enumerate(content_lines):
-                    if block.insert_after in line: insertion_line = i + 1; break
-            elif block.insert_before is not None:
-                for i, line in enumerate(content_lines):
-                    if block.insert_before in line: insertion_line = i; break
-            elif getattr(block, 'replace_pattern', None) is not None:
-                if is_python:
-                    for i, line in enumerate(content_lines):
-                        if block.replace_pattern in line: insertion_line = i; break
+
+            # FIRST: valid existing line hint (replace_pattern_line, honoring range)
+            _hint_start = getattr(block, 'replace_pattern_line', None)
+            _hint_end = getattr(block, 'replace_pattern_line_end', None)
+            if _hint_start is not None and isinstance(_hint_start, int) and 1 <= _hint_start <= len(content_lines):
+                if (_hint_end is not None and isinstance(_hint_end, int)
+                        and _hint_end >= _hint_start and _hint_end <= len(content_lines)):
+                    insertion_line = _hint_end - 1
                 else:
+                    insertion_line = _hint_start - 1
+
+            # Fallback: textual search (FIRST NON-EMPTY pattern line only)
+            if insertion_line is None:
+                if block.insert_after is not None:
+                    first_line = next((l.strip() for l in block.insert_after.splitlines() if l.strip()), None)
+                    if first_line:
+                        for i, line in enumerate(content_lines):
+                            if first_line in line:
+                                insertion_line = i + 1
+                                break
+                elif block.insert_before is not None:
+                    first_line = next((l.strip() for l in block.insert_before.splitlines() if l.strip()), None)
+                    if first_line:
+                        for i, line in enumerate(content_lines):
+                            if first_line in line:
+                                insertion_line = i
+                                break
+                elif getattr(block, 'replace_pattern', None) is not None:
                     first_line = next((l.strip() for l in block.replace_pattern.splitlines() if l.strip()), None)
                     if first_line:
                         for i, line in enumerate(content_lines):
-                            if first_line in line: insertion_line = i; break
-            elif getattr(block, 'code', None) is not None:
-                if is_python:
-                    pass
-                else:
-                    first_line = next((l.strip() for l in block.code.splitlines() if l.strip()), None)
-                    if first_line:
-                        for i, line in enumerate(content_lines):
-                            if first_line in line: insertion_line = i; break
+                            if first_line in line:
+                                insertion_line = i
+                                break
+                elif getattr(block, 'code', None) is not None:
+                    if not is_python:
+                        first_line = next((l.strip() for l in block.code.splitlines() if l.strip()), None)
+                        if first_line:
+                            for i, line in enumerate(content_lines):
+                                if first_line in line:
+                                    insertion_line = i
+                                    break
 
             # ----------------------------------------------------------------
             # CONTEXT BUILDING: non-Python gets broken_content-based context
@@ -6638,6 +7138,97 @@ Please analyze the errors and provide a revised instruction.""",
         
         logger.info(f"_build_pending_changes: Built {len(pending)} pending changes")
         return pending
+
+    def _accumulate_result_from_vfs(
+        self,
+        result: PipelineResult,
+        blocks_by_file: Dict[str, ParsedCodeBlock],
+        validation_passed: bool,
+        ai_validation_passed: bool,
+    ) -> None:
+        """
+        Accumulate the final set of pending changes from VFS state.
+
+        VFS is the source of truth, NOT the most recent generation. Every
+        staged file in VFS — including files staged in previous iterations or
+        reworks — is collected into the pipeline result, so the user sees the
+        full set of changes without losing anything from earlier iterations.
+
+        The representative code block is taken from ``blocks_by_file`` when
+        available; for files staged without a known representative block a
+        minimal ``ParsedCodeBlock`` is synthesized for UI/history purposes —
+        it is NEVER re-submitted to FileModifier.
+
+        Staged deletions are surfaced with an empty resulting content.
+
+        Any failure inside this method is caught and logged — it never breaks
+        the pipeline result.
+        """
+        try:
+            staged_files = self.vfs.get_staged_files()
+            pending: List[PendingChange] = []
+
+            for path in staged_files:
+                change = self.vfs.get_change(path)
+                if change is None:
+                    continue
+                if not change.has_changes:
+                    continue
+
+                # Representative code block: prefer the latest known generation
+                rep_block = blocks_by_file.get(path)
+                if rep_block is None:
+                    try:
+                        mode_value = (
+                            change.change_type.value.upper()
+                            if hasattr(change.change_type, "value")
+                            else str(change.change_type).upper()
+                        )
+                    except Exception:
+                        mode_value = "REPLACE_FILE"
+                    new_code = change.new_content if change.new_content is not None else ""
+                    rep_block = ParsedCodeBlock(
+                        file_path=path,
+                        mode=mode_value,
+                        code=new_code,
+                    )
+
+                # Build ModifyResult directly from VFS state
+                if change.is_deletion:
+                    modify_result = ModifyResult(
+                        success=True,
+                        new_content="",
+                        message="Accumulated from VFS (staged deletion)",
+                        changes_made=[f"Staged deletion of {path}"],
+                    )
+                else:
+                    new_content = change.new_content if change.new_content is not None else ""
+                    modify_result = ModifyResult(
+                        success=True,
+                        new_content=new_content,
+                        message="Accumulated from VFS (staged)",
+                        changes_made=[f"Staged file content for {path}"],
+                    )
+
+                pending.append(PendingChange(
+                    file_path=path,
+                    code_block=rep_block,
+                    modify_result=modify_result,
+                    validation_passed=validation_passed,
+                    ai_validation_passed=ai_validation_passed,
+                ))
+
+            result.code_blocks = [p.code_block for p in pending]
+            result.pending_changes = pending
+            self._pending_changes = pending
+            result.diffs = self.vfs.get_all_diffs()
+
+            logger.info(
+                f"_accumulate_result_from_vfs: accumulated {len(pending)} changes "
+                f"from VFS (staged={len(staged_files)})"
+            )
+        except Exception as e:
+            logger.warning(f"_accumulate_result_from_vfs failed: {e}", exc_info=True)
     
     
     

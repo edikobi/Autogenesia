@@ -364,7 +364,7 @@ async def analyze_query(
                                     messages=messages,
                                     model=model,
                                     tool_executor=tool_executor,
-                                    max_tool_calls=50,
+                                    max_tool_calls=100,
                                     on_tool_call=on_tool_call,
                                     preferred_provider=model_provider,
                                     on_token=on_token,
@@ -470,6 +470,8 @@ async def _run_advanced_prefilter(
         Tuple[str, int]: (финальный ответ, количество вызовов инструментов)
     """
     tool_calls_count = 0
+    active_model = model
+    active_provider = preferred_provider
     
     try:
         # Получить доступные инструменты (исключить run_project_tests)
@@ -477,25 +479,60 @@ async def _run_advanced_prefilter(
             tool for tool in ORCHESTRATOR_TOOLS
             if tool.get("function", {}).get("name") != "run_project_tests"
         ]
+
+        # MCP tools: appended after project tools, kept fully separate
+        try:
+            from app.mcp.definitions import get_mcp_tool_definitions
+            available_tools.extend(get_mcp_tool_definitions(role="orchestrator"))
+        except Exception:
+            pass
         
         while tool_calls_count < max_tool_calls:
             # Вызвать LLM с инструментами
-            response = await call_llm_with_tools(
-                            model=model,
-                            messages=messages,
-                            tools=available_tools,
-                            temperature=0,
-                            max_tokens=55000,
-                            preferred_provider=preferred_provider,
-                            on_delta=on_token,
-                        )
+            try:
+                response = await call_llm_with_tools(
+                                model=active_model,
+                                messages=messages,
+                                tools=available_tools,
+                                temperature=0,
+                                max_tokens=55000,
+                                preferred_provider=active_provider,
+                                on_delta=on_token,
+                            )
+            except Exception as llm_exc:
+                try:
+                    from app.services.emergency_recovery import (
+                        get_emergency_manager,
+                        get_inflight_model_swap,
+                    )
+                    resolution = await get_emergency_manager().handle_exception(
+                        llm_exc,
+                        messages=messages,
+                        agent_role="pre_filter",
+                    )
+                    action = getattr(resolution, "action", "propagate")
+                    if action == "continue":
+                        _pf_swap = get_inflight_model_swap(resolution)
+                        if _pf_swap is not None:
+                            active_model = _pf_swap["model"] or active_model
+                            active_provider = _pf_swap["provider"]
+                            logger.info(
+                                f"[PRE-FILTER] in-flight model swap → "
+                                f"model={active_model}, provider={active_provider}"
+                            )
+                        continue
+                    if action == "end_session":
+                        return "", tool_calls_count, active_model
+                except Exception as emergency_err:
+                    logger.warning(f"prefilter emergency hook failed: {emergency_err}")
+                raise
             
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
             
             # Если нет вызовов инструментов - вернуть ответ
             if not tool_calls:
-                return content, tool_calls_count, model
+                return content, tool_calls_count, active_model
             
             # Собираем assistant tool_calls и результаты для правильного формата сообщений
             assistant_tool_calls = []
@@ -558,16 +595,42 @@ async def _run_advanced_prefilter(
             "content": "Please provide your final assessment now based on all the information you have gathered. Use the required output format with CLARIFIED_QUERY, POSSIBLE_CAUSE, RECOMMENDED_ACTIONS, FILES_TO_CHECK, and ADDITIONAL_CONTEXT sections.",
         })
         
-        final_response = await call_llm(
-                    model=model,
+        # === LIMIT-RECOVERY HOOK (tool-call exhaustion) ===
+        if tool_calls_count >= max_tool_calls:
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                resolution = await get_emergency_manager().handle_limit_reached(
+                    limit_type="tool_calls",
+                    current_value=tool_calls_count,
+                    max_value=max_tool_calls,
+                    agent_role="pre_filter",
                     messages=messages,
-                    temperature=0,
-                    max_tokens=55000,
-                    preferred_provider=preferred_provider,
-                    on_delta=on_token,
+                    vfs=getattr(tool_executor, "virtual_fs", None),
                 )
-        
-        return final_response, tool_calls_count, model
+                _pf_limit_action = getattr(resolution, "action", "")
+                if _pf_limit_action == "end_session":
+                    return "", tool_calls_count, active_model
+                if _pf_limit_action == "extra_quota":
+                    _pf_extra = getattr(resolution, "extra_tool_calls", 0) or 10
+                    max_tool_calls += _pf_extra
+                    logger.info(
+                        f"[PRE-FILTER] extra quota granted (+{_pf_extra} tool calls, "
+                        f"new bound={max_tool_calls})"
+                    )
+            except Exception as _pf_limit_err:
+                logger.warning(f"pre-filter limit hook failed: {_pf_limit_err}")
+        final_model = active_model
+        final_provider = active_provider
+        final_response = await call_llm(
+            model=final_model,
+            messages=messages,
+            temperature=0,
+            max_tokens=55000,
+            preferred_provider=final_provider,
+            on_delta=on_token,
+        )
+
+        return final_response, tool_calls_count, active_model
     
     except Exception as e:
         error_type = type(e).__name__
@@ -577,7 +640,7 @@ async def _run_advanced_prefilter(
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: выводим ошибку в консоль
         print(f"\n⚠️  [PRE-FILTER ADVANCED ERROR] {error_type}: {error_msg}")
         
-        return "", tool_calls_count, model
+        return "", tool_calls_count, active_model
 
 
 def extract_plan(response: str) -> str:
@@ -619,6 +682,7 @@ async def run_planning_loop(
     """
     tool_calls_count = 0
     current_model = model
+    active_provider = preferred_provider
     retry_count = 0
 
     try:
@@ -627,16 +691,51 @@ async def run_planning_loop(
             if tool.get("function", {}).get("name") != "run_project_tests"
         ]
 
+        # MCP tools: appended after project tools, kept fully separate
+        try:
+            from app.mcp.definitions import get_mcp_tool_definitions
+            available_tools.extend(get_mcp_tool_definitions(role="orchestrator"))
+        except Exception:
+            pass
+
         while tool_calls_count < max_tool_calls:
-            response = await call_llm_with_tools(
-                            model=current_model,
-                            messages=messages,
-                            tools=available_tools,
-                            temperature=0,
-                            max_tokens=55000,
-                            preferred_provider=preferred_provider,
-                            on_delta=on_token,
-                        )
+            try:
+                response = await call_llm_with_tools(
+                                model=current_model,
+                                messages=messages,
+                                tools=available_tools,
+                                temperature=0,
+                                max_tokens=55000,
+                                preferred_provider=active_provider,
+                                on_delta=on_token,
+                            )
+            except Exception as llm_exc:
+                try:
+                    from app.services.emergency_recovery import (
+                        get_emergency_manager,
+                        get_inflight_model_swap,
+                    )
+                    resolution = await get_emergency_manager().handle_exception(
+                        llm_exc,
+                        messages=messages,
+                        agent_role="pre_filter",
+                    )
+                    action = getattr(resolution, "action", "propagate")
+                    if action == "continue":
+                        _planning_swap = get_inflight_model_swap(resolution)
+                        if _planning_swap is not None:
+                            current_model = _planning_swap["model"] or current_model
+                            active_provider = _planning_swap["provider"]
+                            logger.info(
+                                f"[PLANNING] in-flight model swap → "
+                                f"model={current_model}, provider={active_provider}"
+                            )
+                        continue
+                    if action == "end_session":
+                        return "", tool_calls_count, current_model
+                except Exception as emergency_err:
+                    logger.warning(f"planning emergency hook failed: {emergency_err}")
+                raise
 
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
@@ -703,16 +802,41 @@ async def run_planning_loop(
             "content": "Please provide your final implementation plan now based on the gathered information. Enclose it within ###Plan##### markers.",
         })
 
-        final_response = await call_llm(
-                    model=current_model,
+        # === LIMIT-RECOVERY HOOK (tool-call exhaustion) ===
+        if tool_calls_count >= max_tool_calls:
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+                resolution = await get_emergency_manager().handle_limit_reached(
+                    limit_type="tool_calls",
+                    current_value=tool_calls_count,
+                    max_value=max_tool_calls,
+                    agent_role="pre_filter",
                     messages=messages,
-                    temperature=0,
-                    max_tokens=55000,
-                    preferred_provider=preferred_provider,
-                    on_delta=on_token,
+                    vfs=getattr(tool_executor, "virtual_fs", None),
                 )
+                _planning_limit_action = getattr(resolution, "action", "")
+                if _planning_limit_action == "end_session":
+                    return "", tool_calls_count, current_model
+                if _planning_limit_action == "extra_quota":
+                    _planning_extra = getattr(resolution, "extra_tool_calls", 0) or 10
+                    max_tool_calls += _planning_extra
+                    logger.info(
+                        f"[PLANNING] extra quota granted (+{_planning_extra} tool calls, "
+                        f"new bound={max_tool_calls})"
+                    )
+            except Exception as _planning_limit_err:
+                logger.warning(f"planning limit hook failed: {_planning_limit_err}")
+        final_response = await call_llm(
+            model=current_model,
+            messages=messages,
+            temperature=0,
+            max_tokens=55000,
+            preferred_provider=active_provider,
+            on_delta=on_token,
+        )
 
         return (final_response, tool_calls_count, current_model)
+        # return (final_response, tool_calls_count, current_model)
 
     except Exception as e:
         error_type = type(e).__name__

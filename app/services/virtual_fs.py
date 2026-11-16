@@ -26,6 +26,7 @@ from typing import Dict, Set, Optional, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 from app.services.language_adapter import AdapterManager
+from app.services.session_file_versions import SessionFileVersionTracker
 
 
 if TYPE_CHECKING:
@@ -232,6 +233,9 @@ class VirtualFileSystem:
         
         # Cache for Python files list
         self._python_files_cache: Optional[List[str]] = None
+
+        # Intra-session version tracker (belongs to this VFS instance, i.e. session)
+        self.version_tracker = SessionFileVersionTracker()
         
         logger.info(f"VirtualFileSystem initialized: {self.project_root}")
     
@@ -309,6 +313,18 @@ class VirtualFileSystem:
         
         self._pending_changes[rel_path] = change
         
+        try:
+            self.version_tracker.record_staging(
+                rel_path,
+                original_content,
+                new_content,
+                change_type.value if hasattr(change_type, "value") else str(change_type),
+                "stage_change",
+            )
+        except Exception as _vt_err:
+            logger.debug(f"version_tracker.record_staging failed for {rel_path}: {_vt_err}")
+        
+        self.invalidate_cache()        
         self.invalidate_cache()        
         
         # Invalidate caches
@@ -376,6 +392,19 @@ class VirtualFileSystem:
         
         logger.info(f"Discarded all changes ({count} files)")
         return count
+
+    def reset_version_history(self) -> None:
+        """Clear the intra-session version history.
+        
+        Called explicitly at the start of a new ``process_request``. 
+        ``discard_all`` intentionally does NOT call this method: history 
+        remains available even after staged changes are discarded.
+        """
+        try:
+            self.version_tracker.reset()
+            logger.info("Version history cleared for new session")
+        except Exception as e:
+            logger.warning(f"reset_version_history failed: {e}")
     
     def discard_file_change(self, file_path: str) -> bool:
         """
@@ -800,6 +829,18 @@ class VirtualFileSystem:
                 new_content=new_content,
                 change_type=existing.change_type,  # Preserve!
             )
+            
+            try:
+                self.version_tracker.record_staging(
+                    rel_path,
+                    existing.original_content,
+                    new_content,
+                    existing.change_type.value if hasattr(existing.change_type, "value") else str(existing.change_type),
+                    "update_staged_file",
+                )
+            except Exception as _vt_err:
+                logger.debug(f"version_tracker.record_staging failed for {rel_path}: {_vt_err}")
+            
             self._affected_cache = None
             logger.info(f"Updated staged file: {rel_path}")
             return True
@@ -1116,6 +1157,7 @@ class VirtualFileSystem:
                 return True
             else:
                 logger.error(f"Failed to create venv: {result.stderr}")
+                logger.warning("VENV_ACCESS_DENIED: %s | stderr=%s", venv_path, (result.stderr or "").strip()[:500])
                 return False
                 
         except subprocess.CalledProcessError as e:
@@ -1123,6 +1165,7 @@ class VirtualFileSystem:
             return False
         except Exception as e:
             logger.error(f"Exception creating venv: {e}")
+            logger.warning("VENV_ACCESS_DENIED: %s | %s", venv_path, type(e).__name__)
             return False
 
     def materialize_to_directory(self, target_dir: str) -> List[str]:

@@ -7,17 +7,20 @@ Delegates all read-only orchestrator tools to the base ToolExecutor.
 import difflib
 import logging
 import os
-import platform
+# import platform  # (removed: unused import, F401)
 import shutil
 import subprocess
-import tempfile
+from app.tools.environment_info import collect_environment_info, format_environment_xml
+from app.tools.threat_scan import threat_scan_tool
+# import tempfile  # (removed: unused import, F401)
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from app.utils.executable_resolver import resolve_executable
 import sys
 
 from app.tools.tool_executor import ToolExecutor
+from app.tools.ask_user import ask_user_tool
 from app.services.virtual_fs import VirtualFileSystem
 from app.services.java_adapter import JavaAdapter
 from app.services.go_adapter import GoAdapter
@@ -81,25 +84,41 @@ class TesterToolExecutor:
         Returns:
             Tool execution result as a string.
         """
-        if tool_name == "install_dependency":
-            return self._format_error(
-                "Tool 'install_dependency' is not available for Tester agent. "
-                "The Tester cannot install packages."
-            )
-        elif tool_name == "run_ruff":
-            return self._execute_run_ruff(arguments)
-        elif tool_name == "check_environment":
-            return self._execute_check_environment(arguments)
-        elif tool_name == "compile_code":
-            return self._execute_compile_code(arguments)
-        elif tool_name == "run_code":
-            return self._execute_run_code(arguments)
-        elif tool_name == "git_diff_vfs_disk":
-            return self._execute_git_diff(arguments)
-        elif tool_name == "write_test_file":
-            return self._execute_write_test_file(arguments)
-        else:
-            return self._base_executor.execute(tool_name, arguments)
+        try:
+            if tool_name == "install_dependency":
+                return self._format_error(
+                    "Tool 'install_dependency' is not available for Tester agent. "
+                    "The Tester cannot install packages."
+                )
+            elif tool_name.startswith("mcp__"):
+                from app.mcp.definitions import dispatch_mcp_tool
+                return dispatch_mcp_tool(tool_name, arguments, role="tester")
+            elif tool_name == "ask_user":
+                return ask_user_tool(
+                    question=arguments.get("question", ""),
+                    options=arguments.get("options"),
+                    context=arguments.get("context"),
+                )
+            elif tool_name == "run_ruff":
+                return self._execute_run_ruff(arguments)
+            elif tool_name == "check_environment":
+                return self._execute_check_environment(arguments)
+            elif tool_name == "compile_code":
+                return self._execute_compile_code(arguments)
+            elif tool_name == "run_code":
+                return self._execute_run_code(arguments)
+            elif tool_name == "git_diff_vfs_disk":
+                return self._execute_git_diff(arguments)
+            elif tool_name == "write_test_file":
+                return self._execute_write_test_file(arguments)
+            elif tool_name == "scan_file_threats":
+                return self._execute_scan_file_threats(arguments)
+            else:
+                return self._base_executor.execute(tool_name, arguments)
+        except Exception as e:
+            logger.error(f"Tester tool execution error ({tool_name}): {e}", exc_info=True)
+            return self._format_error(f"Tool execution failed: {e}")
+
 
     def _execute_run_ruff(self, arguments: Dict) -> str:
             """
@@ -178,7 +197,10 @@ class TesterToolExecutor:
 
     def _execute_check_environment(self, arguments: Dict) -> str:
         """
-        Collect and return environment information.
+        Collect and return environment information via the shared module.
+
+        The shared formatter also emits legacy <java_version>, <go_version>,
+        <node_version> and <tsc_version> tags, so no information is lost.
 
         Args:
             arguments: Unused.
@@ -186,65 +208,45 @@ class TesterToolExecutor:
         Returns:
             XML string with environment details.
         """
-        info_parts = []
-        info_parts.append(f"<os_system>{platform.system()}</os_system>")
-        info_parts.append(f"<os_release>{platform.release()}</os_release>")
-        info_parts.append(f"<os_machine>{platform.machine()}</os_machine>")
-        info_parts.append(f"<python_version>{platform.python_version()}</python_version>")
-        info_parts.append(f"<python_path>{self._project_python_path}</python_path>")
-
-        # Check tool versions
-        tool_checks = [
-            ("java", ["java", "-version"], True),   # java outputs to stderr
-            ("go", ["go", "--version"], False),
-            ("node", ["node", "--version"], False),
-            ("tsc", ["tsc", "--version"], False),
-        ]
-
-        for tool_name, cmd, use_stderr in tool_checks:
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, timeout=10, text=True,
-                    encoding='utf-8', errors='replace',
-                )
-                version_output = result.stderr.strip() if use_stderr else result.stdout.strip()
-                info_parts.append(f"<{tool_name}_version>{version_output or 'unknown'}</{tool_name}_version>")
-            except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-                info_parts.append(f"<{tool_name}_version>not found</{tool_name}_version>")
-
-# Check local node_modules/.bin
-        workspace_nm = Path(self._workspace_dir) / 'node_modules' / '.bin'
-        local_tools = []
-        if workspace_nm.exists():
-            for tool in ('tsc', 'ts-node', 'eslint', 'prettier'):
-                if (workspace_nm / tool).exists() or (workspace_nm / f'{tool}.cmd').exists():
-                    local_tools.append(tool)
-        if local_tools:
-            info_parts.append(f"<local_node_tools>{','.join(local_tools)}</local_node_tools>")
-        # System resources
         try:
-            import psutil
-            cpu_count = psutil.cpu_count()
-            ram_total = psutil.virtual_memory().total
-            disk_free = psutil.disk_usage(self._project_dir).free
-            info_parts.append(f"<cpu_count>{cpu_count}</cpu_count>")
-            info_parts.append(f"<ram_total_bytes>{ram_total}</ram_total_bytes>")
-            info_parts.append(f"<disk_free_bytes>{disk_free}</disk_free_bytes>")
-        except ImportError:
-            cpu_count = os.cpu_count()
-            info_parts.append(f"<cpu_count>{cpu_count}</cpu_count>")
-            info_parts.append("<ram_total_bytes>psutil not installed</ram_total_bytes>")
-            try:
-                disk_free = shutil.disk_usage(self._project_dir).free
-                info_parts.append(f"<disk_free_bytes>{disk_free}</disk_free_bytes>")
-            except Exception:
-                info_parts.append("<disk_free_bytes>unknown</disk_free_bytes>")
-        except Exception:
-            info_parts.append("<cpu_count>unknown</cpu_count>")
-            info_parts.append("<ram_total_bytes>unknown</ram_total_bytes>")
-            info_parts.append("<disk_free_bytes>unknown</disk_free_bytes>")
+            info = collect_environment_info(
+                project_dir=self._project_dir,
+                project_python_path=self._project_python_path,
+            )
+            return format_environment_xml(info)
+        except Exception as e:
+            logger.error(f"check_environment failed: {e}")
+            return self._format_error(f"check_environment failed: {e}")
 
-        return f"<environment>\n" + "\n".join(info_parts) + "\n</environment>"
+    def _execute_scan_file_threats(self, arguments: Dict) -> str:
+        """
+        Scan a file for suspicious/malicious patterns via the local offline scanner.
+
+        Args:
+            arguments: Dict containing file_path, optional severity/max_findings/
+                include_context.
+
+        Returns:
+            Canonical <threat_scan> XML string. Never raises.
+        """
+        try:
+            file_path = arguments.get("file_path")
+            if not file_path:
+                return self._format_error("file_path is required")
+
+            return threat_scan_tool(
+                file_path=file_path,
+                project_dir=self._project_dir,
+                virtual_fs=self._vfs,
+                python_path=self._project_python_path,
+                role="tester",
+                severity=arguments.get("severity", "ERROR"),
+                max_findings=arguments.get("max_findings", 20),
+                include_context=arguments.get("include_context", False),
+            )
+        except Exception as e:
+            logger.error(f"scan_file_threats failed: {e}")
+            return self._format_error(f"scan_file_threats failed: {e}")
 
     def _execute_compile_code(self, arguments: Dict) -> str:
                 """

@@ -14,25 +14,24 @@ import json
 import logging
 import re
 import shutil
-import asyncio
-import threading
+import os
+# (removed, unused)
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Set, Tuple, Any
-import ast
+# import ast  # unused at module level (re-imported locally inside scan_and_install_all_dependencies)
 import xml.etree.ElementTree as ET
 from enum import Enum
 from importlib.metadata import packages_distributions
-from app.services.language_adapter import AdapterManager
+# from app.services.language_adapter import AdapterManager  # unused — removed to satisfy ruff F401
 from app.utils.executable_resolver import resolve_executable
 
 
 logger = logging.getLogger(__name__)
 
 # Минимальная допустимая версия pip в venv.
-# pip < 21.3 не поддерживает PEP 660 и новые метаданные PyPI,
-# что вызывает "Max retries exceeded" при установке современных пакетов.
-# Минимальная допустимая версия pip в venv.
+# Требуется pip >= 26.0: поддержка PEP 660 и актуальных метаданных PyPI.
+# Более старые версии вызывают "Max retries exceeded" при установке пакетов.
 MIN_PIP_VERSION = (26, 0)
 
 # ============================================================================
@@ -355,13 +354,29 @@ class DependencyManager:
         
         # Update pip and python paths
         self._update_paths()
-        
-        # Если venv уже существовал (не был только что создан через ensure_project_venv),
-        # проверяем версию pip и обновляем если устарел.
-        # ensure_project_venv уже вызывает _upgrade_pip_if_needed для новых venv.
+
+        # Track whether venv existed before this __init__ (kept for compatibility)
         self._venv_existed_before_init = (
             auto_create_venv and self._venv_path is not None and not venv_was_just_created
         )
+
+        # Inline project-local venv check (no new helper): when a pre-existing
+        # venv lives INSIDE project_root and auto_create_venv is on, upgrade pip
+        # synchronously BEFORE ensure_language_environments()/installs. A venv was
+        # just created this init -> ensure_project_venv() already upgraded pip, so
+        # we skip a second upgrade. An external VIRTUAL_ENV is never force-upgraded.
+        if self._venv_existed_before_init and self._venv_path is not None:
+            try:
+                _root = Path(self.project_root).resolve()
+                _venv = Path(self._venv_path).resolve()
+                try:
+                    _is_local = (_venv == _root) or (_root in _venv.parents)
+                except Exception:
+                    _is_local = False
+                if _is_local:
+                    self._upgrade_pip_if_needed()
+            except Exception as e:
+                logger.warning(f"[DEPS] pip upgrade on existing venv failed (non-fatal): {e}")
         
         # Initialize environments for other languages (JS/TS, Go, Java)
         if auto_create_venv:
@@ -491,115 +506,9 @@ class DependencyManager:
         
         return sys.executable
 
-    def _upgrade_pip_if_needed(self) -> bool:
-        """Checks the pip version inside the current venv and upgrades it if below MIN_PIP_VERSION.
-        
-        Returns True if pip is already up to date or was successfully upgraded.
-        Returns False if check/upgrade failed (non-fatal).
-        """
-        # Only run if a venv is active
-        if self._venv_path is None:
-            return True
-        
-        try:
-            # Step 1: Get current pip version
-            result = subprocess.run(
-                [self._python_path, "-m", "pip", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if result.returncode != 0:
-                logger.warning(f"[DEPS] Could not check pip version: {result.stderr}")
-                return False
-            
-            # Step 2: Parse version string, e.g. "pip 21.1.3 from ..."
-            try:
-                version_str = result.stdout.split()[1]  # "21.1.3"
-                parts = version_str.split(".")
-                current_version = (int(parts[0]), int(parts[1]))
-            except (ValueError, IndexError) as e:
-                logger.warning(f"[DEPS] Could not parse pip version from '{result.stdout}': {e}")
-                return False
-            
-            # Step 3: Compare with minimum required version
-            if current_version >= MIN_PIP_VERSION:
-                logger.debug(
-                    f"[DEPS] pip {version_str} is up to date "
-                    f"(>= {MIN_PIP_VERSION[0]}.{MIN_PIP_VERSION[1]})"
-                )
-                return True
-            
-            # Step 4: Upgrade pip (with SSL retry)
-            logger.info(
-                f"[DEPS] pip version {version_str} is below minimum "
-                f"{MIN_PIP_VERSION[0]}.{MIN_PIP_VERSION[1]}, upgrading..."
-            )
+    ...
 
-            returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
-                pip_args=["install", "--upgrade", "pip"],
-                timeout=120,
-            )
-
-            if returncode == 0:
-                logger.info("[DEPS] pip upgraded successfully")
-                if ssl_applied:
-                    logger.info("[DEPS] SSL workaround was applied during pip upgrade")
-                self._installed_cache = None
-                return True
-            else:
-                logger.warning(
-                    f"[DEPS] pip upgrade failed: {stderr[-300:]}"
-                )
-                return False        
-        
-        except subprocess.TimeoutExpired:
-            logger.warning("[DEPS] pip version check/upgrade timed out")
-            return False
-        except Exception as e:
-            logger.warning(f"[DEPS] Error during pip upgrade check: {e}")
-            return False
-
-    def _force_upgrade_pip(self) -> bool:
-        """Unconditionally upgrades pip to the latest version.
-        
-        Used for newly created venvs where bundled pip may be outdated
-        but still above MIN_PIP_VERSION. Returns True on success, False
-        on failure (non-fatal — venv is still usable).
-        """
-        if self._venv_path is None:
-            return True
-        
-        try:
-            logger.info("[DEPS] Upgrading pip to latest version in new venv...")
-            upgrade_result = subprocess.run(
-                [self._python_path, "-m", "pip", "install", "--upgrade", "pip"],
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            if upgrade_result.returncode == 0:
-                logger.info(
-                    f"[DEPS] pip upgraded successfully: "
-                    f"{upgrade_result.stdout.strip()[-100:]}"
-                )
-                self._installed_cache = None
-                return True
-            else:
-                logger.warning(
-                    f"[DEPS] pip upgrade failed (non-fatal): "
-                    f"{upgrade_result.stderr[-200:]}"
-                )
-                return False
-        
-        except subprocess.TimeoutExpired:
-            logger.warning("[DEPS] pip upgrade timed out (non-fatal)")
-            return False
-        except Exception as e:
-            logger.warning(f"[DEPS] pip upgrade error (non-fatal): {e}")
-            return False
+    ...
 
     def upgrade_pip_in_background(self) -> None:
         """Runs pip upgrade check in a background thread.
@@ -624,65 +533,82 @@ class DependencyManager:
 
     def _upgrade_pip_if_needed(self) -> bool:
         """Checks pip version in current venv and upgrades if below MIN_PIP_VERSION.
-        
+
         Returns True if pip is already up to date or was successfully upgraded.
         Returns False on failure (non-fatal — venv is still usable).
         """
         if self._venv_path is None:
             return True
-        
-        try:
-            # Step 1: Get current pip version
+
+        def _get_pip_version() -> Optional[Tuple[int, int]]:
+            """Версия pip в виде (major, minor) или None при ошибке/отсутствии."""
             result = subprocess.run(
                 [self._python_path, "-m", "pip", "--version"],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
-            
             if result.returncode != 0:
-                logger.warning(f"[DEPS] Could not check pip version: {result.stderr}")
-                return False
-            
-            # Step 2: Parse version string, e.g. "pip 21.1.3 from ..."
-            try:
-                version_str = result.stdout.split()[1]  # e.g. "21.1.3"
-                parts = version_str.split(".")
-                current_version = (int(parts[0]), int(parts[1]))
-            except (ValueError, IndexError) as e:
-                logger.warning(f"[DEPS] Could not parse pip version from '{result.stdout}': {e}")
-                return False
-            
-            # Step 3: Compare with minimum required version
-            if current_version >= MIN_PIP_VERSION:
+                return None
+            m = re.search(r"pip\s+(\d+)\.(\d+)", result.stdout or "")
+            if not m:
+                return None
+            return (int(m.group(1)), int(m.group(2)))
+
+        try:
+            current = _get_pip_version()
+            if current is None:
+                # pip отсутствует/сломан — bootstrap через ensurepip, затем повторная проверка.
+                logger.info("[DEPS] pip not found in venv, bootstrapping via ensurepip...")
+                ensure_result = subprocess.run(
+                    [self._python_path, "-m", "ensurepip", "--upgrade"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if ensure_result.returncode == 0:
+                    current = _get_pip_version()
+                if current is None:
+                    stderr_tail = (ensure_result.stderr or "")[-300:]
+                    logger.warning(
+                        f"[DEPS] Could not bootstrap pip via ensurepip: {stderr_tail}"
+                    )
+                    return False
+
+            if current >= MIN_PIP_VERSION:
                 logger.debug(
-                    f"[DEPS] pip {version_str} is up to date "
+                    f"[DEPS] pip {current[0]}.{current[1]} is up to date "
                     f"(>= {MIN_PIP_VERSION[0]}.{MIN_PIP_VERSION[1]})"
                 )
                 return True
-            
-            # Step 4: Upgrade pip
+
             logger.info(
-                f"[DEPS] pip version {version_str} is below minimum "
+                f"[DEPS] pip version {current[0]}.{current[1]} is below minimum "
                 f"{MIN_PIP_VERSION[0]}.{MIN_PIP_VERSION[1]}, upgrading..."
             )
-            upgrade_result = subprocess.run(
-                [self._python_path, "-m", "pip", "install", "--upgrade", "pip"],
-                capture_output=True,
-                text=True,
-                timeout=120
+            returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
+                pip_args=["install", "--upgrade", "pip>=26.0"],
+                timeout=120,
             )
-            
-            if upgrade_result.returncode == 0:
-                logger.info("[DEPS] pip upgraded successfully")
-                self._installed_cache = None
-                return True
-            else:
+            if returncode != 0:
                 logger.warning(
-                    f"[DEPS] pip upgrade failed: {upgrade_result.stderr[-300:]}"
+                    f"[DEPS] pip upgrade failed (non-fatal): {stderr[-300:]}"
                 )
                 return False
-        
+
+            self._installed_cache = None
+            upgraded = _get_pip_version()
+            if upgraded is not None and upgraded >= MIN_PIP_VERSION:
+                logger.info(
+                    f"[DEPS] pip upgraded to {upgraded[0]}.{upgraded[1]} "
+                    f"(ssl workaround applied: {ssl_applied})"
+                )
+                return True
+            logger.warning(
+                "[DEPS] pip upgrade completed but version re-check failed — "
+                "assuming success (non-fatal)"
+            )
+            return True
         except subprocess.TimeoutExpired:
             logger.warning("[DEPS] pip version check/upgrade timed out")
             return False
@@ -692,20 +618,20 @@ class DependencyManager:
 
     def _force_upgrade_pip(self) -> bool:
         """Unconditionally upgrades pip to the latest version.
-        
+
         Used for newly created venvs where bundled pip may be outdated
         but still above MIN_PIP_VERSION. Returns True on success, False
         on failure (non-fatal — venv is still usable).
         """
         if self._venv_path is None:
             return True
-        
+
         try:
             # Jnc
             logger.info("[DEPS] Upgrading pip to latest version in new venv...")
 
             returncode, stdout, stderr, ssl_applied = self._run_pip_with_ssl_retry(
-                pip_args=["install", "--upgrade", "pip"],
+                pip_args=["install", "--upgrade", "pip>=26.0"],
                 timeout=120,
             )
 
@@ -723,8 +649,7 @@ class DependencyManager:
                     f"[DEPS] pip upgrade failed (non-fatal): "
                     f"{stderr[-200:]}"
                 )
-                return False        
-        
+                return False
         except subprocess.TimeoutExpired:
             logger.warning("[DEPS] pip upgrade timed out (non-fatal)")
             return False

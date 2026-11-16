@@ -168,8 +168,12 @@ class PipelineTraceLogger:
         """Сохраняет текущее состояние в файл"""
         if not self._file_path:
             return
-        
+
         try:
+            # Ensure the actual parent directory of self._file_path exists.
+            # Derive from the concrete path (not TRACE_LOG_DIR) so monkeypatched
+            # module constants keep working while resolving the specific file.
+            self._file_path.parent.mkdir(parents=True, exist_ok=True)
             data = asdict(self.trace)
             with open(self._file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -265,6 +269,9 @@ class PipelineTraceLogger:
             error_dict["code_preview"] = code_preview
         
         self._current_iteration.staging_errors.append(error_dict)
+
+        # Persist immediately: the error must reach the trace file even if a later stage crashes
+        self._save()
     
     
     def dump_staging_error_report(self, error_data: Dict[str, Any]) -> None:
@@ -304,13 +311,29 @@ class PipelineTraceLogger:
         errors: int = 0,
         summary: str = "",
     ):
-        """Устанавливает результат технической валидации"""
+        """Устанавливает результат технической валидации
+
+        ``summary`` accepts either a ``str`` or a zero-argument callable
+        returning a textual summary. Production ``ValidationResult.summary``
+        is a method, not a property, so the caller may pass
+        ``getattr(result, "summary", "")`` (a bound method).
+        """
         if not self._current_iteration:
             return
-        
+
+        # Normalization boundary: resolve callables to text before slicing
+        if callable(summary):
+            try:
+                summary = summary()
+            except Exception as _summary_err:
+                logger.debug(
+                    f"set_tech_validation: callable summary failed: {_summary_err}"
+                )
+                summary = ""
+
         self._current_iteration.tech_validation_success = success
         self._current_iteration.tech_validation_errors = errors
-        self._current_iteration.tech_validation_summary = summary[:500]
+        self._current_iteration.tech_validation_summary = str(summary or "")[:500]
         self._save()
     
     def set_auto_format_status(

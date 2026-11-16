@@ -591,6 +591,11 @@ class StagingErrorFeedback:
                 parts.append(f"Replace Pattern Line Hint: {self.replace_pattern_line}-{self.replace_pattern_line_end}")
             else:
                 parts.append(f"Replace Pattern Line Hint: {self.replace_pattern_line}")        
+
+        if self.insert_after:
+            parts.append(f"Insert After Anchor: {self.insert_after}")
+        if self.insert_before:
+            parts.append(f"Insert Before Anchor: {self.insert_before}")
         
         parts.append("")        
         

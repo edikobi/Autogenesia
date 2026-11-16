@@ -25,6 +25,12 @@ Autogenesia - Главная точка входа
 
 from __future__ import annotations
 from app.agents.pre_filter import analyze_query, PreFilterMode, PreFilterAdvice
+from app.utils.input_commands import (
+    PostTesterCommand,
+    classify_post_tester_input,
+    is_plan_acceptance,
+    is_plan_cancel,
+)
 from app.llm.prompt_templates import (
     _build_prefilter_advice_section,
     _build_prefilter_advice_section_agent,
@@ -189,6 +195,7 @@ try:
     from app.utils.translator import (
         translate_to_russian,
         translate_sync,
+        translate_with_timeout,
         translate_thinking,
         translate_validator_verdict,
         translate_analysis,
@@ -207,6 +214,7 @@ except ImportError as e:
     # Заглушки если модуль недоступен
     async def translate_to_russian(text, context=""): return text
     def translate_sync(text, context=""): return text
+    async def translate_with_timeout(text, context="", timeout=10.0): return text
     async def translate_thinking(text): return text
     async def translate_validator_verdict(text): return text
     async def translate_analysis(text): return text
@@ -943,8 +951,10 @@ def print_main_menu():
     pf_model_name = cfg.get_model_display_name(state.prefilter_model) if state.prefilter_model else "Авто"
     menu.add_row("[8]", f"🔬 Настройки Pre-filter: [{pf_mode_label} | {pf_model_name}]")
     
-    menu.add_row("[10]", "🔑 Настройки провайдеров API")
     menu.add_row("[9]", "📖 О программе")
+    menu.add_row("[10]", "🔑 Настройки провайдеров API")
+    menu.add_row("[11]", "🛡 Доступ и venv проекта")
+    menu.add_row("[12]", "🔌 MCP-серверы")
     menu.add_row("[0]", "🚪 Выход")
     
     console.print(Panel(menu, title="[bold]Главное меню[/]", border_style=COLORS['secondary']))
@@ -1099,6 +1109,8 @@ AI Код Агент — это интеллектуальный помощни�
 |---------|----------|
 | `/помощь`, `/help` | Справка по командам |
 | `/модель`, `/model` | Сменить модель оркестратора |
+| `/модельорк` | Сменить модель Оркестратора (в чате) |
+| `/модельген` | Сменить модель Генератора (в чате) |
 | `/прикрепить`, `/attach` | Прикрепить файлы (Общий Чат) |
 | `/история`, `/history` | Просмотр истории |
 | `/новый`, `/new` | Новый диалог |
@@ -1137,19 +1149,10 @@ AI Код Агент — это интеллектуальный помощни�
     input()
 
 
-def print_thinking(content: str, title: str = "Размышления агента", translate: bool = True):
-    """
-    Отображает процесс мышления агента.
-    
-    Args:
-        content: Текст размышлений
-        title: Заголовок панели
-        translate: Переводить ли на русский (по умолчанию да)
-    """
+def print_thinking(content: str, title: str = "Размышления агента", translate: bool = False):
     if not content:
         return
     
-    # Перевод на русский (если включён и доступен)
     if translate and TRANSLATION_AVAILABLE and not is_mostly_russian(content):
         try:
             translated = translate_sync(content, "AI agent reasoning")
@@ -1160,12 +1163,10 @@ def print_thinking(content: str, title: str = "Размышления агент
                 logger.debug("Translation returned same text or empty")
         except Exception as e:
             logger.warning(f"Failed to translate thinking: {e}")
-            # Продолжаем с оригиналом
     
-    # Усекаем если слишком длинный (3000 символов)
     max_chars = 3000
     if len(content) > max_chars:
-        content = content[:max_chars] + f"\n\n... [ещё {len(content) - max_chars} символов]"    
+        content = content[:max_chars] + f"\n\n... [ещё {len(content) - max_chars} символов]"
     
     console.print(Panel(
         Text(content, style="dim italic"),
@@ -2049,6 +2050,247 @@ def print_warning(message: str, title: str = "Предупреждение"):
     ))
 
 
+
+def cli_emergency_recovery_callback(event) -> "EmergencyResolution":
+    """CLI resolution callback for the deterministic emergency manager.
+
+    Never calls an LLM. Returns an ``EmergencyResolution``. Honours existing
+    navigation exceptions (``BackException``/``BackToMenuException``/
+    ``QuitException``) by re-raising.
+    """
+    from app.services.emergency_recovery import (
+        EmergencyCategory,
+        EmergencyResolution,
+        normalize_emergency_role,
+        get_emergency_role_label,
+        get_emergency_role_model_tier,
+    )
+
+    try:
+        role = normalize_emergency_role(getattr(event, "agent_role", "orchestrator"))
+        role_label = get_emergency_role_label(role)
+
+        if event.category == EmergencyCategory.NETWORK_OR_PROVIDER_ERROR:
+            diag = event.diagnostics
+            online = "OK" if getattr(diag, "is_connected", False) else "НЕТ"
+            latency = getattr(diag, "latency_ms", 0.0) or 0.0
+            speed = getattr(diag, "download_mbps", 0.0) or 0.0
+            console.print(
+                f"\n[bold yellow]🔄 Сбой связи с провайдером[/] [dim](роль: {role_label})[/]\n"
+                f"   Интернет: {online} | Latency: {latency:.0f}ms | "
+                f"Download: {speed:.2f} Mbps"
+            )
+
+            if not getattr(diag, "is_connected", False):
+                console.print("\n[bold red]Интернет недоступен.[/]")
+                console.print("[1] Завершить сессию (сохранить контекст)")
+                console.print("[2] Повторить (после восстановления связи)")
+                console.print("[3] 🔁 Попробовать ещё раз (переподключиться)")
+                try:
+                    ch = prompt_with_navigation(
+                        "Выбор", choices=["1", "2", "3"], default="1"
+                    )
+                except (BackException, BackToMenuException, QuitException):
+                    raise
+                if ch in ("2", "3"):
+                    return EmergencyResolution(
+                        action="retry",
+                        retry_reconnect=True,
+                        agent_role=role,
+                        target_role=role,
+                    )
+                return EmergencyResolution(
+                    action="end_session",
+                    end_session=True,
+                    agent_role=role,
+                    target_role=role,
+                )
+
+            console.print(
+                "\n[bold]Провайдер недоступен, но интернет есть. "
+                "Выберите действие:[/]"
+            )
+            if role in ("pre_filter", "tester"):
+                console.print(f"[1] Сменить модель текущей роли: {role_label}")
+            else:
+                console.print("[1] Заменить модель Оркестратора")
+            console.print("[2] Заменить модель Генератора")
+            console.print("[3] Заменить обе модели")
+            console.print("[4] Завершить сессию (сохранить контекст)")
+            console.print("[5] 🔁 Попробовать ещё раз")
+            try:
+                ch = prompt_with_navigation(
+                    "Выбор", choices=["1", "2", "3", "4", "5"], default="4"
+                )
+            except (BackException, BackToMenuException, QuitException):
+                raise
+
+            if ch == "4":
+                return EmergencyResolution(
+                    action="end_session",
+                    end_session=True,
+                    agent_role=role,
+                    target_role=role,
+                )
+
+            if ch == "5":
+                return EmergencyResolution(
+                    action="retry",
+                    retry_reconnect=True,
+                    agent_role=role,
+                    target_role=role,
+                )
+
+            new_orch_model = None
+            new_orch_provider = None
+            new_gen_model = None
+            new_gen_provider = None
+            new_prefilter_model = None
+            new_prefilter_provider = None
+            new_tester_model = None
+            new_tester_provider = None
+
+            if ch in ("1", "3"):
+                try:
+                    tier = get_emergency_role_model_tier(role) if ch == "1" else "orchestrator"
+                    if tier == "generator":
+                        print_generator_model_selection_menu(compact=True)
+                        valid = [key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS]
+                        pick = prompt_with_navigation(
+                            "Модель генератора", choices=valid, default="1"
+                        )
+                        for key, mid, _short, _desc, prov in AVAILABLE_GENERATOR_MODELS:
+                            if key == pick:
+                                new_gen_model = mid
+                                new_gen_provider = prov
+                                break
+                    else:
+                        print_model_selection_menu(show_router=False, compact=True)
+                        valid = [
+                            str(i)
+                            for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)
+                        ]
+                        pick = prompt_with_navigation(
+                            "Модель", choices=valid, default="1"
+                        )
+                        for key, mid, _short, _desc, prov in AVAILABLE_ORCHESTRATOR_MODELS:
+                            if key == pick:
+                                new_orch_model = mid
+                                new_orch_provider = prov
+                                if role == "pre_filter":
+                                    new_prefilter_model = mid
+                                    new_prefilter_provider = prov
+                                elif role == "tester":
+                                    new_tester_model = mid
+                                    new_tester_provider = prov
+                                break
+                except (BackException, BackToMenuException, QuitException):
+                    raise
+
+            if ch in ("2", "3"):
+                try:
+                    print_generator_model_selection_menu(compact=True)
+                    valid_g = [
+                        key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS
+                    ]
+                    pick_g = prompt_with_navigation(
+                        "Модель генератора", choices=valid_g, default="1"
+                    )
+                    for key, mid, _short, _desc, prov in AVAILABLE_GENERATOR_MODELS:
+                        if key == pick_g:
+                            new_gen_model = mid
+                            new_gen_provider = prov
+                            break
+                except (BackException, BackToMenuException, QuitException):
+                    raise
+
+            try:
+                from app.services.emergency_recovery import get_emergency_manager
+
+                get_emergency_manager().apply_model_swap(
+                    orchestrator_model=new_orch_model,
+                    orchestrator_provider=new_orch_provider,
+                    generator_model=new_gen_model,
+                    generator_provider=new_gen_provider,
+                    prefilter_model=new_prefilter_model,
+                    prefilter_provider=new_prefilter_provider,
+                    tester_model=new_tester_model,
+                    tester_provider=new_tester_provider,
+                    agent_role=role,
+                    target_role=role,
+                    state=state,
+                    pipeline=state.pipeline,
+                )
+                try:
+                    current = load_user_settings()
+                    merged = dict(current)
+                    merged.update(get_current_user_settings())
+                    if new_prefilter_model is not None:
+                        merged["prefilter_model"] = new_prefilter_model
+                    if new_prefilter_provider is not None:
+                        merged["prefilter_provider"] = new_prefilter_provider
+                    if new_tester_model is not None:
+                        merged["tester_model"] = new_tester_model
+                    if new_tester_provider is not None:
+                        merged["tester_provider"] = new_tester_provider
+                    save_user_settings(merged)
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"apply_model_swap failed: {e}")
+
+            return EmergencyResolution(
+                action="continue",
+                orchestrator_model=new_orch_model,
+                orchestrator_provider=new_orch_provider,
+                generator_model=new_gen_model,
+                generator_provider=new_gen_provider,
+                prefilter_model=new_prefilter_model,
+                prefilter_provider=new_prefilter_provider,
+                tester_model=new_tester_model,
+                tester_provider=new_tester_provider,
+                agent_role=role,
+                target_role=role,
+            )
+
+        if event.category == EmergencyCategory.APP_LIMIT_REACHED:
+            console.print(
+                f"\n[bold yellow]⚠️ Достигнут лимит[/]\n"
+                f"   Роль: {event.agent_role}\n"
+                f"   Лимит: {event.limit_type} "
+                f"({event.current_value}/{event.max_value})"
+            )
+            console.print("[1] ➕ Дать ещё +10 вызовов / +5 итераций")
+            console.print("[2] 📝 Финальный ответ / инструкцию сейчас")
+            console.print("[3] 🚪 Завершить сессию")
+            try:
+                ch = prompt_with_navigation(
+                    "Выбор", choices=["1", "2", "3"], default="2"
+                )
+            except (BackException, BackToMenuException, QuitException):
+                raise
+            if ch == "1":
+                return EmergencyResolution(
+                    action="extra_quota",
+                    extra_tool_calls=10,
+                    extra_iterations=5,
+                )
+            if ch == "3":
+                return EmergencyResolution(
+                    action="end_session", end_session=True
+                )
+            return EmergencyResolution(action="finalize", force_final=True)
+
+        # Fallback
+        return EmergencyResolution(action="propagate")
+    except (BackException, BackToMenuException, QuitException):
+        raise
+    except Exception as e:
+        logger.warning(f"cli_emergency_recovery_callback failed: {e}")
+        return EmergencyResolution(action="propagate")
+
+
+
 # ============================================================================
 # ФУНКЦИИ ОТОБРАЖЕНИЯ ИСТОРИИ ДИАЛОГА
 # ============================================================================
@@ -2346,12 +2588,12 @@ async def handle_validator_rejection(
     # Переводим вердикт и issues
     if TRANSLATION_AVAILABLE:
         if not is_mostly_russian(verdict):
-            verdict = translate_sync(verdict, "AI validator verdict")
+            verdict = await translate_with_timeout(verdict, "AI validator verdict", timeout=10.0)
         
         translated_issues = []
         for issue in issues:
             if isinstance(issue, str) and not is_mostly_russian(issue):
-                translated_issues.append(translate_sync(issue, "validation issue"))
+                translated_issues.append(await translate_with_timeout(issue, "validation issue", timeout=10.0))
             else:
                 translated_issues.append(str(issue))
         issues = translated_issues
@@ -2373,7 +2615,7 @@ async def handle_validator_rejection(
         
         # Переводим reasoning Оркестратора
         if TRANSLATION_AVAILABLE and reasoning and not is_mostly_russian(reasoning):
-            reasoning = translate_sync(reasoning, "orchestrator reasoning about code")
+            reasoning = await translate_with_timeout(reasoning, "orchestrator reasoning about code", timeout=10.0)
         
         if decision == "OVERRIDE":
             # Оркестратор НЕ согласен с валидатором
@@ -4963,7 +5205,7 @@ async def handle_ask_mode(query: str):
         logger.error(f"Unexpected error in handle_ask_mode: {e}", exc_info=True)
         print_error(f"Неожиданная ошибка: {e}")
 
-async def _select_tester_model(state) -> Tuple[Optional[str], Optional[str]]:
+async def _select_tester_model(state) -> Optional[Tuple[Optional[str], Optional[str]]]:
     """
     Interactive selection of the model for TesterAgent.
 
@@ -4974,7 +5216,9 @@ async def _select_tester_model(state) -> Tuple[Optional[str], Optional[str]]:
         state: Global AppState instance.
 
     Returns:
-        Selected model ID string, or the current orchestrator model as default.
+        None if the user cancelled the selection ("назад" / back),
+        otherwise a tuple (model_id, provider) as before.
+        Input "0" or empty returns the current orchestrator model as default.
     """
     current_model = state.pipeline._orchestrator_model if state.pipeline else None
 
@@ -4986,19 +5230,26 @@ async def _select_tester_model(state) -> Tuple[Optional[str], Optional[str]]:
 
     for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
         console.print(f"  [green]{key}[/] - {short_name}")
-        
-    choice = console.input(
-        f"\n[bold]Ваш выбор (0-{len(AVAILABLE_ORCHESTRATOR_MODELS)}):[/] "
-    ).strip()
 
-    if choice == "0" or choice == "":
-        return current_model, None
+    console.print("  [yellow]назад[/] - вернуться к выбору действия (принять / доработать / своя критика)")
 
-    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
-        if key == choice:
-            return model_id, provider
-        
-    return current_model, None
+    while True:
+        choice = console.input(
+            f"\n[bold]Ваш выбор (0-{len(AVAILABLE_ORCHESTRATOR_MODELS)}):[/] "
+        ).strip()
+
+        if choice.lower() in {"назад", "back", "b", "н"}:
+            return None
+
+        if choice == "0" or choice == "":
+            return current_model, None
+
+        for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
+            if key == choice:
+                return model_id, provider
+
+        console.print("[yellow]Неверный выбор. Введите номер модели, 0 или 'назад'.[/]")
+
 
 async def handle_agent_mode(query: str):
     """Обработка режима Агента - Автономная генерация кода с валидацией"""
@@ -5072,9 +5323,9 @@ async def handle_agent_mode(query: str):
                 
                 user_input = Prompt.ask("Ваше решение")
                 
-                if user_input.strip() == "!ok":
+                if is_plan_acceptance(user_input):
                     plan_accepted = True
-                elif user_input.strip() == "!cancel":
+                elif is_plan_cancel(user_input):
                     console.print("[yellow]Отмена операции планирования.[/]")
                     return
                 else:
@@ -5540,6 +5791,34 @@ async def handle_agent_mode(query: str):
             'force_fix' - заставить Оркестратора исправить код
             'proceed' - согласиться с Оркестратором и идти на тесты
         """
+        if decision_type == "direct_answer_confirmation":
+            analysis_preview = str(context.get("analysis", "") or "")[:1500]
+            console.print()
+            if analysis_preview.strip():
+                console.print(Panel(
+                    Markdown(analysis_preview),
+                    title="💬 Предлагаемый ответ Оркестратора",
+                    border_style=COLORS['secondary'],
+                ))
+            else:
+                console.print(Panel(
+                    Text("[пустой ответ]", style="dim"),
+                    title="💬 Предлагаемый ответ Оркестратора",
+                    border_style=COLORS['secondary'],
+                ))
+            console.print(
+                "[dim]Нажмите Enter с пустым полем — принять ответ. "
+                "Ввод текста — отправить его Оркестратору как новый запрос пользователя "
+                "(перезапуск пайплайна).[/]"
+            )
+            try:
+                _da_answer = Prompt.ask("[bold cyan]Уточнение или Enter[/]", default="")
+            except (BackException, BackToMenuException, QuitException):
+                return "accept"
+            if _da_answer is None or not _da_answer.strip():
+                return "accept"
+            return _da_answer
+
         if decision_type == "orchestrator_override":
             ai_result = context.get("ai_result", {})
             reasoning = context.get("orchestrator_reasoning", "")
@@ -5548,9 +5827,9 @@ async def handle_agent_mode(query: str):
             verdict = ai_result.get("verdict", "")
             if TRANSLATION_AVAILABLE:
                 if verdict and not is_mostly_russian(verdict):
-                    verdict = translate_sync(verdict, "AI validator verdict")
+                    verdict = await translate_with_timeout(verdict, "AI validator verdict", timeout=10.0)
                 if reasoning and not is_mostly_russian(reasoning):
-                    reasoning = translate_sync(reasoning, "orchestrator reasoning")
+                    reasoning = await translate_with_timeout(reasoning, "orchestrator reasoning", timeout=10.0)
             
             console.print("\n" + "=" * 60)
             console.print("[bold yellow]⚠️ ТРЕБУЕТСЯ ВАШЕ РЕШЕНИЕ[/]")
@@ -5979,7 +6258,7 @@ async def handle_agent_mode(query: str):
         verdict = result.ai_validation_result.get("verdict", "")
         
         if TRANSLATION_AVAILABLE and verdict and not is_mostly_russian(verdict):
-            verdict = translate_sync(verdict, "AI validator verdict")
+            verdict = await translate_with_timeout(verdict, "AI validator verdict", timeout=10.0)
         
         color = COLORS['success'] if approved else COLORS['warning']
         status_text = "✅ ОДОБРЕНО" if approved else "⚠️ ПЕРЕОПРЕДЕЛЕНО"
@@ -6160,7 +6439,10 @@ async def handle_agent_mode(query: str):
             
             elif choice == "4":
                 # === ТЕСТИРОВЩИК ===
-                tester_model, tester_provider = await _select_tester_model(state)
+                tester_selection = await _select_tester_model(state)
+                if tester_selection is None:
+                    continue   # возврат в меню подтверждения (применить / доработать / своя критика)
+                tester_model, tester_provider = tester_selection
                 try:
                     additional_input = Prompt.ask("[dim]Что проверить дополнительно? (Enter — пропустить)[/]", default="")
                 except KeyboardInterrupt:
@@ -6225,6 +6507,13 @@ async def handle_agent_mode(query: str):
                             continue
 
                         # /план export
+
+                        _cmd = classify_post_tester_input(user_input)
+                        if _cmd == PostTesterCommand.UNKNOWN_COMMAND:
+                            print_warning(f"Неизвестная команда: {user_input.strip()!r} — запрос НЕ отправлен ИИ. Доступно: 1 — применить, 2 — доработка, 3 — выход, /план — экспорт отчёта, либо текст вопроса.")
+                            continue
+                        if _cmd == PostTesterCommand.EXPORT:
+                            user_input = "/план"
                         if user_input.strip().lower() in ("/план", "/plan"):
                             
                             try:
@@ -6812,6 +7101,21 @@ async def handle_chat_command(command: str) -> Optional[str]:
             pass
         return "help_shown"
     
+    # Выбор модели Оркестратора (в чате)
+    elif cmd in ("/модельорк", "/modelorch", "/модорк"):
+        try:
+            await select_orchestrator_model()
+        except (BackException, BackToMenuException, QuitException):
+            pass
+        return "help_shown"
+    
+    # Выбор модели Генератора (в чате)
+    elif cmd in ("/модельген", "/modelgen", "/модген"):
+        try:
+            await select_generator_model()
+        except (BackException, BackToMenuException, QuitException):
+            pass
+        return "help_shown"
     # Переключение проверки типов
     elif cmd in ("/types", "/типы", "/mypy"):
         await toggle_type_checking()
@@ -7289,6 +7593,8 @@ def print_chat_help():
 | `/название`, `/title` | Изменить название диалога |
 | `/модель` | Выбрать модель оркестратора |
 | `/генератор`, `/ген` | Выбрать модель генератора кода |
+| `/модельорк` | Сменить модель Оркестратора (в чате) |
+| `/модельген` | Сменить модель Генератора (в чате) |
 | `/типы`, `/mypy` | Вкл/выкл проверку типов (mypy) |
 | `/restore [id]` | Восстановить файлы из бэкапа |
 | `/changes` | История изменений файлов в диалоге |
@@ -7315,6 +7621,15 @@ def print_chat_help():
 async def setup_mode_session(mode: str) -> bool:
     """
     Настройка сессии для выбранного режима.
+    
+    Реализована как пошаговый конечный автомат (while-цикл по состояниям):
+    команда «назад» возвращает на предыдущий шаг БЕЗ повторной инициализации,
+    без сброса проекта и без переиндексации.
+    
+    Шаги для режимов ask/agent:
+        PROJECT_TYPE → PROJECT → ORCHESTRATOR_MODEL → GENERATOR_MODEL → THREAD → DONE
+    Шаги для режима general:
+        SUBMODE → MODEL → THREAD → DONE
     
     Args:
         mode: Режим работы ('ask', 'agent', 'general')
@@ -7344,238 +7659,287 @@ async def setup_mode_session(mode: str) -> bool:
     # General Chat — выбор подрежима и модели
     # ========================================
     if mode == "general":
-        # Выбор подрежима: обычный или Legal
-        console.print("[bold]Выбор подрежима:[/]")
-        console.print("[1] 💬 Обычный режим — общие вопросы, программирование")
-        console.print("[2] ⚖️  Legal режим — юридические вопросы")
-        console.print()
-        
-        try:
-            submode_choice = prompt_with_navigation(
-                "Выбор",
-                choices=["1", "2"],
-                default="1"
-            )
-        except BackException:
-            raise BackToMenuException()
-        except (BackToMenuException, QuitException):
-            raise
-        
-        state.is_legal_mode = (submode_choice == "2")
-        
-        if state.is_legal_mode:
-            console.print("[green]✓[/] Выбран Legal режим")
-            console.print("[dim]Специализированный промпт для юридических вопросов[/]")
-        else:
-            console.print("[green]✓[/] Выбран обычный режим")
-        
-        # Выбор модели С ОПИСАНИЯМИ
-        console.print("\n[bold]Выбор модели:[/]\n")
-        print_model_selection_menu(show_router=True, compact=False)
-        
-        valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
-        
-        try:
-            choice = prompt_with_navigation(
-                "Выбор",
-                choices=valid_keys,
-                default="r"
-            )
-        except BackException:            
+        current_step = "SUBMODE"
+        while True:
+            if current_step == "SUBMODE":
+                # Выбор подрежима: обычный или Legal
+                console.print("[bold]Выбор подрежима:[/]")
+                console.print("[1] 💬 Обычный режим — общие вопросы, программирование")
+                console.print("[2] ⚖️  Legal режим — юридические вопросы")
+                console.print()
+                
+                try:
+                    submode_choice = prompt_with_navigation(
+                        "Выбор",
+                        choices=["1", "2"],
+                        default="1"
+                    )
+                except BackException:
+                    raise BackToMenuException()
+                except (BackToMenuException, QuitException):
+                    raise
+                
+                state.is_legal_mode = (submode_choice == "2")
+                
+                if state.is_legal_mode:
+                    console.print("[green]✓[/] Выбран Legal режим")
+                    console.print("[dim]Специализированный промпт для юридических вопросов[/]")
+                else:
+                    console.print("[green]✓[/] Выбран обычный режим")
+                
+                current_step = "MODEL"
+                continue
             
-            # Возврат к выбору подрежима — рекурсия
-            return await setup_mode_session(mode)
-        except (BackToMenuException, QuitException):
-            raise
+            elif current_step == "MODEL":
+                # Выбор модели С ОПИСАНИЯМИ
+                console.print("\n[bold]Выбор модели:[/]\n")
+                print_model_selection_menu(show_router=True, compact=False)
+                
+                valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
+                
+                try:
+                    choice = prompt_with_navigation(
+                        "Выбор",
+                        choices=valid_keys,
+                        default="r"
+                    )
+                except BackException:
+                    # Возврат к выбору подрежима
+                    current_step = "SUBMODE"
+                    continue
+                except (BackToMenuException, QuitException):
+                    raise
+                
+                if choice.lower() == "r":
+                    state.use_router = True
+                    state.fixed_orchestrator_model = None
+                    state.orchestrator_provider = None
+                    console.print("[green]✓[/] Включён автоматический роутер")
+                else:
+                    for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
+                        if key == choice:
+                            state.use_router = False
+                            state.fixed_orchestrator_model = model_id
+                            state.orchestrator_provider = provider
+                            console.print(f"[green]✓[/] Выбрана модель: {short_name}")
+                            break        
+                
+                current_step = "THREAD"
+                continue
+            
+            elif current_step == "THREAD":
+                # Ищем существующий тред или создаём новый
+                try:
+                    state.current_thread = await find_or_create_thread_for_project(None)
+                except (BackException, BackToMenuException, QuitException):
+                    raise
+                
+                current_step = "DONE"
+                continue
+            
+            elif current_step == "DONE":
+                console.print("\n" + "=" * 60)
+                console.print(f"[bold green]✓ Готово![/] Режим: {mode_titles[mode]}")
+                if state.is_legal_mode:
+                    console.print("   [yellow]Подрежим: Legal[/]")
+                console.print("=" * 60 + "\n")
+                console.print("[dim]Введите ваш запрос или /помощь для списка команд[/]\n")
+                
+                return True
         
-        if choice.lower() == "r":
-            state.use_router = True
-            state.fixed_orchestrator_model = None
-            state.orchestrator_provider = None
-            console.print("[green]✓[/] Включён автоматический роутер")
-        else:
-            for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
-                if key == choice:
-                    state.use_router = False
-                    state.fixed_orchestrator_model = model_id
-                    state.orchestrator_provider = provider
-                    console.print(f"[green]✓[/] Выбрана модель: {short_name}")
-                    break        
-        
-        
-        # Ищем существующий тред или создаём новый
-        try:
-            state.current_thread = await find_or_create_thread_for_project(None)
-        except (BackException, BackToMenuException, QuitException):
-            raise
-        
-        console.print("\n" + "=" * 60)
-        console.print(f"[bold green]✓ Готово![/] Режим: {mode_titles[mode]}")
-        if state.is_legal_mode:
-            console.print("   [yellow]Подрежим: Legal[/]")
-        console.print("=" * 60 + "\n")
-        console.print("[dim]Введите ваш запрос или /помощь для списка команд[/]\n")
-        
-        return True
+        return False  # Недостижимо (защита от бесконечного цикла)
     
     # ========================================
-    # Ask и Agent требуют выбора типа проекта
+    # Ask и Agent: PROJECT_TYPE → PROJECT → ORCHESTRATOR_MODEL → GENERATOR_MODEL → THREAD → DONE
     # ========================================
-    try:
-        project_type = await select_project_type()
-    except BackException:
-        raise BackToMenuException()
-    except (BackToMenuException, QuitException):
-        raise
-    
-    if not project_type:
-        return False
-    
-    # ========================================
-    # Настройка проекта в зависимости от типа
-    # ========================================
-    if project_type == "existing":
-        try:
-            project_path = await select_existing_project()
-        except BackException:
-            # Возврат к выбору типа проекта
-            return await setup_mode_session(mode)
-        except (BackToMenuException, QuitException):
-            raise
+    project_type: Optional[str] = None
+    current_step = "PROJECT_TYPE"
+    while True:
+        if current_step == "PROJECT_TYPE":
+            try:
+                project_type = await select_project_type()
+            except BackException:
+                raise BackToMenuException()
+            except (BackToMenuException, QuitException):
+                raise
+            
+            if not project_type:
+                return False
+            
+            current_step = "PROJECT"
+            continue
         
-        if not project_path:
-            return await setup_mode_session(mode)  # Повторить
+        elif current_step == "PROJECT":
+            if project_type == "existing":
+                try:
+                    project_path = await select_existing_project()
+                except BackException:
+                    # Возврат к выбору типа проекта
+                    current_step = "PROJECT_TYPE"
+                    continue
+                except (BackToMenuException, QuitException):
+                    raise
+                
+                if not project_path:
+                    # Повтор текущего шага PROJECT (без сброса)
+                    current_step = "PROJECT"
+                    continue
+                
+                state.project_dir = project_path
+                state.is_new_project = False
+                
+                # Индексация сразу после выбора директории
+                console.print()
+                if await build_project_indexes(project_path):
+                    state.project_index = await load_project_index(project_path)
+                else:
+                    print_warning("Индексация не удалась, продолжаем без индекса")
+                    state.project_index = {}
+                
+                # Проверка что индекс не пуст для режима Agent
+                if state.mode == "agent" and not state.project_index:
+                    print_warning("Индекс проекта пуст!")
+                    print_info("Убедитесь, что в проекте есть Python файлы (.py)")
+                    console.print("[dim]В режиме Агента пустой индекс может привести к ошибкам.[/]")
+                    
+                    try:
+                        if not confirm_with_navigation("Продолжить без индекса?", default=False):
+                            # Пользователь отказался — возврат к выбору типа проекта
+                            current_step = "PROJECT_TYPE"
+                            continue
+                    except BackException:
+                        current_step = "PROJECT_TYPE"
+                        continue
+                    except (BackToMenuException, QuitException):
+                        raise
+            
+            else:  # project_type == "new"
+                try:
+                    project_path = await create_new_project()
+                except BackException:
+                    # Возврат к выбору типа проекта
+                    current_step = "PROJECT_TYPE"
+                    continue
+                except (BackToMenuException, QuitException):
+                    raise
+                
+                if not project_path:
+                    # Повтор текущего шага PROJECT (без сброса)
+                    current_step = "PROJECT"
+                    continue
+                
+                state.project_dir = project_path
+                state.is_new_project = True
+                state.project_index = {}  # Пустой индекс
+                
+                console.print("[dim]Индексация будет выполнена после применения изменений[/]")
+            
+            current_step = "ORCHESTRATOR_MODEL"
+            continue
         
-        state.project_dir = project_path
-        state.is_new_project = False
-        
-        # Индексация сразу после выбора директории
-        console.print()
-        if await build_project_indexes(project_path):
-            state.project_index = await load_project_index(project_path)
-        else:
-            print_warning("Индексация не удалась, продолжаем без индекса")
-            state.project_index = {}
-        
-        # Проверка что индекс не пуст для режима Agent
-        if state.mode == "agent" and not state.project_index:
-            print_warning("Индекс проекта пуст!")
-            print_info("Убедитесь, что в проекте есть Python файлы (.py)")
-            console.print("[dim]В режиме Агента пустой индекс может привести к ошибкам.[/]")
+        elif current_step == "ORCHESTRATOR_MODEL":
+            # Выбор модели оркестратора С ОПИСАНИЯМИ
+            console.print("\n[bold]Выбор модели оркестратора:[/]\n")
+            print_model_selection_menu(show_router=True, compact=False)
+            
+            valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
             
             try:
-                if not confirm_with_navigation("Продолжить без индекса?", default=False):
-                    raise BackException()
+                model_choice = prompt_with_navigation(
+                    "Выбор",
+                    choices=valid_keys,
+                    default="r"
+                )
+            except BackException:
+                # Возврат к выбору типа проекта
+                current_step = "PROJECT_TYPE"
+                continue
+            except (BackToMenuException, QuitException):
+                raise
+            
+            if model_choice.lower() == "r":
+                state.use_router = True
+                state.fixed_orchestrator_model = None
+                state.orchestrator_provider = None
+                console.print("[green]✓[/] Включён автоматический роутер")
+            else:
+                for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
+                    if key == model_choice:
+                        state.use_router = False
+                        state.fixed_orchestrator_model = model_id
+                        state.orchestrator_provider = provider
+                        console.print(f"[green]✓[/] Выбрана модель оркестратора: {short_name}")
+                        break    
+            
+            current_step = "GENERATOR_MODEL"
+            continue
+        
+        elif current_step == "GENERATOR_MODEL":
+            # NEW: Выбор модели генератора (для ask и agent)
+            console.print("\n[bold]Выбор модели генератора кода:[/]\n")
+            print_generator_model_selection_menu(compact=True)
+            
+            gen_valid_choices = [key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS]
+            
+            try:
+                gen_choice = prompt_with_navigation(
+                    "Выбор генератора",
+                    choices=gen_valid_choices,
+                    default="1",
+                    show_back=True,
+                    show_menu=True
+                )
+            except BackException:
+                # Возврат к выбору модели оркестратора БЕЗ сброса проекта и БЕЗ переиндексации
+                current_step = "ORCHESTRATOR_MODEL"
+                continue
+            except (BackToMenuException, QuitException):
+                raise
+            
+            for key, model_id, short_name, description, provider in AVAILABLE_GENERATOR_MODELS:
+                if key == gen_choice:
+                    state.generator_model = model_id
+                    state.generator_provider = provider
+                    console.print(f"[green]✓[/] Выбрана модель генератора: {short_name}")
+                    break    
+            
+            current_step = "THREAD"
+            continue
+        
+        elif current_step == "THREAD":
+            # Ищем существующий тред или создаём новый
+            try:
+                state.current_thread = await find_or_create_thread_for_project(state.project_dir)
             except (BackException, BackToMenuException, QuitException):
-                raise   
-   
-    else:  # project_type == "new"
-        try:
-            project_path = await create_new_project()
-        except BackException:
-            # Возврат к выбору типа проекта
-            return await setup_mode_session(mode)
-        except (BackToMenuException, QuitException):
-            raise
+                raise
+            
+            current_step = "DONE"
+            continue
         
-        if not project_path:
-            return await setup_mode_session(mode)  # Повторить
-        
-        state.project_dir = project_path
-        state.is_new_project = True
-        state.project_index = {}  # Пустой индекс
-        
-        console.print("[dim]Индексация будет выполнена после применения изменений[/]")
+        elif current_step == "DONE":
+            # Финальное сообщение
+            console.print("\n" + "=" * 60)
+            console.print(f"[bold green]✓ Готово![/] Режим: {mode_titles[mode]}")
+            console.print(f"   Проект: {state.project_dir}")
+            if state.is_new_project:
+                console.print("   [yellow]Тип: Новый проект[/]")
+            if state.use_router:
+                console.print("   Оркестратор: Автоматический выбор (роутер)")
+            else:
+                model_name = get_model_short_name(state.fixed_orchestrator_model)
+                console.print(f"   Оркестратор: {model_name}")
+            
+            # NEW: Показываем выбранный генератор
+            gen_name = get_generator_model_short_name(state.generator_model)
+            console.print(f"   Генератор: {gen_name}")
+            
+            console.print("=" * 60 + "\n")
+            console.print("[dim]Введите ваш запрос или /помощь для списка команд[/]\n")
+            
+            return True
     
-    # ========================================
-    # Выбор модели оркестратора С ОПИСАНИЯМИ
-    # ========================================
-    console.print("\n[bold]Выбор модели оркестратора:[/]\n")
-    print_model_selection_menu(show_router=True, compact=False)
-    
-    valid_keys = ["r"] + [str(i) for i in range(1, len(AVAILABLE_ORCHESTRATOR_MODELS) + 1)]
-    
-    try:
-        model_choice = prompt_with_navigation(
-            "Выбор",
-            choices=valid_keys,
-            default="r"
-        )
-    except BackException:        
-        # Возврат к выбору проекта
-        return await setup_mode_session(mode)
-    except (BackToMenuException, QuitException):
-        raise
-    
-    if model_choice.lower() == "r":
-        state.use_router = True
-        state.fixed_orchestrator_model = None
-        state.orchestrator_provider = None
-        console.print("[green]✓[/] Включён автоматический роутер")
-    else:
-        for key, model_id, short_name, description, provider in AVAILABLE_ORCHESTRATOR_MODELS:
-            if key == model_choice:
-                state.use_router = False
-                state.fixed_orchestrator_model = model_id
-                state.orchestrator_provider = provider
-                console.print(f"[green]✓[/] Выбрана модель оркестратора: {short_name}")
-                break    
-    # ========================================
-    # NEW: Выбор модели генератора (для ask и agent)
-    # ========================================
-    console.print("\n[bold]Выбор модели генератора кода:[/]\n")
-    print_generator_model_selection_menu(compact=True)
-    
-    gen_valid_choices = [key for key, _, _, _, _ in AVAILABLE_GENERATOR_MODELS]
-    
-    try:
-        gen_choice = prompt_with_navigation(            
-            "Выбор генератора",
-            choices=gen_valid_choices,
-            default="1",
-            show_back=True,
-            show_menu=True
-        )
-    except BackException:
-        # Возврат к выбору модели оркестратора — повторяем setup
-        return await setup_mode_session(mode)
-    except (BackToMenuException, QuitException):
-        raise
-    
-    for key, model_id, short_name, description, provider in AVAILABLE_GENERATOR_MODELS:
-        if key == gen_choice:
-            state.generator_model = model_id
-            state.generator_provider = provider
-            console.print(f"[green]✓[/] Выбрана модель генератора: {short_name}")
-            break    
-    # ========================================
-    # Ищем существующий тред или создаём новый
-    # ========================================
-    try:
-        state.current_thread = await find_or_create_thread_for_project(state.project_dir)
-    except (BackException, BackToMenuException, QuitException):
-        raise
-    
-    # Финальное сообщение
-    console.print("\n" + "=" * 60)
-    console.print(f"[bold green]✓ Готово![/] Режим: {mode_titles[mode]}")
-    console.print(f"   Проект: {state.project_dir}")
-    if state.is_new_project:
-        console.print("   [yellow]Тип: Новый проект[/]")
-    if state.use_router:
-        console.print("   Оркестратор: Автоматический выбор (роутер)")
-    else:
-        model_name = get_model_short_name(state.fixed_orchestrator_model)
-        console.print(f"   Оркестратор: {model_name}")
-    
-    # NEW: Показываем выбранный генератор
-    gen_name = get_generator_model_short_name(state.generator_model)
-    console.print(f"   Генератор: {gen_name}")
-    
-    console.print("=" * 60 + "\n")
-    console.print("[dim]Введите ваш запрос или /помощь для списка команд[/]\n")
-    
-    return True
+    return False  # Недостижимо (защита от бесконечного цикла)
+
 
 
 # ============================================================================
@@ -7591,7 +7955,7 @@ async def main_menu_loop():
         try:
             choice = Prompt.ask(
                 "Выбор",
-                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+                choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
                 default="1"
             )
         except KeyboardInterrupt:
@@ -7616,6 +7980,8 @@ async def main_menu_loop():
                         break
             except BackToMenuException:
                 continue
+            except BackException:
+                continue
             except QuitException:
                 state.running = False
                 break
@@ -7629,6 +7995,8 @@ async def main_menu_loop():
                         break
             except BackToMenuException:
                 continue
+            except BackException:
+                continue
             except QuitException:
                 state.running = False
                 break
@@ -7641,6 +8009,8 @@ async def main_menu_loop():
                     if result == "quit":
                         break
             except BackToMenuException:
+                continue
+            except BackException:
                 continue
             except QuitException:
                 state.running = False
@@ -7724,12 +8094,51 @@ async def main_menu_loop():
             except (BackException, BackToMenuException, QuitException):
                 pass
 
+        # Доступ и venv проекта
+        elif choice == "11":
+            try:
+                await select_environment_access_settings()
+            except (BackException, BackToMenuException, QuitException):
+                pass
+
+        # MCP-серверы
+        elif choice == "12":
+            try:
+                await select_mcp_settings()
+            except (BackException, BackToMenuException, QuitException):
+                pass
+
 # ============================================================================
 # ИНИЦИАЛИЗАЦИЯ
 # ============================================================================
 
 async def initialize():
     """Инициализация приложения"""
+    # MCP servers: connect in background (failure-tolerant, never blocks startup)
+    try:
+        from app.mcp import get_mcp_manager
+        get_mcp_manager().connect_all()
+    except Exception as mcp_err:
+        logger.debug(f"MCP connect skipped: {mcp_err}")
+
+    # Register ask_user + emergency callbacks for the CLI front-end
+    try:
+        from app.tools.ask_user import (
+            set_ask_user_callback,
+            cli_ask_user_handler,
+        )
+        set_ask_user_callback(cli_ask_user_handler)
+    except Exception as au_err:
+        logger.debug(f"ask_user CLI callback registration failed: {au_err}")
+
+    try:
+        from app.services.emergency_recovery import get_emergency_manager
+        mgr = get_emergency_manager()
+        mgr.set_resolution_callback(cli_emergency_recovery_callback)
+        mgr.set_notify_callback(lambda msg: console.print(f"[yellow]{msg}[/]"))
+    except Exception as er_err:
+        logger.debug(f"emergency CLI callback registration failed: {er_err}")
+
     # Инициализируем менеджер истории
     try:
         state.history_manager = HistoryManager()
@@ -7759,7 +8168,15 @@ async def shutdown():
         except:
             pass
     
+    # Гарантированное отключение MCP-серверов (идемпотентно, не бросает наружу)
+    try:
+        from app.mcp import get_mcp_manager
+        get_mcp_manager().disconnect_all()
+    except Exception as mcp_err:
+        logger.debug(f"MCP disconnect skipped: {mcp_err}")
+    
     console.print("[green]✓[/] Сессия сохранена. До свидания!")
+
 
 
 # ============================================================================
@@ -7777,6 +8194,31 @@ async def main():
         pass
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        # Notify the emergency manager so the CRITICAL_CODE_ERROR category is
+        # logged to the user with type/file/line/traceback, and a context/VFS
+        # snapshot is written (best-effort, never raises).
+        try:
+            from app.services.emergency_recovery import (
+                get_emergency_manager,
+                save_emergency_snapshot,
+            )
+
+            try:
+                save_emergency_snapshot(
+                    error=e,
+                    project_dir=getattr(state, "project_dir", None),
+                    vfs=getattr(state.pipeline, "vfs", None)
+                    if getattr(state, "pipeline", None) is not None
+                    else None,
+                    thread_id=getattr(
+                        getattr(state, "current_thread", None), "id", None
+                    ),
+                    history_manager=getattr(state, "history_manager", None),
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
         print_error(f"Критическая ошибка: {e}")
     finally:
         await shutdown()
@@ -8221,6 +8663,294 @@ def make_on_token_callback(prefix: str = "", max_console_chars: int = 15000) -> 
             logger.warning(f"on_token callback error: {e}")
 
     return _on_token
+
+
+
+async def select_environment_access_settings() -> None:
+    """Меню диагностики прав доступа к каталогу проекта и venv.
+
+    Все взаимодействия — только через ``prompt_with_navigation`` /
+    ``confirm_with_navigation``; навигационные исключения пробрасываются
+    наверх и гасятся в ``main_menu_loop``.
+    """
+    from app.services.env_access import (
+        create_venv,
+        manual_instructions,
+        probe,
+        request_elevation_and_fix,
+    )
+
+    while True:
+        project_dir = state.project_dir or os.getcwd()
+        status = probe(project_dir)
+
+        console.print("\n[bold]🛡 Доступ и venv проекта[/]\n")
+        if status.has_venv:
+            console.print(f"   venv: [green]найден[/] {status.venv_path}")
+        else:
+            console.print("   venv: [yellow]не найден[/]")
+        if status.has_write_access:
+            console.print("   права записи: [green]✅[/]")
+        else:
+            reason = status.reason or "нет прав записи"
+            console.print(f"   права записи: [red]❌[/] {reason}")
+        console.print(f"   платформа: {status.platform}")
+
+        console.print("\n[bold]Выберите действие:[/]")
+        console.print("  [1] Исправить права автоматически (UAC/admin — «Принимаю»)")
+        console.print("  [2] Создать .venv сейчас")
+        console.print("  [3] Показать инструкции для моей ОС")
+        console.print("  [0] Назад")
+
+        try:
+            choice = prompt_with_navigation(
+                "Выбор", choices=["0", "1", "2", "3"], default="0"
+            )
+        except (BackException, BackToMenuException, QuitException):
+            raise
+
+        if choice == "0" or not choice.strip():
+            return
+
+        try:
+            if choice == "1":
+                if confirm_with_navigation(
+                    "Принимаю — приложение запросит права (UAC/admin). Продолжить?",
+                    default=False,
+                ):
+                    ok = request_elevation_and_fix(project_dir)
+                    if ok:
+                        print_success("Права записи предоставлены")
+                    else:
+                        print_warning(
+                            "Не удалось получить права — см. инструкции для вашей ОС"
+                        )
+            elif choice == "2":
+                ok = create_venv(project_dir)
+                if ok:
+                    print_success("Виртуальное окружение .venv создано")
+                else:
+                    print_warning(
+                        "Не удалось создать .venv — проверьте права и попробуйте снова"
+                    )
+            elif choice == "3":
+                console.print(
+                    Panel(
+                        manual_instructions(sys.platform),
+                        title="🛡 Инструкции по исправлению прав",
+                        border_style="cyan",
+                    )
+                )
+        except (BackException, BackToMenuException, QuitException):
+            raise
+        except Exception as exc:
+            logger.error(f"env access action failed: {exc}", exc_info=True)
+            print_error(f"Ошибка выполнения действия: {exc}")
+
+
+
+async def select_mcp_settings() -> None:
+    """Меню управления MCP-серверами (подключение, добавление, тест).
+
+    Все блокирующие вызовы менеджера — с собственным timeout; навигационные
+    исключения пробрасываются наверх и гасятся в ``main_menu_loop``.
+    """
+    import shlex
+
+    from app.mcp import get_mcp_manager
+    from app.mcp.config_store import default_entry, load_servers
+
+    manager = get_mcp_manager()
+
+    while True:
+        status_list = manager.status()
+
+        console.print("\n[bold]🔌 MCP-серверы[/]\n")
+        if not status_list:
+            console.print("[dim]Серверы не настроены — добавьте первый[/]")
+        else:
+            table = Table(show_header=True, box=box.ROUNDED)
+            table.add_column("Имя")
+            table.add_column("Transport")
+            table.add_column("Включён")
+            table.add_column("Подключён")
+            table.add_column("Инструментов")
+            table.add_column("Назначение")
+            table.add_column("Ошибка", max_width=40)
+            for item in status_list:
+                target_agents = item.get("target_agents", "all")
+                scope_label = {
+                    "orchestrator": "Оркестратор/Пре-фильтр",
+                    "tester": "Тестировщик",
+                    "all": "Все агенты",
+                }.get(target_agents, "Все агенты")
+                table.add_row(
+                    str(item.get("name", "")),
+                    str(item.get("transport", "")),
+                    "✅" if item.get("enabled") else "🚫",
+                    "✅" if item.get("connected") else "—",
+                    str(item.get("tool_count", 0)),
+                    scope_label,
+                    str(item.get("error") or ""),
+                )
+            console.print(table)
+
+        console.print("\n[bold]Выберите действие:[/]")
+        console.print("  [1] Добавить сервер")
+        console.print("  [2] Включить/выключить")
+        console.print("  [3] Удалить")
+        console.print("  [4] Проверить подключение")
+        console.print("  [0] Назад")
+
+        try:
+            choice = prompt_with_navigation(
+                "Выбор", choices=["0", "1", "2", "3", "4"], default="0"
+            )
+        except (BackException, BackToMenuException, QuitException):
+            raise
+
+        if choice == "0" or not choice.strip():
+            return
+
+        try:
+            if choice == "1":
+                name = prompt_with_navigation("Имя сервера (латиница)")
+                if not name or not name.strip():
+                    continue
+                transport = prompt_with_navigation(
+                    "Transport (stdio/http/sse)",
+                    choices=["stdio", "http", "sse"],
+                )
+                if not transport:
+                    continue
+                entry = default_entry(name.strip(), transport)
+
+                console.print(
+                    "\n[bold]Для каких агентов предназначен этот MCP-сервер?[/]"
+                )
+                console.print(
+                    "  [1] (или orchestrator) — 🎯 Только для Оркестратора и "
+                    "Пре-фильтра (анализ и планирование)"
+                )
+                console.print(
+                    "  [2] (или tester) — 🧪 Только для Тестировщика "
+                    "(тестирование и верификация)"
+                )
+                console.print(
+                    "  [3] (или all / Enter) — 🌐 Для всех агентов "
+                    "(Оркестратор, Пре-фильтр и Тестировщик)"
+                )
+                try:
+                    scope_raw = prompt_with_navigation(
+                        "Назначение", default="3"
+                    )
+                except (BackException, BackToMenuException, QuitException):
+                    raise
+                scope_norm = (scope_raw or "").strip().lower()
+                if scope_norm in ("1", "orchestrator", "оркестратор"):
+                    scope_value = "orchestrator"
+                elif scope_norm in ("2", "tester", "тестировщик", "тестер"):
+                    scope_value = "tester"
+                elif scope_norm in ("3", "all", "все", "", "все агенты"):
+                    scope_value = "all"
+                else:
+                    scope_value = "all"
+                entry["target_agents"] = scope_value
+
+                if transport == "stdio":
+                    command = prompt_with_navigation(
+                        "Команда (например npx)"
+                    )
+                    if not command or not command.strip():
+                        print_warning("Команда обязательна для transport=stdio")
+                        continue
+                    entry["command"] = command.strip()
+                    args_raw = prompt_with_navigation(
+                        "Аргументы через пробел (Enter — нет)", default=""
+                    )
+                    if args_raw and args_raw.strip():
+                        entry["args"] = shlex.split(args_raw)
+                else:
+                    url = prompt_with_navigation("URL")
+                    if not url or not url.strip():
+                        print_warning(
+                            f"URL обязателен для transport={transport}"
+                        )
+                        continue
+                    entry["url"] = url.strip()
+
+                timeout_raw = prompt_with_navigation(
+                    "Timeout, сек (Enter = 60)", default=""
+                )
+                if timeout_raw and timeout_raw.strip().isdigit():
+                    entry["timeout"] = int(timeout_raw.strip())
+
+                ok, msg = manager.add_server(entry)
+                if ok:
+                    print_success(msg)
+                else:
+                    print_warning(msg)
+
+            elif choice == "2":
+                servers = load_servers()
+                if not servers:
+                    print_warning("Нет настроенных серверов")
+                    continue
+                for idx, item in enumerate(servers, 1):
+                    mark = "✅" if item.get("enabled", True) else "🚫"
+                    console.print(f"   [{idx}] {item.get('name', '')} {mark}")
+                name = prompt_with_navigation("Имя сервера")
+                target = next(
+                    (s for s in servers if s.get("name") == name), None
+                )
+                if target is None:
+                    print_warning(f"Сервер не найден: {name}")
+                    continue
+                current_enabled = target.get("enabled", True)
+                manager.set_enabled(name, not current_enabled)
+                print_info(
+                    f"Сервер {name} "
+                    f"{'включён' if not current_enabled else 'выключен'}"
+                )
+
+            elif choice == "3":
+                servers = load_servers()
+                if not servers:
+                    print_warning("Нет настроенных серверов")
+                    continue
+                for idx, item in enumerate(servers, 1):
+                    console.print(f"   [{idx}] {item.get('name', '')}")
+                name = prompt_with_navigation("Имя сервера для удаления")
+                if not name:
+                    continue
+                if confirm_with_navigation(
+                    f"Точно удалить сервер '{name}'?", default=False
+                ):
+                    manager.remove_server(name)
+                    print_info(f"Сервер {name} удалён")
+
+            elif choice == "4":
+                servers = load_servers()
+                if not servers:
+                    print_warning("Нет настроенных серверов")
+                    continue
+                for idx, item in enumerate(servers, 1):
+                    console.print(f"   [{idx}] {item.get('name', '')}")
+                name = prompt_with_navigation("Имя сервера для проверки")
+                if not name:
+                    continue
+                ok, msg = manager.test_connection(name)
+                if ok:
+                    print_success(msg)
+                else:
+                    print_warning(msg)
+        except (BackException, BackToMenuException, QuitException):
+            raise
+        except Exception as exc:
+            logger.error(f"mcp action failed: {exc}", exc_info=True)
+            print_error(f"Ошибка выполнения действия: {exc}")
+
+
 
 if __name__ == "__main__":
     # Обрабатываем Ctrl+C gracefully

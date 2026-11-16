@@ -1,9 +1,13 @@
 """
-Tool definitions for TesterAgent — unique testing tools + re-exported orchestrator read-only tools.
+Tool definitions for TesterAgent — Tester-specific tools plus re-exported
+Orchestrator read-only tools (including CHECK_ENVIRONMENT_TOOL and
+SCAN_FILE_THREATS_TOOL).
 
-Defines 6 unique Tester tools in OpenAI-compatible function-calling JSON Schema format,
-then exports TESTER_TOOLS as the combined list of orchestrator tools (minus install_dependency)
-and the 6 new tester-specific tools.
+All shared tool schemas — the Orchestrator read-only tools, the shared
+ask_user clarification tool, CHECK_ENVIRONMENT_TOOL and SCAN_FILE_THREATS_TOOL — are
+imported from app.tools.tool_definitions as a single source of truth.
+This module defines only the Tester-specific tools and assembles the
+combined TESTER_TOOLS list.
 """
 from typing import Any, Dict, List
 
@@ -23,6 +27,9 @@ from app.tools.tool_definitions import (
     CHECK_SECURITY_TOOL,
     EXTRACT_MEDIA_TOOL,
     READ_LINE_CONTEXT_TOOL,
+    ASK_USER_TOOL,
+    CHECK_ENVIRONMENT_TOOL,
+    SCAN_FILE_THREATS_TOOL,
 )
 
 
@@ -70,28 +77,6 @@ RUFF_TOOL: Dict[str, Any] = {
                 }
             },
             "required": ["file_path"]
-        }
-    }
-}
-
-
-# ============================================================================
-# CHECK_ENVIRONMENT_TOOL — Return system environment info
-# ============================================================================
-
-CHECK_ENVIRONMENT_TOOL: Dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "check_environment",
-        "description": (
-            "Returns versions of Python/Java/Go/Node/tsc, OS name/release/machine, "
-            "and system resources (CPU count, RAM, disk usage). "
-            "Use this to understand the execution environment before running code or tests."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
         }
     }
 }
@@ -261,9 +246,12 @@ TESTER_TOOLS: List[Dict[str, Any]] = [
     CHECK_SECURITY_TOOL,
     EXTRACT_MEDIA_TOOL,
     READ_LINE_CONTEXT_TOOL,
-    # Tester-specific tools (6 tools)
+    # Shared clarification channel
+    ASK_USER_TOOL,
+    # Tester-specific tools
     RUFF_TOOL,
     CHECK_ENVIRONMENT_TOOL,
+    SCAN_FILE_THREATS_TOOL,
     COMPILE_CODE_TOOL,
     RUN_CODE_TOOL,
     GIT_DIFF_VFS_DISK_TOOL,
