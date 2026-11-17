@@ -1,79 +1,27 @@
 /* Autogenesia TUI — светлая сине-белая тема (Textual TCSS) */
 
 Screen {
-    background: $background;
-    color: $text;
-}
-
-Header {
-    background: $primary;
-    color: #FFFFFF;
-    text-style: bold;
-}
-
-Footer {
     background: $surface;
     color: $text;
-    border-top: solid $border;
 }
 
-#tabs {
-    background: $surface;
-}
-
-TabPane {
-    background: $background;
-    padding: 0 1;
-}
-
-/* Таблица изменений: обязательная жёлтая рамка */
-DataTable.diff-table {
-    border: solid $diff-border;
-    height: auto;
-    max-height: 40%;
-    margin: 0 1 0 1;
-}
-
-/* Постоянная красная кнопка Emergency Stop */
-#stop-btn {
-    background: $stop;
-    color: #FFFFFF;
-    border: none;
-    min-width: 18;
-    margin: 0 1 0 1;
-}
-
-#stop-btn:hover {
-    background: #8B1A1A;
-}
-
-#stop-btn:focus {
-    background: #B71C1C;
-    border: none;
-}
-
-/* Модальные диалоги: не пересекаются с основным экраном */
 ModalScreen {
     align: center middle;
-}
-
-ModalScreen Vertical {
     background: $surface;
 }
 
 #dialog-box {
     width: 70%;
-    max-width: 92;
+    max-width: 100;
     height: auto;
     max-height: 85%;
-    border: thick $background 60%;
+    border: thick $border;
     background: $surface;
     padding: 1 2;
 }
 
 #dialog-label {
     margin-bottom: 1;
-    color: $text;
 }
 
 #dialog-buttons {
@@ -82,139 +30,135 @@ ModalScreen Vertical {
     align-horizontal: right;
 }
 
-#dialog-buttons Button {
-    margin-left: 1;
-    color: #FFFFFF;
+Button {
+    margin: 0 1;
 }
 
-OptionList {
-    background: $background;
+Button.primary {
+    background: $accent;
     color: $text;
 }
 
-/* Воркспейс */
-#status-label {
-    height: 1;
-    margin: 0 1;
+/* Splash safety net (never transparent) */
+SplashScreen {
+    background: $surface;
+    align: center middle;
+}
+
+#banner-art {
+    color: $accent;
+}
+
+#banner-title {
+    margin-top: 1;
     color: $text-muted;
+}
+
+/* Toolbar */
+#toolbar {
+    height: auto;
+    min-height: 3;
+    align-vertical: middle;
+}
+
+#toolbar Button {
+    min-width: 12;
+    height: 3;
+    margin: 0 1;
+    content-align: center middle;
+}
+
+#app-status {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    content-align: left middle;
+}
+
+/* Stop button styling */
+#stop-btn {
+    background: $stop;
+    color: $text;
+}
+
+/* Action bar */
+#action-bar {
+    height: auto;
+    max-height: 6;
+    width: 100%;
+    overflow-x: auto;
+    margin: 0;
+    padding: 0;
+}
+
+#action-bar Button {
+    min-width: 14;
+    height: 3;
+    margin: 0 1;
+    content-align: center middle;
+}
+
+#action-panel {
+    height: auto;
+    margin: 1 0;
+}
+
+#tabs {
+    height: 1fr;
+}
+
+TabPane {
+    background: $surface;
 }
 
 #chat {
     height: 1fr;
     border: round $border;
-    margin: 0 1;
+    padding: 0 1;
 }
 
-#action-panel {
+.diff-table {
     height: auto;
-    margin: 0 1;
+    max-height: 12;
 }
 
-#action-panel Button {
-    margin-right: 1;
-    color: #FFFFFF;
+#status-label {
+    color: $text;
+    padding: 0 1;
 }
 
-#accept-btn {
-    background: $success;
-}
-
-#rework-btn {
-    background: $accent;
-}
-
-#cancel-btn {
-    background: $warning;
-    color: #FFFFFF;
-}
-
-#tester-btn {
-    background: $primary;
-}
-
-#diff-btn {
-    background: $primary;
+#session-status {
+    color: $text-muted;
+    padding: 0 1;
 }
 
 #query-input {
-    margin: 0 1 1 1;
-    border: round $border;
-    background: $background;
+    height: 3;
+    margin: 1 0;
 }
 
-/* Баннер / splash / about */
-#banner-art {
-    text-align: center;
-    color: $primary;
-    margin: 1 2;
-}
-
-#banner-title {
-    text-align: center;
-    color: $text-muted;
-    margin: 0 2 1 2;
-}
-
-/* Главное меню */
+/* Menu boxes (19+ options; scrollable) */
 #menu-box {
-    width: 64;
-    max-width: 92%;
+    width: 78%;
+    max-width: 110;
     height: auto;
-    border: thick $background 60%;
+    max-height: 90%;
+    border: thick $border;
     background: $surface;
     padding: 1 2;
+    overflow-y: auto;
 }
 
 #menu-title {
-    text-style: bold;
     margin-bottom: 1;
 }
 
-/* Окно просмотра кода (Diff) */
-#diff-viewer {
-    width: 96%;
-    max-width: 170;
-    height: 90%;
-    border: thick $diff-border;
-    background: $surface;
-    padding: 0 1;
+#provider-status, #env-status, #mcp-status {
+    margin-bottom: 1;
 }
 
-#diff-header {
+OptionList {
     height: auto;
-}
-
-#diff-title {
-    width: 1fr;
-    padding: 0 1;
-    color: $text;
-}
-
-/* ===== Session status bar & action bar ===== */
-#session-status {
-    height: 1;
-    color: #666666;
-}
-
-#action-bar {
-    height: auto;
-    align-horizontal: center;
-}
-
-#action-bar Button {
-    min-width: 12;
-    margin: 0 1;
-}
-
-/* ── Visual safety net: a dismissed/mis-stacked overlay must never render
-   as a black screen. Explicit non-transparent backgrounds only; the existing
-   Screen block, ModalScreen align rule, ModalScreen Vertical, #dialog-box and
-   all button/table colours remain unchanged. ── */
-SplashScreen {
-    background: $background;
-    color: $text;
-}
-
-ModalScreen {
-    background: $background 60%;
+    max-height: 24;
+    overflow-y: auto;
 }

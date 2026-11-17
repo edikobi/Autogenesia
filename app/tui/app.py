@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+from .setup_wizard import SetupResult, run_setup_wizard
 
 import asyncio
 import json
@@ -37,12 +38,13 @@ class SplashScreen(Screen):
     BINDINGS = [("escape", "dismiss_splash", "Продолжить")]
 
     def compose(self) -> ComposeResult:
-        """Баннер + подсказка."""
+        """Баннер + подсказка + кнопка «Продолжить»."""
         yield Static(Text(render_banner(), style="bold #2196F3"), id="banner-art")
         yield Static(
             "Автономная генерация и анализ кода — нажмите любую клавишу",
             id="banner-title",
         )
+        yield Button("Продолжить", id="continue-btn", variant="primary")
 
     def on_mount(self) -> None:
         """Инициализировать флаг и запустить воркер автозакрытия (~2 сек)."""
@@ -74,9 +76,31 @@ class SplashScreen(Screen):
     def on_key(self, event) -> None:
         """Любая клавиша → app-own снятие сплеша (без pop_screen)."""
         try:
+            event.stop()
+        except Exception:
+            pass
+        try:
             self.app.request_splash_dismiss("key")
         except Exception:
             logger.debug("splash key dismiss failed", exc_info=True)
+
+    def on_click(self, event) -> None:
+        """Any click on the splash surface → app-own dismissal (idempotent)."""
+        try:
+            self.app.request_splash_dismiss("click")
+        except Exception:
+            logger.debug("splash click dismiss failed", exc_info=True)
+
+    def on_button_pressed(self, event) -> None:
+        """Button press (esp. continue-btn) → app-own dismissal and stop event."""
+        try:
+            event.stop()
+        except Exception:
+            pass
+        try:
+            self.app.request_splash_dismiss("button")
+        except Exception:
+            logger.debug("splash button dismiss failed", exc_info=True)
 
     def _dismiss_if_current(self) -> None:
         """Deprecated: владение сплешем у приложения; делегирует request_splash_dismiss."""
@@ -161,6 +185,12 @@ class AutogenesiaTUIApp(App):
         self._splash_screen = None
         self._app_loop = None
         self._repair_in_progress: bool = False
+        # Startup/setup idempotency flags
+        self._startup_menu_shown: bool = False
+        self._startup_menu_in_progress: bool = False
+        self._main_menu_in_progress: bool = False
+        self._startup_setup_complete: bool = False
+        self._startup_wizard_in_progress: bool = False
 
     # ------------------------------------------------------------- compose
 
@@ -169,6 +199,9 @@ class AutogenesiaTUIApp(App):
         yield Header()
         with Horizontal(id="toolbar"):
             yield Button("➕ Новая вкладка", id="new-tab-btn")
+            yield Button("📖 Меню", id="main-menu-btn")
+            yield Button("📁 Директория", id="change-dir-btn")
+            yield Button("🎯 Модели", id="models-btn")
             yield Static("", id="app-status")
             yield Button("⏹ Остановить", id="stop-btn")
         yield TabbedContent(id="tabs")
@@ -239,7 +272,9 @@ class AutogenesiaTUIApp(App):
                 if not self._workspace_panes():
                     try:
                         default_project = os.getcwd() or None
-                        await self._create_workspace(default_project, is_new=False)
+                        await self._create_workspace(
+                            default_project, is_new=False, setup_pending=True
+                        )
                     except Exception:
                         logger.exception("startup workspace bootstrap failed")
                 try:
@@ -271,6 +306,10 @@ class AutogenesiaTUIApp(App):
                 self.request_splash_dismiss("startup")
             except Exception:
                 logger.debug("startup splash dismiss failed", exc_info=True)
+            try:
+                self._show_startup_menu_once()
+            except Exception:
+                logger.debug("startup menu schedule failed", exc_info=True)
             self._startup_complete = True
 
     async def _ensure_live_ui(self) -> None:
@@ -308,6 +347,10 @@ class AutogenesiaTUIApp(App):
                     self._update_app_status()
                 except Exception:
                     pass
+                try:
+                    self._show_startup_menu_once()
+                except Exception:
+                    logger.debug("ensure_live_ui: startup menu schedule failed", exc_info=True)
                 try:
                     ws = self.active_workspace
                     if ws is not None:
@@ -367,6 +410,10 @@ class AutogenesiaTUIApp(App):
             )
         except Exception:
             logger.debug("ensure_live_ui schedule failed", exc_info=True)
+        try:
+            self._show_startup_menu_once()
+        except Exception:
+            logger.debug("startup menu schedule failed", exc_info=True)
 
     def _push_user_screen(self, screen, callback=None) -> None:
         """Центральный пуш немодального пользовательского экрана.
@@ -488,6 +535,11 @@ class AutogenesiaTUIApp(App):
             except Exception:
                 extra = ""
             text = f"{mode} │ 📁 {project} │ 🎯 {model} │ 💬 {thread}…" + extra
+            try:
+                if not bool(getattr(state, "setup_complete", True)):
+                    text += " │ ⏳ Настройка не завершена"
+            except Exception:
+                pass
         try:
             self.query_one("#app-status", Static).update(text)
         except Exception:
@@ -592,7 +644,11 @@ class AutogenesiaTUIApp(App):
             logger.debug("ensure_live_ui after new tab failed", exc_info=True)
 
     async def _create_workspace(
-        self, project_path: Optional[str], is_new: bool = False
+        self,
+        project_path: Optional[str],
+        is_new: bool = False,
+        setup_result: Optional["SetupResult"] = None,
+        setup_pending: bool = False,
     ) -> WorkspacePane:
         """Создать воркспейс, добавить вкладку, активировать и сохранить сессию."""
         self._workspace_count += 1
@@ -617,6 +673,16 @@ class AutogenesiaTUIApp(App):
             pane.state.is_new_project = bool(is_new)
         except Exception:
             pass
+        if setup_pending:
+            try:
+                pane.state.setup_complete = False
+            except Exception:
+                pass
+        if setup_result is not None:
+            try:
+                await self._apply_setup_result(pane, setup_result)
+            except Exception:
+                logger.debug("apply_setup_result during create failed", exc_info=True)
         tabs = self.query_one("#tabs", TabbedContent)
         try:
             await tabs.add_pane(pane)
@@ -701,12 +767,12 @@ class AutogenesiaTUIApp(App):
     async def action_main_menu(self) -> None:
         """F2: запланировать меню-флоу отдельным воркером (не блокируя pump).
 
-        Сигнатура сохранена для биндингов/pilot/тестов, но модальный флоу
-        больше не ожидается инлайн в ``_dispatch_action``. ``exclusive=True``:
-        повторное F2 отменяет предыдущий флоу, а отменённый ``push_modal``
-        резолвит свою модалку через CancelledError-хендлер — меню не
-        наслаиваются и не остаются осиротевшими.
+        Idempotency guard ``_main_menu_in_progress`` prevents duplicate menus on
+        repeated F2. ``exclusive=True`` cancels any previous flow.
         """
+        if self._main_menu_in_progress:
+            return
+        self._main_menu_in_progress = True
         self.run_worker(self._run_main_menu_flow(), group="main-menu", exclusive=True)
 
     async def _run_main_menu_flow(self) -> None:
@@ -725,12 +791,196 @@ class AutogenesiaTUIApp(App):
 
             await menus.show_main_menu(self)
         finally:
+            self._startup_menu_shown = True
+            self._startup_menu_in_progress = False
+            self._main_menu_in_progress = False
             try:
                 self.run_worker(
                     self._ensure_live_ui(), group="ensure-live-ui", exclusive=True
                 )
             except Exception:
                 logger.debug("ensure_live_ui after menu failed", exc_info=True)
+
+    def _show_startup_menu_once(self) -> None:
+        """Idempotent startup-menu trigger (after splash dismissal).
+
+        Returns early when the startup menu was already shown/in progress or a
+        ``MainMenuScreen`` is already present. Otherwise schedules
+        ``_run_startup_menu_flow`` exactly once. Never pushes splash or mutates
+        ``screen_stack[0]``.
+        """
+        if self._startup_menu_shown or self._startup_menu_in_progress:
+            return
+        try:
+            from .menus import MainMenuScreen
+
+            for scr in list(getattr(self, "screen_stack", []) or []):
+                if isinstance(scr, MainMenuScreen):
+                    self._startup_menu_shown = True
+                    return
+        except Exception:
+            logger.debug("startup menu presence check failed", exc_info=True)
+        self._startup_menu_in_progress = True
+        try:
+            self.run_worker(
+                self._run_startup_menu_flow(), group="main-menu", exclusive=True
+            )
+        except Exception:
+            self._startup_menu_in_progress = False
+            logger.debug("startup menu schedule failed", exc_info=True)
+
+    async def _run_startup_menu_flow(self) -> None:
+        """Primary startup menu route after splash: ensure live UI then delegate."""
+        try:
+            await self._ensure_live_ui()
+        except Exception:
+            logger.debug("startup ensure live ui failed", exc_info=True)
+        try:
+            await self._run_main_menu_flow()
+        finally:
+            self._startup_menu_in_progress = False
+            self._startup_menu_shown = True
+
+    async def _run_setup_wizard_flow(
+        self,
+        mode: str = "agent",
+        start_stage: Optional[str] = None,
+        allow_resume: bool = False,
+    ) -> bool:
+        """Run the setup wizard and apply its result to the active workspace.
+
+        Creates exactly one bootstrap workspace if none exists. Returns True on
+        success, False on cancellation (state unchanged on cancel).
+        """
+        if self._startup_wizard_in_progress:
+            return False
+        self._startup_wizard_in_progress = True
+        try:
+            from .setup_wizard import run_setup_wizard as _run_wizard
+        except Exception as e:
+            logger.error(f"setup wizard import failed: {e}")
+            self._startup_wizard_in_progress = False
+            return False
+        try:
+            ws = self.active_workspace
+            if ws is None:
+                try:
+                    ws = await self._create_workspace(os.getcwd() or None, is_new=False, setup_pending=True)
+                except Exception:
+                    logger.exception("wizard bootstrap workspace failed")
+                    return False
+            result = await _run_wizard(
+                self, state=ws.state, mode=mode, start_stage=start_stage, allow_resume=allow_resume
+            )
+            if result is None:
+                return False
+            try:
+                await self._apply_setup_result(ws, result)
+            except Exception:
+                logger.exception("apply setup result failed")
+                return False
+            self._startup_setup_complete = True
+            try:
+                self._update_app_status()
+            except Exception:
+                pass
+            try:
+                await ws.persist_session()
+            except Exception:
+                logger.debug("persist after wizard failed", exc_info=True)
+            try:
+                ws.query_one("#query-input").focus()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            logger.exception("setup wizard flow failed")
+            return False
+        finally:
+            self._startup_wizard_in_progress = False
+
+    async def _run_change_directory_flow(self) -> bool:
+        """Run the wizard starting at PROJECT, then rebind the current tab (no new tab)."""
+        try:
+            from .setup_wizard import PROJECT as _PROJECT_STAGE
+        except Exception:
+            _PROJECT_STAGE = "PROJECT"
+        ws = self.active_workspace
+        target_mode = ws.state.mode if ws is not None else "agent"
+        ok = await self._run_setup_wizard_flow(mode=target_mode, start_stage=_PROJECT_STAGE)
+        if not ok:
+            return False
+        return True
+
+    async def _run_resume_session_flow(self) -> bool:
+        """Resume the restored session: mark setup complete and return to chat."""
+        try:
+            await self._ensure_live_ui()
+        except Exception:
+            logger.debug("resume ensure live ui failed", exc_info=True)
+        ws = self.active_workspace
+        if ws is None:
+            try:
+                ws = await self._create_workspace(os.getcwd() or None, is_new=False)
+            except Exception:
+                logger.exception("resume bootstrap workspace failed")
+                return False
+        try:
+            ws.state.setup_complete = True
+            ws.state.setup_stage = "DONE"
+        except Exception:
+            pass
+        try:
+            self._update_app_status()
+        except Exception:
+            pass
+        try:
+            ws.query_one("#query-input").focus()
+        except Exception:
+            pass
+        return True
+
+    async def _apply_setup_result(self, ws: "WorkspacePane", result: "SetupResult") -> None:
+        """Apply a SetupResult to a WorkspacePane (no new tab)."""
+        try:
+            state = ws.state
+            state.mode = result.mode or state.mode
+            state.project_dir = result.project_dir
+            state.project_index = result.project_index or {}
+            state.is_new_project = bool(result.is_new_project)
+            state.orchestrator_model = result.orchestrator_model
+            state.orchestrator_provider = result.orchestrator_provider
+            state.generator_model = result.generator_model
+            state.generator_provider = result.generator_provider
+            state.use_router = bool(result.use_router)
+            state.is_legal_mode = bool(result.is_legal_mode)
+            state.thread_id = result.thread_id
+            state.current_thread = result.current_thread
+            state.setup_complete = True
+            state.setup_stage = "DONE"
+        except Exception:
+            logger.debug("apply setup result (state) failed", exc_info=True)
+        try:
+            ws.project_dir = result.project_dir
+        except Exception:
+            pass
+        try:
+            await ws.rebind_project(
+                result.project_dir,
+                result.project_index,
+                result.thread_id,
+                bool(result.is_new_project),
+            )
+        except Exception:
+            logger.debug("WorkspacePane.rebind_project failed", exc_info=True)
+        try:
+            await ws.persist_session()
+        except Exception:
+            logger.debug("persist_session failed", exc_info=True)
+        try:
+            self._update_app_status()
+        except Exception:
+            pass
 
     async def action_cycle_mode(self) -> None:
         """Циклическое переключение режима активного воркспейса + persist."""
@@ -858,10 +1108,20 @@ class AutogenesiaTUIApp(App):
     # ------------------------------------------------------------- events
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Кнопки тулбара: новая вкладка / экстренная остановка."""
+        """Кнопки тулбара: новая вкладка / меню / директория / модели / стоп."""
         event.stop()
         if event.button.id == "new-tab-btn":
             self.run_worker(self.action_new_tab(), exclusive=True, group="new-tab")
+        elif event.button.id == "main-menu-btn":
+            self.run_worker(self._run_main_menu_flow(), group="main-menu", exclusive=True)
+        elif event.button.id == "change-dir-btn":
+            self.run_worker(self._run_change_directory_flow(), group="change-dir", exclusive=True)
+        elif event.button.id == "models-btn":
+            ws = self.active_workspace
+            if ws is not None:
+                self.run_worker(
+                    ws._run_command_worker("/model"), group=f"cmd-{ws.tab_key}", exclusive=True
+                )
         elif event.button.id == "stop-btn":
             self.run_worker(
                 self.action_emergency_stop(), exclusive=True, group="emergency-stop"

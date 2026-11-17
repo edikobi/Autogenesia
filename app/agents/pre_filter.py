@@ -309,15 +309,58 @@ async def analyze_query(
         
         logger.info(f"[PRE-FILTER] analyze_query called: mode={mode.value}, model={model}")
         
+        # Load versioned plan context (planning mode only)
+        _plan_ctx: Optional[Dict[str, Any]] = None
+        _plan_state_mod = None
+        if is_planning and mode == PreFilterMode.ADVANCED and project_dir:
+            try:
+                from app.agents import plan_state as _ps_bootstrap
+                _plan_state_mod = _ps_bootstrap
+                _existing = _ps_bootstrap.load_or_init(project_dir)
+                _cur_v = _existing.get_current()
+                _nxt_v = _existing.next_version_number()
+                if _cur_v is not None and _cur_v.content.strip():
+                    _plan_ctx = {
+                        "previous_plan": _cur_v.content,
+                        "previous_version": _cur_v.version,
+                        "next_version": _nxt_v,
+                    }
+                    logger.info(
+                        f"[PRE-FILTER] Plan revision context loaded: "
+                        f"prev=v{_cur_v.version}, next=v{_nxt_v}"
+                    )
+            except Exception as _plc_err:
+                logger.debug(f"[PRE-FILTER] plan context load failed: {_plc_err}")
+                _plan_ctx = None
+                _plan_state_mod = None
+
         # Сформировать системный промпт
         system_prompt = _get_prefilter_analysis_system_prompt(mode, is_planning)
-        
+
         # [FIX] Форматируем системный промпт, если он содержит плейсхолдеры
         try:
             system_prompt = system_prompt.format(compact_index=compact_index)
         except (KeyError, IndexError):
             # Если формат не удался или плейсхолдера нет - оставляем как есть
             pass
+
+        # Append plan-revision section (only when a previous plan version exists)
+        if _plan_ctx is not None:
+            try:
+                from app.llm.prompt_templates import _build_plan_revision_section
+                _revision_section = _build_plan_revision_section(
+                    previous_plan=_plan_ctx["previous_plan"],
+                    previous_version=int(_plan_ctx["previous_version"]),
+                    next_version=int(_plan_ctx["next_version"]),
+                )
+                if _revision_section:
+                    system_prompt = system_prompt + "\n\n" + _revision_section
+                    logger.info(
+                        f"[PRE-FILTER] Appended plan revision section "
+                        f"(v{_plan_ctx['previous_version']} → v{_plan_ctx['next_version']})"
+                    )
+            except Exception as _rev_err:
+                logger.debug(f"[PRE-FILTER] plan revision section append failed: {_rev_err}")
         
         # Сформировать user промпт
         user_prompt = _get_prefilter_analysis_user_prompt(
@@ -374,6 +417,52 @@ async def analyze_query(
                 
                 # Извлекаем план
                 plan = extract_plan(final_response)
+
+                # Resolve canonical plan body via parse_plan_response when a previous plan exists.
+                # When `_plan_ctx` is absent, `extract_plan` above is the deterministic legacy path —
+                # a diff-only response without a previous plan is treated as a failed resolution.
+                from app.agents import plan_state as _ps_resolve
+                if _plan_ctx is not None:
+                    try:
+                        _result = _ps_resolve.parse_plan_response(
+                            response=final_response,
+                            previous_plan=_plan_ctx["previous_plan"],
+                            previous_version=int(_plan_ctx["previous_version"]),
+                            next_version=int(_plan_ctx["next_version"]),
+                        )
+                    except Exception as _parse_err:
+                        logger.warning(
+                            f"[PRE-FILTER] parse_plan_response raised: {_parse_err}"
+                        )
+                        _result = None
+                    if _result is not None and getattr(_result, "success", False):
+                        plan = _result.content or ""
+                    else:
+                        _resolution_error = (
+                            getattr(_result, "error", None)
+                            if _result is not None
+                            else "parse_plan_response raised"
+                        )
+                        logger.warning(
+                            f"[PRE-FILTER] Plan resolution failed: {_resolution_error}"
+                        )
+                        plan = ""
+                else:
+                    # Guard: a diff-only response without a previous plan must not
+                    # corrupt the canonical file — treat it as a failed resolution.
+                    try:
+                        _raw = final_response or ""
+                        if (
+                            _ps_resolve.PLAN_DIFF_MARKER in _raw
+                            and _ps_resolve.PLAN_MARKER not in _raw
+                        ):
+                            logger.warning(
+                                "[PRE-FILTER] Diff-only response without previous plan; "
+                                "treating as failed resolution (empty canonical)."
+                            )
+                            plan = ""
+                    except Exception:
+                        pass
                 
                 advice = PreFilterAdvice(
                     clarified_query=user_query,
@@ -386,6 +475,41 @@ async def analyze_query(
                     full_response=final_response,
                     model_used=final_model
                 )
+                # Versioned plan persistence (canonical current_plan.md + archive + history)
+                try:
+                    if project_dir and plan:
+                        if _plan_state_mod is None:
+                            from app.agents import plan_state as _ps_fallback
+                            _plan_state_mod = _ps_fallback
+                        _summary = "Initial plan"
+                        if _plan_ctx and int(_plan_ctx.get("previous_version", 0) or 0) > 0:
+                            _summary = f"Revision from v{_plan_ctx['previous_version']}"
+                        _new_state = _plan_state_mod.commit_plan(
+                            project_dir, plan, summary=_summary
+                        )
+                        _cur_new = _new_state.get_current()
+                        if _cur_new is not None:
+                            logger.info(
+                                f"[PRE-FILTER] Plan committed as v{_cur_new.version} "
+                                f"→ .ai-agent/current_plan.md"
+                            )
+                except Exception as _plan_save_err:
+                    # Persistence failures are hard: narrowed so PlanStateError propagates.
+                    try:
+                        from app.agents.plan_state import PlanStateError as _PlanStateError
+                        _is_hard_failure = isinstance(_plan_save_err, _PlanStateError)
+                    except Exception:
+                        _is_hard_failure = False
+                    if _is_hard_failure:
+                        logger.error(
+                            f"[PRE-FILTER] plan state save failed (hard failure): "
+                            f"{_plan_save_err}",
+                            exc_info=True,
+                        )
+                        raise
+                    logger.warning(
+                        f"[PRE-FILTER] plan state save failed: {_plan_save_err}"
+                    )
                 return advice
             else:
                 # Обычный продвинутый режим

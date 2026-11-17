@@ -383,67 +383,68 @@ class FileModifier:
         # Полная замена файла (новый файл или перезапись)
         "REPLACE_FILE": ModifyMode.REPLACE_FILE,
         "CREATE_FILE": ModifyMode.REPLACE_FILE,  # Алиас
-        
+
         # Вставка в класс
         "INSERT_CLASS": ModifyMode.INSERT_INTO_CLASS,
+        "INSERT_INTO_CLASS": ModifyMode.INSERT_INTO_CLASS,  # Алиас (parser token from code_generator)
         "ADD_METHOD": ModifyMode.INSERT_INTO_CLASS,  # Алиас
-        
+
         # Вставка в файл (после импортов)
         "INSERT_FILE": ModifyMode.INSERT_INTO_FILE,
         "ADD_FUNCTION": ModifyMode.INSERT_INTO_FILE,  # Алиас
-        
+
         # Добавление в конец файла
         "APPEND_FILE": ModifyMode.APPEND_TO_FILE,
         "APPEND": ModifyMode.APPEND_TO_FILE,  # Алиас
-        
+
         # Замена существующего метода
         "REPLACE_METHOD": ModifyMode.REPLACE_METHOD,
         "MODIFY_METHOD": ModifyMode.REPLACE_METHOD,  # Алиас
-        
+
         # Замена существующей функции
         "REPLACE_FUNCTION": ModifyMode.REPLACE_FUNCTION,
         "MODIFY_FUNCTION": ModifyMode.REPLACE_FUNCTION,  # Алиас
-        
+
         # Замена существующего класса
         "REPLACE_CLASS": ModifyMode.REPLACE_CLASS,
         "MODIFY_CLASS": ModifyMode.REPLACE_CLASS,  # Алиас
-        
+
         # Добавление импортов
         "INSERT_IMPORT": ModifyMode.INSERT_IMPORT,
         "ADD_IMPORT": ModifyMode.INSERT_IMPORT,  # Алиас
-        
+
         # Замена импортов
         "REPLACE_IMPORT": ModifyMode.REPLACE_IMPORT,
-        
+
         # Внутрь метода:
         "PATCH_METHOD": ModifyMode.PATCH_METHOD,
         "INSERT_INTO_METHOD": ModifyMode.PATCH_METHOD,  # Алиас
         "ADD_LINES": ModifyMode.PATCH_METHOD,           # Алиас
-        
+
         # Работа с телом класса (атрибуты)
         "INSERT_IN_CLASS": ModifyMode.INSERT_IN_CLASS,
         "ADD_ATTRIBUTE": ModifyMode.INSERT_IN_CLASS,  # Алиас
         "REPLACE_IN_CLASS": ModifyMode.REPLACE_IN_CLASS,
         "MODIFY_ATTRIBUTE": ModifyMode.REPLACE_IN_CLASS,  # Алиас
-        
+
         # Работа внутри методов
         "REPLACE_IN_METHOD": ModifyMode.REPLACE_IN_METHOD,
         "MODIFY_METHOD_LINE": ModifyMode.REPLACE_IN_METHOD,  # Алиас
-        
+
         # Работа внутри функций
         "INSERT_IN_FUNCTION": ModifyMode.INSERT_IN_FUNCTION,
         "PATCH_FUNCTION": ModifyMode.INSERT_IN_FUNCTION,  # Алиас
         "REPLACE_IN_FUNCTION": ModifyMode.REPLACE_IN_FUNCTION,
-        
+
         # Новые функции
         "ADD_NEW_FUNCTION": ModifyMode.ADD_NEW_FUNCTION,
         "CREATE_FUNCTION": ModifyMode.ADD_NEW_FUNCTION,  # Алиас
-        
+
         # Глобальные переменные
         "REPLACE_GLOBAL": ModifyMode.REPLACE_GLOBAL,
         "MODIFY_GLOBAL": ModifyMode.REPLACE_GLOBAL,  # Алиас
         "REPLACE_CONSTANT": ModifyMode.REPLACE_GLOBAL,  # Алиас
-        
+
         "ADD_NEW_CLASS": ModifyMode.ADD_NEW_CLASS,
     }
     

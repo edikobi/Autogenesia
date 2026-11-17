@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 _PROVIDERS = ["openrouter", "routerai", "deepseek", "glm", "opencode_go", "qwencloud"]
 
 _MENU_CSS = """
-    OptionList { height: auto; max-height: 16; }
+    OptionList { height: auto; max-height: 24; }
     #provider-status { margin-bottom: 1; }
 """
 
@@ -113,7 +113,10 @@ class MainMenuScreen(ModalScreen):
 
                         Option("[16] 🆕 Режим нового проекта (N)", id="16"),
                     Option("[0] 🚪 Выход", id="0"),
-                Option("[T] ➕ Новая вкладка", id="T"),
+                        Option("[D] 📁 Сменить/выбрать директорию", id="D"),
+                    Option("[R] ▶ Продолжить восстановленную сессию", id="R"),
+                    Option("[S] 🚀 Мастер настройки (как в CLI)", id="S"),
+                    Option("[T] ➕ Новая вкладка", id="T"),
                 id="menu-options",
             )
             with Horizontal(id="dialog-buttons"):
@@ -208,15 +211,14 @@ async def show_main_menu(app) -> None:
         ws = app.active_workspace
 
         if choice in ("1", "2", "3"):
-            if ws is None:
-                app.notify("Нет активной вкладки", severity="warning")
-                continue
-            modes = {"1": "ask", "2": "agent", "3": "general"}
-            ws.state.mode = modes[choice]
-            settings = load_user_settings()
-            settings["mode"] = ws.state.mode
-            save_user_settings(settings)
-            app.notify(f"Режим: {ws.state.mode}", severity="information")
+            target_mode = {"1": "ask", "2": "agent", "3": "general"}[choice]
+            try:
+                ok = await app._run_setup_wizard_flow(mode=target_mode)
+            except Exception as e:
+                logger.debug(f"setup wizard via menu failed: {e}")
+                ok = False
+            if ok:
+                return
             continue
 
         if choice == "4":
@@ -466,6 +468,34 @@ async def show_main_menu(app) -> None:
 
         if choice == "T":
             await app.action_new_tab()
+            continue
+
+        if choice == "D":
+            try:
+                ok = await app._run_change_directory_flow()
+            except Exception as e:
+                logger.debug(f"change directory flow failed: {e}")
+                ok = False
+            if ok:
+                return
+            continue
+
+        if choice == "R":
+            try:
+                await app._run_resume_session_flow()
+            except Exception as e:
+                logger.debug(f"resume session flow failed: {e}")
+            return
+
+        if choice == "S":
+            try:
+                target_mode = ws.state.mode if ws is not None else "agent"
+                ok = await app._run_setup_wizard_flow(mode=target_mode)
+            except Exception as e:
+                logger.debug(f"setup wizard flow failed: {e}")
+                ok = False
+            if ok:
+                return
             continue
 
 

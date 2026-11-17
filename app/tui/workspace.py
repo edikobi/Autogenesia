@@ -43,6 +43,22 @@ _STATUS_LABELS: Dict[str, str] = {
 class WorkspacePane(TabPane):
     """Одна вкладка воркспейса: изолированный пайплайн + UI-виджеты."""
 
+    def on_mount(self) -> None:
+        """Периодический слив токенов, настройка бара и фокус (best-effort)."""
+        self.set_interval(0.1, self._flush_tokens)
+        try:
+            self._configure_action_bar(None)
+        except Exception:
+            self._log(logging.DEBUG, "configure action bar on mount failed", exc_info=True)
+        try:
+            self._update_session_status()
+        except Exception:
+            pass
+        # Focus is best-effort behind the startup menu when setup is incomplete.
+        try:
+            self.query_one("#query-input", Input).focus()
+        except Exception:
+            self._log(logging.DEBUG, "focus query-input failed", exc_info=True)
     def __init__(
         self,
         app: Any,
@@ -125,6 +141,8 @@ class WorkspacePane(TabPane):
             yield Button("📊 Индекс", id="btn-index")
             yield Button("💾 Бэкапы", id="btn-backup")
             yield Button("🗜 Сжать", id="btn-compress")
+            yield Button("📖 Главное меню", id="btn-main-menu")
+            yield Button("📁 Сменить директорию", id="btn-change-dir")
             yield Button("⏹ Остановить", id="btn-stop")
         yield Input(placeholder="Введите запрос или /команду...", id="query-input")
 
@@ -351,6 +369,31 @@ class WorkspacePane(TabPane):
             self.bridge.resolve_gate(text)
             return
 
+        # Setup guard: block query until configuration is complete
+        if gate_kind is None:
+            try:
+                setup_ready = bool(getattr(self.state, "setup_complete", True))
+            except Exception:
+                setup_ready = True
+            if not setup_ready and not text.startswith("/"):
+                self.app.notify(
+                    "Сначала завершите настройку (F2 → Мастер настройки)",
+                    severity="warning",
+                )
+                try:
+                    self.query_one("#query-input", Input).value = ""
+                except Exception:
+                    pass
+                try:
+                    self.run_worker(
+                        self.app.action_main_menu(),
+                        group="main-menu",
+                        exclusive=True,
+                    )
+                except Exception:
+                    pass
+                return
+
         if self._query_running and gate_kind is None:
             self.app.notify(
                 "Запрос уже выполняется — дождитесь завершения или нажмите F9",
@@ -570,12 +613,13 @@ class WorkspacePane(TabPane):
             bar = self.query_one("#action-bar", Horizontal)
         except Exception:
             return
+        permanent_active = {"btn-main-menu", "btn-change-dir", "btn-models"}
         if gate_kind is None:
             # Фаза вкладки (IDLE/RUNNING) — быстрые кнопки всегда видимы
             if self._query_running:
-                active = {"btn-stop"}
+                active = {"btn-stop"} | permanent_active
             else:
-                active = {"btn-mode", "btn-models", "btn-index", "btn-backup", "btn-compress"}
+                active = {"btn-mode", "btn-models", "btn-index", "btn-backup", "btn-compress"} | permanent_active
                 try:
                     if self.bridge.has_pending:
                         active.add("btn-diff2")
@@ -587,12 +631,13 @@ class WorkspacePane(TabPane):
                 "confirmation": {"btn-apply", "btn-rework", "btn-tester", "btn-diff2", "btn-cancel2"},
                 "post_tester": {"btn-apply", "btn-rework", "btn-rerun", "btn-diff2", "btn-cancel2"},
             }
-            active = visibility_map.get(gate_kind, set())
+            active = visibility_map.get(gate_kind, set()) | permanent_active
         all_buttons = [
             "btn-plan-accept", "btn-plan-edit", "btn-plan-cancel",
             "btn-apply", "btn-rework", "btn-tester", "btn-rerun",
             "btn-diff2", "btn-cancel2",
-            "btn-mode", "btn-models", "btn-index", "btn-backup", "btn-compress", "btn-stop",
+            "btn-mode", "btn-models", "btn-index", "btn-backup", "btn-compress",
+            "btn-main-menu", "btn-change-dir", "btn-stop",
         ]
         for bid in all_buttons:
             try:
@@ -775,6 +820,67 @@ class WorkspacePane(TabPane):
         """Кнопка 'Модели' → запуск /model."""
         event.stop()
         self.run_worker(self._run_command_worker("/model"), group=f"cmd-{self.tab_key}", exclusive=True)
+
+    @on(Button.Pressed, "#btn-main-menu")
+    def _on_btn_main_menu(self, event: Button.Pressed) -> None:
+        """Toolbar 'Главное меню' → schedule the main-menu flow via worker."""
+        event.stop()
+        try:
+            self.run_worker(
+                self.app._run_main_menu_flow(), group="main-menu", exclusive=True
+            )
+        except Exception:
+            self._log(logging.DEBUG, "main menu schedule failed", exc_info=True)
+
+    @on(Button.Pressed, "#btn-change-dir")
+    def _on_btn_change_dir(self, event: Button.Pressed) -> None:
+        """Toolbar 'Сменить директорию' → schedule the change-dir flow (no new tab)."""
+        event.stop()
+        try:
+            self.run_worker(
+                self.app._run_change_directory_flow(),
+                group="change-dir",
+                exclusive=True,
+            )
+        except Exception:
+            self._log(logging.DEBUG, "change-dir schedule failed", exc_info=True)
+
+    async def rebind_project(
+        self,
+        project_dir: Optional[str],
+        project_index: Optional[Dict[str, Any]],
+        thread_id: Optional[str],
+        is_new_project: bool,
+    ) -> None:
+        """Rebind the current workspace to a new project without creating a tab.
+
+        Updates state, delegates to ``self.bridge.rebind_project(...)``, refreshes
+        session/app status and persists the session. Chat log/widgets are kept.
+        """
+        self.project_dir = project_dir
+        try:
+            self.state.project_dir = project_dir
+            self.state.project_index = project_index or {}
+            self.state.thread_id = thread_id
+            self.state.is_new_project = bool(is_new_project)
+        except Exception:
+            self._log(logging.DEBUG, "rebind state update failed", exc_info=True)
+        try:
+            self.bridge.rebind_project(project_dir, project_index, thread_id, is_new_project)
+        except Exception:
+            self._log(logging.ERROR, "rebind_project (bridge) failed", exc_info=True)
+        try:
+            self._update_session_status()
+        except Exception:
+            pass
+        try:
+            self.app._update_app_status()
+        except Exception:
+            pass
+        try:
+            await self.persist_session()
+        except Exception:
+            self._log(logging.DEBUG, "persist after rebind failed", exc_info=True)
 
     @on(Button.Pressed, "#btn-index")
     def _on_btn_index(self, event: Button.Pressed) -> None:

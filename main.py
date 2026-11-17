@@ -1449,10 +1449,24 @@ async def run_prefilter_analysis(
                 
                 if project_dir:
                     try:
+                        from app.agents import plan_state as _ps
+                        canonical = str(advice.raw_response or "")
                         plan_path = Path(project_dir) / ".ai-agent" / "current_plan.md"
-                        plan_path.parent.mkdir(parents=True, exist_ok=True)
-                        plan_path.write_text(advice.raw_response, encoding="utf-8")
-                        console.print(f"[dim]План сохранён в {plan_path}[/]")
+                        if canonical.strip():
+                            _summary = "Initial plan"
+                            try:
+                                _state_before = _ps.load_or_init(project_dir)
+                                _cur_before = _state_before.get_current()
+                                if _cur_before is not None and int(_cur_before.version or 0) > 0:
+                                    _summary = f"Revision from v{_cur_before.version}"
+                            except Exception:
+                                pass
+                            _ps.commit_plan(project_dir, canonical, summary=_summary)
+                            console.print(f"[dim]План сохранён в {plan_path}[/]")
+                        else:
+                            console.print(
+                                "[yellow]Не удалось сохранить план: пустой canonical plan[/]"
+                            )
                     except Exception as e:
                         console.print(f"[yellow]Не удалось сохранить план: {e}[/]")
             else:

@@ -303,6 +303,8 @@ class WorkspacePipeline:
         self._token_buffer: Deque[str] = deque(maxlen=600)
         self._bg_tasks: set = set()
         self._last_result: Any = None
+        self._last_canonical_plan: str = ""
+        self._history_manager = history_manager
         # Асинхронный гейт пользовательского ввода (контрольные точки)
         self._gate: Optional[asyncio.Future] = None
         self._gate_kind: Optional[str] = None
@@ -346,6 +348,63 @@ class WorkspacePipeline:
                 logger.debug(f"sync_models_to_pipeline: generator provider failed: {gen_err}")
         except Exception as e:
             logger.debug(f"sync_models_to_pipeline failed: {e}")
+
+    def rebind_project(
+        self,
+        project_dir: Optional[str],
+        project_index: Optional[Dict[str, Any]],
+        thread_id: Optional[str],
+        is_new_project: bool,
+    ) -> None:
+        """Rebind the current workspace to a new project without creating a new tab.
+
+        Updates StateAdapter fields, rebuilds the AgentPipeline via the stored
+        history manager and ``create_pipeline(...)``, preserves the
+        PipelineAdapter wrapper, dispatch behaviour, cancel/gate state and
+        callbacks. Calls ``sync_models_to_pipeline()`` after rebuilding.
+        On failure the previous pipeline is left usable.
+
+        Args:
+            project_dir: New project directory (or None).
+            project_index: Loaded semantic index for the new project.
+            thread_id: Conversation thread bound to the new project.
+            is_new_project: Whether the new project has no on-disk index yet.
+        """
+        try:
+            old_pipeline = self.pipeline
+            old_history_manager = self._history_manager
+        except Exception:
+            old_pipeline = None
+            old_history_manager = None
+
+        try:
+            self.state.project_dir = project_dir
+            self.state.project_index = project_index or {}
+            self.state.thread_id = thread_id
+            self.state.is_new_project = bool(is_new_project)
+
+            new_pipeline = create_pipeline(
+                project_dir=project_dir,
+                history_manager=self._history_manager,
+                thread_id=thread_id,
+                project_index=self.state.project_index,
+                enable_type_checking=self.state.enable_type_checking,
+                generator_model=self.state.generator_model,
+            )
+            self.pipeline = (
+                new_pipeline
+                if isinstance(new_pipeline, PipelineAdapter)
+                else PipelineAdapter(new_pipeline)
+            )
+            self._last_canonical_plan = ""
+            self.sync_models_to_pipeline()
+            self.dispatch("session_status", {})
+            logger.info(f"[{self.tab_key}] rebind_project → {project_dir}")
+        except Exception as e:
+            logger.error(f"[{self.tab_key}] rebind_project failed: {e}", exc_info=True)
+            # Restore previous pipeline so the existing tab keeps working
+            if old_pipeline is not None:
+                self.pipeline = old_pipeline
 
     async def wait_gate_input(self, kind: str, prompt_text: str) -> str:
         """Открыть асинхронную контрольную точку и дождаться ввода пользователя.
@@ -1203,30 +1262,94 @@ class WorkspacePipeline:
                     return
                 _gm = (gate_text or "").strip()
                 if _gm:
+                    _project_dir_for_plan = getattr(self.state, "project_dir", None)
+                    _version_before = 0
+                    try:
+                        if _project_dir_for_plan:
+                            from app.agents import plan_state as _ps_before
+                            _state_b = _ps_before.load_or_init(_project_dir_for_plan)
+                            _cur_b = _state_b.get_current()
+                            _version_before = _cur_b.version if _cur_b else 0
+                    except Exception:
+                        _version_before = 0
                     try:
                         _new_advice = await self._run_prefilter(
                             user_request + "\n\n[USER PLAN FEEDBACK]\n" + _gm
                         )
                         if _new_advice:
                             prefilter_advice = _new_advice
+                            # Show line-numbered diff (best-effort, never breaks gate)
+                            try:
+                                if _project_dir_for_plan:
+                                    from app.agents import plan_state as _ps_after
+                                    _state_a = _ps_after.load_or_init(_project_dir_for_plan)
+                                    _cur_a = _state_a.get_current()
+                                    _version_after = _cur_a.version if _cur_a else 0
+                                    if _version_after > _version_before:
+                                        _last_diff = _state_a.get_last_diff()
+                                        if _last_diff is not None and not _last_diff.is_empty():
+                                            self.dispatch(
+                                                "log",
+                                                f"📝 План обновлён "
+                                                f"(v{_version_before} → v{_version_after}):\n"
+                                                + _last_diff.to_unified(),
+                                            )
+                            except Exception:
+                                logger.debug("plan diff display failed", exc_info=True)
                     except Exception as _pe:
                         logger.debug(f"plan feedback regeneration failed: {_pe}")
                 # Пустой ввод — повторное открытие гейта без перегенерации.
-            # Best-effort сохранение плана в .ai-agent/current_plan.md
+            # Canonical сохранение — plan_state держит current_plan.md как источник истины.
             try:
                 _project_dir = getattr(self.state, "project_dir", None)
-                if _project_dir:
-                    _agent_dir = os.path.join(_project_dir, ".ai-agent")
-                    os.makedirs(_agent_dir, exist_ok=True)
-                    _plan_path = os.path.join(_agent_dir, "current_plan.md")
-                    with open(_plan_path, "w", encoding="utf-8") as _pf:
-                        _pf.write(prefilter_advice or "")
+                _canonical_source = str(self._last_canonical_plan or "").strip()
+                if not _canonical_source:
+                    _canonical_source = str(prefilter_advice or "").strip()
+                if _project_dir and _canonical_source:
+                    from app.agents import plan_state as _plan_state_mod
+                    _final_state = _plan_state_mod.load_or_init(_project_dir)
+                    _cur = _final_state.get_current()
+                    if _cur is None or _cur.content != _canonical_source:
+                        _final_state.commit_plan(
+                            _project_dir,
+                            _canonical_source,
+                            summary="Final accepted plan",
+                        )
             except Exception as _save_err:
+                from app.agents.plan_state import PlanStateError as _PlanStateError
+                if isinstance(_save_err, _PlanStateError):
+                    logger.error(f"canonical plan commit failed: {_save_err}")
+                    self.dispatch("log", f"❌ Ошибка сохранения плана: {_save_err}")
+                    self.dispatch(
+                        "status",
+                        {
+                            "status": PipelineStatus.FAILED.value,
+                            "message": "План не сохранён",
+                        },
+                    )
+                    return
                 logger.debug(f"current_plan.md save failed: {_save_err}")
 
         # 2. Основной пайплайн
         self.sync_models_to_pipeline()
         mode = PipelineMode.ASK if self.state.mode == "ask" else PipelineMode.AGENT
+
+        # Rebuild advisory from canonical plan when planning (never treat formatted text as canonical).
+        _process_advice = prefilter_advice
+        if self.state.prefilter_mode == "advanced":
+            _canon = str(self._last_canonical_plan or "").strip()
+            if not _canon:
+                self.dispatch("log", "❌ План не сформирован — отмена запроса")
+                self.dispatch(
+                    "status",
+                    {
+                        "status": PipelineStatus.FAILED.value,
+                        "message": "Пустой план",
+                    },
+                )
+                return
+            _process_advice = self._format_canonical_plan_for_orchestrator(_canon)
+
         result = await self.pipeline.process_request(
             user_request=user_request,
             history=self.history,
@@ -1238,7 +1361,7 @@ class WorkspacePipeline:
             on_stage=self.on_stage,
             on_user_decision=self.on_user_decision,
             on_token=self.on_token,
-            prefilter_advice=prefilter_advice,
+            prefilter_advice=_process_advice,
         )
         self._last_result = result
         self._pending_changes = list(getattr(result, "pending_changes", []) or [])
@@ -1425,19 +1548,34 @@ class WorkspacePipeline:
                 is_new_project=self.state.is_new_project,
                 on_tool_call=lambda n, a, r, s: self.on_tool_call(n, a, r, s),
                 preferred_provider=self.state.prefilter_provider,
+                on_token=self.on_token,
             )
             if advice is None:
+                self._last_canonical_plan = ""
                 return ""
-            text = self._format_advice(advice)
-            try:
-                display_md = self._format_advice_for_display(advice)
-                if display_md:
-                    translated = await safe_translate(display_md, "Pre-filter analysis advice")
-                    if translated:
-                        self.dispatch("markdown", translated)
-            except Exception:
-                pass
-            return text
+            # In advanced planning mode, advice.raw_response holds the canonical plan.
+            if self.state.prefilter_mode == "advanced":
+                canonical = str(getattr(advice, "raw_response", "") or "").strip()
+                self._last_canonical_plan = canonical
+                try:
+                    display_md = self._format_advice_for_display(advice)
+                    if display_md:
+                        self.dispatch("markdown", display_md)
+                except Exception:
+                    logger.debug("planning display failed", exc_info=True)
+            else:
+                self._last_canonical_plan = ""
+                text_advice = self._format_advice(advice)
+                try:
+                    display_md = self._format_advice_for_display(advice)
+                    if display_md:
+                        translated = await safe_translate(display_md, "Pre-filter analysis advice")
+                        if translated:
+                            self.dispatch("markdown", translated)
+                except Exception:
+                    pass
+                return text_advice
+            return self._format_advice(advice)
         except Exception as e:
             logger.warning(f"pre-filter analysis failed: {e}")
             return ""
@@ -1511,6 +1649,38 @@ class WorkspacePipeline:
             return _build_prefilter_advice_section().format(prefilter_advice=content)
         except Exception:
             return str(raw).strip()
+
+    def _format_canonical_plan_for_orchestrator(self, canonical_plan: str) -> str:
+        """Wrap the canonical plan using the existing advisory templates for Orchestrator.
+
+        Uses ``_build_prefilter_advice_section_agent`` (existing project) or
+        ``_build_prefilter_advice_section_new_project_agent`` (new project).
+        Falls back to raw canonical text on import/format failure. Never
+        translates, truncates or includes diff markers.
+
+        Args:
+            canonical_plan: Full canonical plan body.
+
+        Returns:
+            Wrapped advisory string (or raw canonical text on failure).
+        """
+        raw = (canonical_plan or "").strip()
+        if not raw:
+            return ""
+        try:
+            new_project = bool(getattr(self.state, "is_new_project", False))
+            if new_project:
+                from app.llm.prompt_templates import (
+                    _build_prefilter_advice_section_new_project_agent as _advice_builder,
+                )
+            else:
+                from app.llm.prompt_templates import (
+                    _build_prefilter_advice_section_agent as _advice_builder,
+                )
+            return _advice_builder().format(prefilter_advice=raw)
+        except Exception as e:
+            logger.debug(f"_format_canonical_plan_for_orchestrator fallback: {e}")
+            return raw
 
     # ------------------------------------------------------------- apply / discard
 
@@ -2109,6 +2279,19 @@ class WorkspacePipeline:
                 return ""
             if isinstance(advice, str):
                 return advice
+            # Planning branch: display the full canonical plan without truncation.
+            if self.state.prefilter_mode == "advanced":
+                canonical = str(getattr(advice, "raw_response", "") or "").strip()
+                if not canonical:
+                    canonical = str(getattr(advice, "full_response", "") or "").strip()
+                if not canonical:
+                    return ""
+                tool_calls = int(getattr(advice, "tool_calls_made", 0) or 0)
+                title = "📋 План (Продвинутый pre-filter)"
+                if tool_calls > 0:
+                    title += f" | 🛠️ {tool_calls} инструментов"
+                return f"{title}\n\n{canonical}"
+
             parts = []
             clarified = str(getattr(advice, "clarified_query", "") or "")
             if clarified.strip():
@@ -2136,8 +2319,6 @@ class WorkspacePipeline:
                 if not raw:
                     return ""
                 body = raw
-                if len(body) > 2000:
-                    body = body[:2000] + "\n\n... (обрезано для отображения)"
             if not body:
                 return ""
             mode_label = (

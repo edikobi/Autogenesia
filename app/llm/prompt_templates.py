@@ -1517,7 +1517,7 @@ def _build_prefilter_analysis_system_prompt_advanced() -> str:
 def _build_prefilter_planning_system_prompt() -> str:
     """Build system prompt for Pre-filter in PLANNING mode (Agent Mode Advanced)."""
     prompt_parts: List[str] = []
-    
+
     prompt_parts.append("You are a Lead Architect. Your goal is to produce a definitive IMPLEMENTATION PLAN.")
     prompt_parts.append("")
     prompt_parts.append("YOUR MISSION:")
@@ -1526,9 +1526,8 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("STRICT RULES:")
     prompt_parts.append("1. LANGUAGE: Respond in the same language as the user's query.")
     prompt_parts.append("2. NO FULL CODE: DO NOT write full code implementations. Focus exclusively on the architectural plan. Use snippets only. Code generation is the Orchestrator's task.")
-    # Это новое
-    prompt_parts.append("3. COMPLETION & OUTPUT: You must not get stuck in tool-calling loops. Once you have gathered sufficient context, you MUST stop calling tools and generate your final text response. NEVER end your turn without outputting the formatted plan.")    
-    
+    prompt_parts.append("3. COMPLETION & OUTPUT: You must not get stuck in tool-calling loops. Once you have gathered sufficient context, you MUST stop calling tools and generate your final text response. NEVER end your turn without outputting the formatted plan.")
+
     prompt_parts.append("")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("AVAILABLE TOOLS")
@@ -1543,7 +1542,7 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("• read_file(file_path) — Full context for deep logic review.")
     prompt_parts.append("• ask_user(question, options?, context?) — Direct clarification channel; the answer returns as a tool result. Reserve it for genuine blockers (do not ask about trivia discoverable from the codebase).")
     prompt_parts.append("")
-    prompt_parts.append("Use tools strategically to gather necessary context. You are free to make as many tool calls as needed to fully understand the task—there is no arbitrary limit. However, you MUST stop calling tools and generate your final text response as soon as you have sufficient context.")    
+    prompt_parts.append("Use tools strategically to gather necessary context. You are free to make as many tool calls as needed to fully understand the task—there is no arbitrary limit. However, you MUST stop calling tools and generate your final text response as soon as you have sufficient context.")
     prompt_parts.append("")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("INVESTIGATION & CONTRACT ANALYSIS")
@@ -1553,6 +1552,42 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("1. Study contracts and dependencies: Understand how existing components interact.")
     prompt_parts.append("2. Analyze impact: Consider how your proposed changes will affect these dependencies.")
     prompt_parts.append("3. Error tracing: If fixing a bug, identify where the error originates and trace its structural relationships.")
+    prompt_parts.append("")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("🔁 PLAN REVISION CONTRACT")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("")
+    prompt_parts.append("When a PREVIOUS PLAN is supplied to you, it is rendered in NUMBERED form:")
+    prompt_parts.append("  NNNN| <line>")
+    prompt_parts.append("• Line numbers are 1-based, zero-padded to 4 digits, and refer ONLY to the last canonical plan version.")
+    prompt_parts.append("• Empty lines are numbered too.")
+    prompt_parts.append("")
+    prompt_parts.append("You have TWO valid ways to respond to a revision request:")
+    prompt_parts.append("")
+    prompt_parts.append("A) FULL REWRITE (always allowed). Enclose the complete revised plan in ###Plan##### markers:")
+    prompt_parts.append("   ###Plan#####")
+    prompt_parts.append("   <complete revised plan here>")
+    prompt_parts.append("   ###Plan#####")
+    prompt_parts.append("")
+    prompt_parts.append("B) DIFF-ONLY revision (optional). Enclose a unified diff in ###PlanDiff##### markers:")
+    prompt_parts.append("   ###PlanDiff#####")
+    prompt_parts.append("   @@ -start,count +new_start,new_count @@")
+    prompt_parts.append("    context line")
+    prompt_parts.append("   -removed line")
+    prompt_parts.append("   +added line")
+    prompt_parts.append("   ###PlanDiff#####")
+    prompt_parts.append("")
+    prompt_parts.append("DIFF RULES:")
+    prompt_parts.append("• Hunk headers: @@ -start,count +new_start,new_count @@ (start/count 1-based inclusive).")
+    prompt_parts.append("• count == 0 means pure insertion.")
+    prompt_parts.append("• Body lines use a prefix: ' ' context, '-' removal, '+' addition.")
+    prompt_parts.append("• Diff line numbers refer to the NUMBERED previous plan.")
+    prompt_parts.append("• Body lines MUST NOT contain the 'NNNN|' prefix — supply raw plan text.")
+    prompt_parts.append("• Full plan body MUST NOT contain line-number prefixes or the markers themselves.")
+    prompt_parts.append("• Invalid or conflicting ranges are rejected (no partial write).")
+    prompt_parts.append("")
+    prompt_parts.append("If BOTH a full ###Plan##### block and a ###PlanDiff##### block are present, the FULL PLAN wins.")
+    prompt_parts.append("The canonical .ai-agent/current_plan.md ALWAYS contains only the latest full plan.")
     prompt_parts.append("")
     prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     prompt_parts.append("AVAILABLE CONTEXT")
@@ -1579,8 +1614,118 @@ def _build_prefilter_planning_system_prompt() -> str:
     prompt_parts.append("")
     prompt_parts.append("Your plan must be actionable and precise.")
     prompt_parts.append("")
-    
+
     return "\n".join(prompt_parts)
+
+
+
+
+def _build_plan_revision_section(
+    previous_plan: str,
+    previous_version: int,
+    next_version: int,
+) -> str:
+    """Build a plan-revision section appended to the planning system prompt.
+
+    Activated ONLY when a previous plan version already exists on disk.
+    Instructs the LLM to emit EITHER a full rewritten plan (in
+    ``###Plan#####`` markers) OR a diff-only plan (in ``###PlanDiff#####``
+    markers against the line-numbered previous plan).
+
+    ``previous_plan`` is injected as a numbered view and never passed through
+    ``.format()`` so braces inside the plan text cannot break the caller's
+    ``.format(compact_index=...)`` chain. The function-level import of
+    ``format_numbered_plan`` degrades to local deterministic numbering on failure.
+
+    Args:
+        previous_plan: Content of the previous plan version.
+        previous_version: 1-indexed version number of ``previous_plan``.
+        next_version: 1-indexed version number to assign to the revised plan.
+
+    Returns:
+        Markdown-formatted revision section (safe to append after `.format()`).
+    """
+    # Function-level import (never module-level) with local fallback.
+    try:
+        from app.agents.plan_state import format_numbered_plan as _fmt
+        numbered = _fmt(previous_plan) if previous_plan else "[empty — no previous plan]"
+    except Exception:
+        # Local deterministic numbering fallback.
+        try:
+            if previous_plan:
+                _lines = (
+                    previous_plan.replace("\r\n", "\n").replace("\r", "\n")
+                )
+                if _lines.endswith("\n"):
+                    _lines = _lines[:-1]
+                _parts = _lines.split("\n") if _lines else []
+                numbered = "\n".join(
+                    f"{i:04d}| {ln}" for i, ln in enumerate(_parts, 1)
+                ) or "[empty]"
+            else:
+                numbered = "[empty — no previous plan]"
+        except Exception:
+            numbered = previous_plan or "[empty]"
+
+    prompt_parts: List[str] = []
+    prompt_parts.append("")
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append(
+        f"📝 PLAN REVISION — CURRENT: v{previous_version} → NEW: v{next_version}"
+    )
+    prompt_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    prompt_parts.append("")
+    prompt_parts.append(
+        "A previous version of this plan exists (shown NUMBERED below). Revise it "
+        "based on the user's feedback while keeping the full plan coherent."
+    )
+    prompt_parts.append("")
+    prompt_parts.append("YOU MUST RETURN EXACTLY ONE OF TWO VALID OUTPUTS:")
+    prompt_parts.append("")
+    prompt_parts.append("OPTION A — FULL REWRITE (always allowed):")
+    prompt_parts.append("  Enclose the COMPLETE revised plan in ###Plan##### markers:")
+    prompt_parts.append("  ###Plan#####")
+    prompt_parts.append("  <complete, self-contained revised plan — no line-number prefixes>")
+    prompt_parts.append("  ###Plan#####")
+    prompt_parts.append("")
+    prompt_parts.append("OPTION B — DIFF-ONLY revision (optional):")
+    prompt_parts.append("  Enclose a line-numbered unified diff in ###PlanDiff##### markers:")
+    prompt_parts.append("  ###PlanDiff#####")
+    prompt_parts.append(f"  --- v{previous_version}")
+    prompt_parts.append(f"  +++ v{next_version}")
+    prompt_parts.append("  @@ -2,3 +2,4 @@")
+    prompt_parts.append("   context line (unchanged, single space prefix)")
+    prompt_parts.append("  -removed line (dash prefix)")
+    prompt_parts.append("  +added line (plus prefix)")
+    prompt_parts.append("  ###PlanDiff#####")
+    prompt_parts.append("")
+    prompt_parts.append("DIFF RULES:")
+    prompt_parts.append("• Hunk headers: @@ -start,count +new_start,new_count @@ (1-based inclusive).")
+    prompt_parts.append("• count == 0 means pure insertion.")
+    prompt_parts.append("• Prefix each body line with ' ' (context), '-' (removed), or '+' (added).")
+    prompt_parts.append("• Diff line numbers refer to the NUMBERED PREVIOUS PLAN below.")
+    prompt_parts.append("• Body lines MUST NOT contain the 'NNNN|' prefix — supply raw plan text.")
+    prompt_parts.append("• Full plan body MUST NOT contain line-number prefixes or the markers themselves.")
+    prompt_parts.append("• Include 3 context lines around each change (default unified diff).")
+    prompt_parts.append("• If the plan is unchanged, emit an EMPTY diff (markers only, no hunks).")
+    prompt_parts.append("• Invalid or conflicting ranges are REJECTED with no partial write.")
+    prompt_parts.append("")
+    prompt_parts.append("IMPORTANT: If BOTH a ###Plan##### block and a ###PlanDiff##### block are present, the FULL PLAN wins.")
+    prompt_parts.append("The canonical .ai-agent/current_plan.md ALWAYS contains only the latest full plan.")
+    prompt_parts.append("")
+    prompt_parts.append(f"─────────── NUMBERED PREVIOUS PLAN (v{previous_version}) ───────────")
+    prompt_parts.append("```")
+    prompt_parts.append(numbered)
+    prompt_parts.append("```")
+    prompt_parts.append("")
+    prompt_parts.append(
+        "The user's feedback is in the current query (appended under "
+        "`[USER PLAN FEEDBACK]`). Revise accordingly and emit ONE valid output."
+    )
+    prompt_parts.append("")
+
+    return "\n".join(prompt_parts)
+
 
 
 def _build_prefilter_analysis_user_prompt() -> str:

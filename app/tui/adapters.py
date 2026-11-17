@@ -56,6 +56,10 @@ class StateAdapter:
     auto_translate: bool = True
     reasoning_effort: Optional[str] = None
     pending_stage: str = "IDLE"
+    # Wizard state markers (setup flow progress)
+    setup_complete: bool = False
+    setup_stage: str = "IDLE"
+    pending_stage: str = "IDLE"
 
     def get_current_orchestrator_model(self) -> Optional[str]:
         """Текущая модель оркестратора (None — работает роутер)."""
@@ -569,6 +573,23 @@ class PipelineAdapter:
     def project_index(self) -> Dict[str, Any]:
         """Индекс проекта пайплайна."""
         return getattr(self._pipeline, "project_index", {})
+
+    @property
+    def project_dir(self) -> Optional[str]:
+        """Project directory bound to the underlying pipeline (or None)."""
+        try:
+            return getattr(self._pipeline, "project_dir", None)
+        except Exception as e:
+            logger.debug(f"project_dir get failed: {e}")
+            return None
+
+    @project_dir.setter
+    def project_dir(self, value: Optional[str]) -> None:
+        """Best-effort update of the underlying pipeline's project directory."""
+        try:
+            self._pipeline.project_dir = value
+        except Exception as e:
+            logger.debug(f"project_dir set failed: {e}")
 
     @project_index.setter
     def project_index(self, value: Dict[str, Any]) -> None:
