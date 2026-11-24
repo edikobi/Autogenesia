@@ -5,6 +5,20 @@ Screen {
     color: $text;
 }
 
+Header {
+    background: $primary;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+Footer {
+    background: $surface;
+    color: $text;
+    border-top: solid $border;
+}
+
+/* ── Модальные экраны и диалоги ─────────────────────────────────────────── */
+
 ModalScreen {
     align: center middle;
     background: $surface;
@@ -12,7 +26,7 @@ ModalScreen {
 
 #dialog-box {
     width: 70%;
-    max-width: 100;
+    max-width: 92;
     height: auto;
     max-height: 85%;
     border: thick $border;
@@ -32,29 +46,73 @@ ModalScreen {
 
 Button {
     margin: 0 1;
+    min-width: 12;
+    height: 3;
+    color: $text;
+    content-align: center middle;
 }
 
-Button.primary {
+Button.primary,
+Button.-primary {
     background: $accent;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+
+Button:hover {
+    background: $accent 20%;
     color: $text;
 }
 
-/* Splash safety net (never transparent) */
+Button:focus {
+    background: $accent 30%;
+    color: $text;
+    text-style: bold;
+}
+
+Button.-primary:hover {
+    background: $accent 85%;
+    color: #FFFFFF;
+}
+
+Button.-primary:focus {
+    background: $accent;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+
+/* Диалоговые кнопки: читаемый $text на светлой $surface; primary — белый на тёмном $accent */
+#dialog-buttons Button {
+    margin-left: 1;
+    min-width: 14;
+}
+
+#dialog-buttons Button.primary,
+#dialog-buttons Button.-primary {
+    background: $accent;
+    color: #FFFFFF;
+}
+
+
+/* ── Splash screen (безопасный непрозрачный фон) ────────────────────────── */
+
 SplashScreen {
     background: $surface;
-    align: center middle;
 }
 
 #banner-art {
-    color: $accent;
+    margin: 1 2;
 }
 
 #banner-title {
-    margin-top: 1;
-    color: $text-muted;
+    margin: 1 2;
+    color: $text;
 }
 
-/* Toolbar */
+/* ── Тулбар ─────────────────────────────────────────────────────────────── */
+
 #toolbar {
     height: auto;
     min-height: 3;
@@ -64,101 +122,176 @@ SplashScreen {
 #toolbar Button {
     min-width: 12;
     height: 3;
-    margin: 0 1;
     content-align: center middle;
 }
 
 #app-status {
     width: 1fr;
-    height: auto;
-    padding: 0 1;
+    color: $text;
     content-align: left middle;
 }
 
-/* Stop button styling */
 #stop-btn {
-    background: $stop;
-    color: $text;
+    background: $error;
+    color: #FFFFFF;
 }
 
-/* Action bar */
+#stop-btn:hover,
+#stop-btn:focus {
+    background: #8B0000;
+    color: #FFFFFF;
+}
+
+/* ── Панель действий и бар кнопок ───────────────────────────────────────── */
+
 #action-bar {
     height: auto;
     max-height: 6;
-    width: 100%;
     overflow-x: auto;
-    margin: 0;
-    padding: 0;
+    align-vertical: middle;
 }
 
 #action-bar Button {
-    min-width: 14;
+    min-width: 12;
     height: 3;
-    margin: 0 1;
     content-align: center middle;
 }
 
 #action-panel {
     height: auto;
-    margin: 1 0;
+    border-top: solid $border;
 }
+
+#action-panel Button {
+    min-width: 12;
+    height: 3;
+    content-align: center middle;
+}
+
+#accept-btn {
+    background: $success;
+    color: #FFFFFF;
+}
+
+#rework-btn {
+    background: $warning;
+    color: $text;
+}
+
+
+#cancel-btn {
+    background: $error;
+    color: #FFFFFF;
+}
+
+#tester-btn {
+    background: $primary;
+    color: $text;
+}
+
+
+#diff-btn {
+    background: $accent;
+    color: #FFFFFF;
+}
+
+/* ── Вкладки и воркспейс ────────────────────────────────────────────────── */
 
 #tabs {
     height: 1fr;
 }
 
 TabPane {
-    background: $surface;
+    padding: 0 1;
 }
 
 #chat {
     height: 1fr;
     border: round $border;
-    padding: 0 1;
 }
 
 .diff-table {
-    height: auto;
-    max-height: 12;
+    border: solid $diff-border;
+}
+
+DataTable.diff-table {
+    border: solid $diff-border;
+    background: $surface;
+    color: $text;
 }
 
 #status-label {
     color: $text;
-    padding: 0 1;
 }
 
 #session-status {
     color: $text-muted;
-    padding: 0 1;
 }
 
 #query-input {
-    height: 3;
-    margin: 1 0;
+    dock: bottom;
 }
 
-/* Menu boxes (19+ options; scrollable) */
+/* ── Меню ───────────────────────────────────────────────────────────────── */
+
 #menu-box {
-    width: 78%;
-    max-width: 110;
-    height: auto;
-    max-height: 90%;
+    width: 60;
+    height: 100%;
+    max-height: 100%;
+    layout: vertical;
+    overflow-y: hidden;
     border: thick $border;
     background: $surface;
-    padding: 1 2;
+    padding: 0 2;
+}
+
+#menu-box OptionList {
+    height: 1fr;
+    min-height: 3;
+    max-height: 1fr;
     overflow-y: auto;
 }
 
-#menu-title {
-    margin-bottom: 1;
+#menu-box > #dialog-buttons {
+    dock: bottom;
+    height: 3;
+    min-height: 3;
+    margin-top: 0;
 }
+
+
+#menu-title {
+    margin-bottom: 0;
+    text-style: bold;
+}
+
 
 #provider-status, #env-status, #mcp-status {
     margin-bottom: 1;
+    color: $text;
 }
 
 OptionList {
-    height: auto;
-    max-height: 24;
     overflow-y: auto;
+}
+
+/* ── Просмотр диффов ────────────────────────────────────────────────────── */
+
+#diff-viewer {
+    width: 96%;
+    max-width: 170;
+    height: 90%;
+    border: thick $diff-border;
+    background: $surface;
+    padding: 0 1;
+}
+
+#diff-header {
+    height: auto;
+}
+
+#diff-title {
+    width: 1fr;
+    padding: 0 1;
+    color: $text;
 }

@@ -13,12 +13,12 @@ import re
 import os
 import json
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from typing import Any, Dict, List, Optional, Callable
 from pathlib import Path
 
 from app.llm.api_client import call_llm_with_tools, call_llm, ServerOverloadError
-from app.tools.tool_executor import parse_tool_call
+from app.tools.tool_executor import parse_tool_call  # noqa: F401
 from app.tools.tester_tool_executor import TesterToolExecutor
 from app.tools.tester_tool_definitions import TESTER_TOOLS
 from app.utils.tester_translator import translate_tester_report
@@ -485,6 +485,12 @@ class TesterAgent:
     async def ask_followup(self, user_question: str) -> dict:
         """Handle a follow-up question from the user after the initial test report.
 
+        The persistent ``self._messages`` history is sanitised first: any stale
+        "Stop using tools ..." user prompts left over from a previous invocation
+        (or from the initial run's fallback prologue) are removed, so they never
+        leak into this follow-up where the user may legitimately ask the Tester
+        to run tools.
+
         Args:
             user_question: The user's follow-up question text.
 
@@ -493,6 +499,26 @@ class TesterAgent:
         """
         if not self._messages:
             return {"response": "", "is_new_report": False, "new_report": None}
+
+        # === Strip stale "stop using tools" prompts from previous invocations ===
+        # The initial run and any earlier follow-up may have appended a
+        # last-resort "Stop using tools ..." user message to the persistent
+        # history. That instruction must NOT leak into a NEW follow-up where
+        # the user may legitimately ask the Tester to run tools.
+        _STALE_STOP_MARKERS = (
+            "Stop using tools and provide your final text answer now.",
+            "Stop using tools. Provide your final Testing Report now.",
+        )
+        self._messages[:] = [
+            _msg
+            for _msg in self._messages
+            if not (
+                isinstance(_msg, dict)
+                and _msg.get("role") == "user"
+                and isinstance(_msg.get("content"), str)
+                and _msg["content"].lstrip().startswith(_STALE_STOP_MARKERS)
+            )
+        ]
 
         followup_context = (
             "The user is asking a FOLLOW-UP question after you already produced a testing report. "
@@ -596,7 +622,7 @@ class TesterAgent:
         content = response.get("content", "") or ""
         tool_calls = response.get("tool_calls") or []
 
-        # Tool execution loop (up to 3 iterations)
+        # Tool execution loop (up to 6 iterations)
         for _iteration in range(6):
             if not tool_calls:
                 break
@@ -695,17 +721,20 @@ class TesterAgent:
                 logger.error(f"ask_followup LLM call error in tool loop: {e}", exc_info=True)
                 break
 
-        # Если после цикла модель всё ещё хочет вызвать тулы или отдала пустой контент
+        # Last resort: ask for a final text answer WITHOUT permanently
+        # polluting the persistent message history with a stale
+        # "stop using tools" prompt. The temp-copy approach keeps this
+        # instruction local to the last-resort call only.
         if tool_calls or not content.strip():
-            self._messages.append({
+            _last_resort_messages = list(self._messages)
+            _last_resort_messages.append({
                 "role": "user",
                 "content": "Stop using tools and provide your final text answer now.",
             })
-
             try:
                 content = await call_llm(
                     model=self._model,
-                    messages=self._messages,
+                    messages=_last_resort_messages,
                     temperature=0,
                     max_tokens=20000,
                     preferred_provider=self._model_provider,

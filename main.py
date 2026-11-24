@@ -104,6 +104,7 @@ from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.agents.agent_pipeline import AgentPipeline
+    from app.services.emergency_recovery import EmergencyResolution
 
 
 
@@ -515,6 +516,17 @@ class AppState:
 
         self._saved_file_names: set = set()  # Отслеживание сохранённых файлов
 
+        # True → the next planning prefilter call starts a fresh plan session
+        # (previous physical plan is NOT used as revision context).
+        # Consumed via ``consume_new_plan_flag()`` (session-identity aware).
+        self._prefilter_new_plan_pending: bool = True
+        # Session-identity companions so a direct ``state.current_thread`` swap
+        # (or a project switch) is detected even after the first-flag was already
+        # consumed. ``_prefilter_new_plan_seen`` marks "a token has been recorded";
+        # ``_prefilter_new_plan_token`` records the observed identity.
+        self._prefilter_new_plan_seen: bool = False
+        self._prefilter_new_plan_token: Optional[Any] = None
+
     
     def reset_session(self):
         """Сброс состояния сессии (сохраняет тред)"""
@@ -523,6 +535,7 @@ class AppState:
         self.messages_count = 0
         self.attached_files = []
         self._saved_file_names = set()
+        self._prefilter_new_plan_pending = True
     
     def reset_project(self):
         """Полный сброс проекта"""
@@ -532,6 +545,55 @@ class AppState:
         self.is_legal_mode = False
         self.pipeline = None
         self.reset_session()
+        self._prefilter_new_plan_pending = True
+
+    def _prefilter_plan_session_token(self) -> Tuple[Any, Any]:
+        """Return a stable identity token for the current plan session.
+
+        Uses object identity (``id``) when a ``current_thread`` is bound — so a
+        direct attribute swap (``state.current_thread = object()``) is
+        detected. Falls back to the value-comparable ``state.project_dir`` when
+        no thread is bound. Every attribute access uses ``getattr`` with safe
+        defaults, so this method never raises.
+        """
+        try:
+            _thread = getattr(self, "current_thread", None)
+        except Exception:
+            _thread = None
+        if _thread is not None:
+            try:
+                return ("thread", id(_thread))
+            except Exception:
+                return ("thread_obj", _thread)
+        try:
+            _project_dir = getattr(self, "project_dir", None)
+        except Exception:
+            _project_dir = None
+        return ("project", _project_dir)
+
+    def consume_new_plan_flag(self) -> bool:
+        """Return the pending new-plan flag ONCE and reset it to False.
+
+        Tolerant of the attribute being absent on legacy / restored instances
+        (defaults to True). Additionally returns True whenever the bound
+        conversation / project identity changed since the previous consumption
+        (detected via ``state.current_thread`` object identity with a
+        ``state.project_dir`` value fallback). No other side effects — the
+        method performs no I/O and never touches the actual plan files.
+        """
+        _identity = self._prefilter_plan_session_token()
+        _seen = bool(getattr(self, "_prefilter_new_plan_seen", False))
+        _previous = getattr(self, "_prefilter_new_plan_token", None)
+        _stored = bool(getattr(self, "_prefilter_new_plan_pending", True))
+        try:
+            _identity_changed = bool(_seen and _previous != _identity)
+        except Exception:
+            _identity_changed = False
+        _value = bool(_stored or _identity_changed)
+        self._prefilter_new_plan_pending = False
+        self._prefilter_new_plan_seen = True
+        self._prefilter_new_plan_token = _identity
+        return _value
     
     def get_current_orchestrator_model(self) -> Optional[str]:
         """Возвращает текущую модель оркестратора (или None если роутер)"""
@@ -1276,7 +1338,8 @@ async def run_prefilter_analysis(
     is_new_project: bool = False,
     on_tool_call: Optional[Callable] = None,
     preferred_provider: Optional[str] = None,
-) -> Tuple[str, Optional[PreFilterAdvice]]:    
+        force_new_plan: bool = False,
+    ) -> Tuple[str, Optional[PreFilterAdvice]]:
     
     """
     Запускает Pre-filter анализ запроса и возвращает советы для Оркестратора.
@@ -1412,6 +1475,7 @@ async def run_prefilter_analysis(
             on_tool_call=on_tool_call,
             preferred_provider=resolved_provider,
             on_token=on_token_callback,
+            force_new_plan=force_new_plan,
         )
         llm_elapsed = _time.time() - llm_start        
         
@@ -1446,6 +1510,21 @@ async def run_prefilter_analysis(
                 # Print the full response to show commentary, but save only the extracted plan
                 full_text = getattr(advice, 'full_response', advice.raw_response)
                 console.print(Markdown(full_text))
+
+                # Guarantee the user sees the FULL canonical plan — never just
+                # a raw ###PlanDiff##### block. Resolve canonical text from
+                # advice.raw_response (preferred) or the on-disk plan file.
+                _canonical_for_display = str(getattr(advice, 'raw_response', '') or '').strip()
+                if not _canonical_for_display and project_dir:
+                    try:
+                        from app.agents import plan_state as _ps_disp
+                        _canonical_for_display = _ps_disp.read_current_plan(project_dir).strip()
+                    except Exception:
+                        _canonical_for_display = ""
+                if _canonical_for_display:
+                    console.print("\n[bold cyan]📄 Полный актуальный план:[/]")
+                    if _canonical_for_display not in full_text:
+                        console.print(Markdown(_canonical_for_display))
                 
                 if project_dir:
                     try:
@@ -1461,8 +1540,19 @@ async def run_prefilter_analysis(
                                     _summary = f"Revision from v{_cur_before.version}"
                             except Exception:
                                 pass
-                            _ps.commit_plan(project_dir, canonical, summary=_summary)
-                            console.print(f"[dim]План сохранён в {plan_path}[/]")
+                            # Skip a redundant commit when the canonical file
+                            # already matches the resolved plan byte-for-byte.
+                            try:
+                                _existing_plan = _ps.read_current_plan(project_dir)
+                            except Exception:
+                                _existing_plan = None
+                            if _existing_plan == canonical:
+                                console.print(
+                                    f"[dim]План уже сохранён в {plan_path}[/]"
+                                )
+                            else:
+                                _ps.commit_plan(project_dir, canonical, summary=_summary)
+                                console.print(f"[dim]План сохранён в {plan_path}[/]")
                         else:
                             console.print(
                                 "[yellow]Не удалось сохранить план: пустой canonical plan[/]"
@@ -4680,8 +4770,9 @@ async def handle_ask_mode(query: str):
                 model=state.prefilter_model,
                 is_new_project=state.is_new_project,
                 on_tool_call=_prefilter_streaming_handler,
-                preferred_provider=state.prefilter_provider,
-            )            
+                    preferred_provider=state.prefilter_provider,
+                    force_new_plan=False,
+                )
             trace_stage("PREFILTER_ANALYSIS", {
                 "mode": state.prefilter_mode,
                 "has_advice": bool(prefilter_advice_str),
@@ -5302,6 +5393,10 @@ async def handle_agent_mode(query: str):
         if is_planning:
             plan_accepted = False
             current_query = query
+            # Consume the new-plan flag ONCE before the loop so the first
+            # iteration is a fresh plan session but feedback regenerations
+            # inside the same loop are revisions.
+            _opt_new_plan_flag = state.consume_new_plan_flag()
             
             while not plan_accepted:
                 prefilter_advice_str, prefilter_advice_obj = await run_prefilter_analysis(
@@ -5314,7 +5409,9 @@ async def handle_agent_mode(query: str):
                     is_new_project=state.is_new_project,
                     on_tool_call=_prefilter_streaming_handler,
                     preferred_provider=state.prefilter_provider,
-                )                
+                    force_new_plan=_opt_new_plan_flag,
+                )
+                _opt_new_plan_flag = False
                 
                 log_pipeline_stage("PLANNING", f"Planning completed", {
                     "has_advice": bool(prefilter_advice_str),
@@ -5347,7 +5444,7 @@ async def handle_agent_mode(query: str):
                     current_query = (
                         f"{query}\n\n"
                         f"--- PREVIOUS PLAN ---\n{prefilter_advice_str}\n\n"
-                        f"--- USER FEEDBACK FOR IMPROVEMENT ---\n{user_input}"
+                        f"[USER PLAN FEEDBACK]\n{user_input}"
                     )
                     console.print("[cyan]Отправляю правки планировщику...[/]")
         else:
@@ -7079,6 +7176,44 @@ async def handle_chat_command(command: str) -> Optional[str]:
         return "help_shown"
     
     # Новый диалог
+
+    # Сверка текущего плана на диске с историей (явный операторский выбор)
+    elif cmd.startswith("/plan-reconcile") or cmd.startswith("/план-сверка"):
+        _reconcile_parts = command.split(maxsplit=1)
+        _reconcile_strategy = (
+            _reconcile_parts[1].strip().lower()
+            if len(_reconcile_parts) > 1
+            else "report"
+        )
+        _reconcile_valid = {"report", "use_disk", "use_history"}
+        if _reconcile_strategy not in _reconcile_valid:
+            console.print(
+                f"[yellow]⚠️ Неизвестная стратегия: {_reconcile_strategy!r}. "
+                f"Использую 'report' (без записи).[/]"
+            )
+            _reconcile_strategy = "report"
+        try:
+            _reconcile_result = reconcile_project_plan_state(
+                state.project_dir, strategy=_reconcile_strategy
+            )
+            if _reconcile_strategy == "report":
+                if _reconcile_result is None:
+                    console.print(
+                        "[dim]Сверка: расхождений нет или они задокументированы "
+                        "(без записи).[/]"
+                    )
+                else:
+                    console.print("[green]✓ Сверка: расхождений нет (без записи)[/]")
+            else:
+                console.print(
+                    f"[green]✓ Сверка: стратегия {_reconcile_strategy} применена[/]"
+                )
+        except Exception as _reconcile_err:
+            logger.error(
+                f"plan-reconcile failed: {_reconcile_err}", exc_info=True
+            )
+            console.print(f"[red]❌ Ошибка сверки плана: {_reconcile_err}[/]")
+        return "help_shown"
     elif cmd in ("/n", "/new", "/новый", "/н"):
         state.current_thread = await create_new_thread()
         state.reset_session()
@@ -8964,6 +9099,72 @@ async def select_mcp_settings() -> None:
             logger.error(f"mcp action failed: {exc}", exc_info=True)
             print_error(f"Ошибка выполнения действия: {exc}")
 
+
+
+
+def reconcile_project_plan_state(project_dir: str, strategy: str = "report") -> Optional[Any]:
+    """Reconcile on-disk canonical plan state against persisted history.
+
+    Thin CLI boundary over :func:`app.agents.plan_state.reconcile_plan_state`.
+
+    Args:
+        project_dir: Project directory containing ``.ai-agent/``. If empty,
+            returns ``None`` without any I/O.
+        strategy: One of ``"report"`` (read-only divergence diagnostic — the
+            default), ``"use_disk"`` (commit externally-modified canonical
+            content as the next monotonic version) or ``"use_history"``
+            (restore the canonical file from history). Unknown values fall
+            back to ``"report"`` with a warning and never write.
+
+    Returns:
+        The resulting ``PlanState`` where applicable, or ``None``.
+
+    Side-effect constraint:
+        The DEFAULT path MUST NOT write, delete, truncate, or otherwise
+        modify ``.ai-agent/current_plan.md``, ``history.json``, or any
+        ``vN_plan.md``. Mutating strategies are available only when an
+        operator explicitly passes them.
+    """
+    valid_strategies = {"report", "use_disk", "use_history"}
+    if strategy not in valid_strategies:
+        logger.warning(
+            f"reconcile_project_plan_state: unknown strategy {strategy!r}; "
+            f"falling back to 'report' (no writes)"
+        )
+        strategy = "report"
+
+    if not project_dir:
+        logger.debug("reconcile_project_plan_state: no project_dir; no I/O")
+        return None
+
+    try:
+        from app.agents.plan_state import (
+            PlanStateError as _PlanStateError,
+            reconcile_plan_state as _reconcile_plan_state,
+        )
+    except Exception as imp_err:  # pragma: no cover - defensive
+        logger.warning(f"reconcile_project_plan_state: import failed: {imp_err}")
+        return None
+
+    try:
+        result = _reconcile_plan_state(project_dir, strategy=strategy)
+    except _PlanStateError as exc:
+        if strategy == "report":
+            logger.warning(f"reconcile_project_plan_state (report) failed: {exc}")
+            return None
+        logger.error(f"reconcile_project_plan_state ({strategy}) hard failure: {exc}")
+        raise
+    except Exception as exc:
+        logger.warning(f"reconcile_project_plan_state failed: {exc}")
+        return None
+
+    if result is None:
+        logger.info("reconcile_project_plan_state: divergence reported, no writes")
+    elif strategy == "report":
+        logger.info("reconcile_project_plan_state: no divergence")
+    else:
+        logger.info(f"reconcile_project_plan_state: strategy applied: {strategy}")
+    return result
 
 
 if __name__ == "__main__":

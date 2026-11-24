@@ -43,7 +43,27 @@ logger = logging.getLogger(__name__)
 _PROVIDERS = ["openrouter", "routerai", "deepseek", "glm", "opencode_go", "qwencloud"]
 
 _MENU_CSS = """
-    OptionList { height: auto; max-height: 24; }
+    #menu-box {
+        height: 100%;
+        max-height: 100%;
+        width: 60;
+        max-width: 100%;
+        layout: vertical;
+        overflow-y: hidden;
+        padding: 0 2;
+    }
+    #menu-box OptionList {
+        height: 1fr;
+        max-height: 1fr;
+        min-height: 3;
+        overflow-y: auto;
+    }
+    #menu-box > #dialog-buttons {
+        dock: bottom;
+        height: 3;
+        min-height: 3;
+        margin-top: 0;
+    }
     #provider-status { margin-bottom: 1; }
 """
 
@@ -120,6 +140,7 @@ class MainMenuScreen(ModalScreen):
                 id="menu-options",
             )
             with Horizontal(id="dialog-buttons"):
+                yield Button("▶ Продолжить", id="menu-continue-btn", variant="primary")
                 yield Button("[ Закрыть ]", id="cancel-btn")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -128,8 +149,23 @@ class MainMenuScreen(ModalScreen):
         self._done(str(event.option.id))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Закрыть меню."""
+        """Кнопки «▶ Продолжить» и «[ Закрыть ]» → закрыть меню (future → None).
+
+        Обе кнопки меню (``menu-continue-btn`` — «▶ Продолжить» и
+        ``cancel-btn`` — «[ Закрыть ]»), как и любой неизвестный или
+        отсутствующий id, сходятся к единственному пути закрытия
+        ``_cancel()`` → ``resolve_modal(self, None)``. «▶ Продолжить»
+        никогда не эмулирует выбор пункта меню (никаких значений
+        ``choice``: "1"…"16", "0", "D", "R", "S", "T", "N"); обработчик
+        остаётся синхронным и не ждёт future; повторные нажатия безвредны
+        (``resolve_modal`` идемпотентен).
+        """
         event.stop()
+        # Безопасное чтение id нажатой кнопки (может быть None): обе кнопки —
+        # menu-continue-btn и cancel-btn — и любой неизвестный/отсутствующий
+        # id закрываются одинаково, через единственный generic-cancel путь.
+        button_id = getattr(event.button, "id", None)
+        logger.debug(f"MainMenuScreen.on_button_pressed: id={button_id!r} → cancel")
         self._cancel()
 
     def action_back(self) -> None:

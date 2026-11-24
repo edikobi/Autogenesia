@@ -53,6 +53,40 @@ ProjectSelectDialog, PrefilterSettingsDialog, ProvidersDialog,
 AskUserDialog, EmergencyNetworkDialog, EmergencyLimitDialog {
     align: center middle;
 }
+Button {
+    min-width: 12;
+    height: 3;
+    color: $text;
+    content-align: center middle;
+}
+#dialog-buttons Button {
+    margin-left: 1;
+    min-width: 14;
+}
+Button.primary,
+Button.-primary {
+    background: $accent;
+    color: #FFFFFF;
+    text-style: bold;
+}
+Button:hover {
+    background: $accent 20%;
+    color: $text;
+}
+Button:focus {
+    background: $accent 30%;
+    color: $text;
+    text-style: bold;
+}
+Button.-primary:hover {
+    background: $accent 85%;
+    color: #FFFFFF;
+}
+Button.-primary:focus {
+    background: $accent;
+    color: #FFFFFF;
+    text-style: bold;
+}
 """
 
 
@@ -1245,9 +1279,15 @@ def resolve_modal(screen, value) -> None:
     is not done (a cancelled future is left resolved, never re-set), then
     closes the screen via ``screen.dismiss(value)`` only when the screen is
     currently active or genuinely present in ``app.screen_stack`` — never
-    removing ``screen_stack[0]``. Never uses ``call_after_refresh`` and never
-    raises (failures are logged at DEBUG). When invoked from a non-UI thread
-    it re-dispatches itself through ``app.call_from_thread``.
+    removing ``screen_stack[0]``. When a screen was removed without
+    resolution (its future is still pending but the screen is neither current
+    nor present in the stack) the pending future is best-effort resolved with
+    ``None`` so no waiter hangs; a future that is already done still allows
+    ``screen.dismiss(value)`` when the screen is current/present. Never uses
+    ``call_after_refresh`` and never raises (failures are logged at DEBUG).
+    When invoked from a non-UI thread it re-dispatches itself through
+    ``app.call_from_thread`` with a plain callable (never an un-awaited
+    coroutine).
     """
     try:
         app = getattr(screen, "app", None)
@@ -1265,15 +1305,30 @@ def resolve_modal(screen, value) -> None:
         except Exception:
             pass
         future = getattr(screen, "future", None)
-        if future is not None and not future.done():
-            try:
-                future.set_result(value)
-            except Exception:
-                logger.debug("resolve_modal: set_result failed", exc_info=True)
         try:
             stack = list(getattr(app, "screen_stack", []) or [])
             current = getattr(app, "screen", None)
             present = screen in stack
+            if (
+                future is not None
+                and not future.done()
+                and current is not screen
+                and not present
+            ):
+                # Screen removed without resolution: best-effort resolve the
+                # pending future with None so no waiter hangs.
+                try:
+                    future.set_result(None)
+                except Exception:
+                    logger.debug(
+                        "resolve_modal: orphan future set_result failed",
+                        exc_info=True,
+                    )
+            if future is not None and not future.done():
+                try:
+                    future.set_result(value)
+                except Exception:
+                    logger.debug("resolve_modal: set_result failed", exc_info=True)
             if present and stack.index(screen) == 0:
                 return  # never remove screen_stack[0]
             if current is screen or present:
@@ -1285,6 +1340,7 @@ def resolve_modal(screen, value) -> None:
             logger.debug("resolve_modal: stack inspection failed", exc_info=True)
     except Exception:
         logger.debug("resolve_modal failed", exc_info=True)
+
 
 
 async def push_modal(app, screen_factory) -> Any:
@@ -1302,13 +1358,22 @@ async def push_modal(app, screen_factory) -> Any:
     is resolved with ``None`` via ``resolve_modal`` before propagating, so no
     modal is left on the stack and no worker hangs.
 
-    The cross-loop proxy wait is FINITE: it is bounded by the module-level
-    constant ``_PUSH_MODAL_PROXY_TIMEOUT``. On ``concurrent.futures.TimeoutError``
-    the pending screen is resolved with ``None`` through the thread-safe
-    ``resolve_modal`` and ``None`` is returned — no worker thread can hang
-    indefinitely. ``asyncio.CancelledError`` is never swallowed.
+    The cross-loop branch uses a NON-BLOCKING async bridge: an
+    ``asyncio.Future`` bound to the caller's running loop is created, the
+    screen is constructed and pushed on the UI loop through
+    ``app.call_from_thread(...)``, and a done-callback attached to
+    ``screen.future`` transfers the result/exception back to the caller via
+    ``caller_loop.call_soon_threadsafe(...)``. There is no blocking
+    ``concurrent.futures.Future.result(...)`` wait anywhere — the root cause
+    of "very slow / dead buttons" on the UI loop is eliminated. The wait is
+    FINITE, bounded by the module-level constant ``_PUSH_MODAL_PROXY_TIMEOUT``:
+    on timeout the pending screen is resolved with ``None`` through the
+    thread-safe ``resolve_modal`` and ``None`` is returned — no worker can
+    hang indefinitely. ``asyncio.CancelledError`` is never swallowed.
     """
     screen = None
+    caller_future: Optional[asyncio.Future] = None
+    caller_loop = None
     try:
         try:
             ui_loop = getattr(app, "_app_loop", None)
@@ -1337,45 +1402,79 @@ async def push_modal(app, screen_factory) -> Any:
         if running is ui_loop or ui_loop is None:
             _create_and_push()
         else:
-            # Another loop/thread: construct+push on the UI loop, then proxy
-            # the future's result back to the caller's loop.
-            import concurrent.futures as _cf
+            # Another loop/thread: non-blocking async bridge. Construct+push
+            # on the UI loop via call_from_thread, then transfer the future's
+            # outcome back to the caller's loop without ever blocking it.
+            caller_loop = running
+            caller_future = caller_loop.create_future()
 
-            proxy_future: _cf.Future = _cf.Future()
+            def _transfer(f) -> None:
+                """Move the UI-loop future's outcome to the caller future."""
+
+                def _apply() -> None:
+                    """Set the result/exception on the caller loop."""
+                    if caller_future is None or caller_future.done():
+                        return
+                    if f is None:
+                        caller_future.set_result(None)
+                        return
+                    try:
+                        if f.cancelled():
+                            caller_future.cancel()
+                        else:
+                            exc = f.exception()
+                            if exc is not None:
+                                caller_future.set_exception(exc)
+                            else:
+                                caller_future.set_result(f.result())
+                    except Exception:
+                        logger.debug(
+                            "push_modal: future transfer failed", exc_info=True
+                        )
+                        try:
+                            caller_future.set_result(None)
+                        except Exception:
+                            pass
+
+                try:
+                    caller_loop.call_soon_threadsafe(_apply)
+                except RuntimeError:
+                    logger.debug("push_modal: caller loop closed", exc_info=True)
 
             def _runner() -> None:
-                """Create+push on the UI loop and bridge the future."""
+                """Create+push on the UI loop and attach the transfer callback."""
                 try:
                     _create_and_push()
-                    fut = getattr(screen, "future", None)
-
-                    def _done_cb(f) -> None:
+                except Exception:
+                    logger.debug("push_modal: create/push failed", exc_info=True)
+                    if caller_future is not None and not caller_future.done():
                         try:
-                            proxy_future.set_result(f.result())
-                        except Exception as exc:
-                            proxy_future.set_exception(exc)
-
-                    if fut is not None:
-                        fut.add_done_callback(_done_cb)
-                    else:
-                        proxy_future.set_result(None)
-                except Exception as exc:
-                    proxy_future.set_exception(exc)
+                            caller_loop.call_soon_threadsafe(
+                                lambda: caller_future.set_result(None)
+                            )
+                        except RuntimeError:
+                            pass
+                    return
+                fut = getattr(screen, "future", None)
+                if fut is not None:
+                    fut.add_done_callback(_transfer)
+                else:
+                    _transfer(None)
 
             app.call_from_thread(_runner)
             try:
-                return proxy_future.result(timeout=_PUSH_MODAL_PROXY_TIMEOUT)
-            except _cf.TimeoutError:
+                return await asyncio.wait_for(
+                    caller_future, timeout=_PUSH_MODAL_PROXY_TIMEOUT
+                )
+            except asyncio.TimeoutError:
                 # Finite wait: resolve the pending screen (thread-safe) and
-                # return None so no worker thread hangs indefinitely.
+                # return None so no worker hangs indefinitely.
                 logger.debug(
-                    "push_modal: proxy wait timed out after "
+                    "push_modal: async bridge wait timed out after "
                     f"{_PUSH_MODAL_PROXY_TIMEOUT}s"
                 )
                 if screen is not None:
                     resolve_modal(screen, None)
-                return None
-            except Exception:
                 return None
 
         fut = getattr(screen, "future", None)
@@ -1391,4 +1490,5 @@ async def push_modal(app, screen_factory) -> Any:
         if screen is not None:
             resolve_modal(screen, None)
         return None
+
 

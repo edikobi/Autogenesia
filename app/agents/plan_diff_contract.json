@@ -1,8 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "1.1",
   "title": "Versioned Pre-filter Plan Diff Contract v1.1",
   "description": "Canonical contract describing the storage layout, artifact formats, numbered plan view, allowed plan-revision operations and line-numbered diff semantics for versioned Pre-filter plans. Consumed by app.agents.plan_state (Python implementation) and any external validators.",
-  "schema_version": "1.1",
+  "PLAN_MARKER": "###Plan#####",
+  "PLAN_DIFF_MARKER": "###PlanDiff#####",
+  "full_wins_if_both": true,
+  "version_lines": {
+    "optional": true,
+    "format": "--- vN / +++ vN+1",
+    "position": "before first hunk or between hunks only"
+  },
+  "hunk_header": {
+    "format": "@@ -start,count +new_start,new_count @@",
+    "mandatory": true,
+    "start_base": 1
+  },
+  "body_prefixes": {
+    "column_0": true,
+    "context": " ",
+    "removal": "-",
+    "addition": "+"
+  },
+  "no_line_number_prefixes_in_body": true,
   "versioning": {
     "initial_version": 1,
     "increment_on": "user_feedback_or_revision",
@@ -11,11 +31,15 @@
     "archive_pattern": "v{version}_plan.md",
     "history_file_relative_path": ".ai-agent/plans/history.json",
     "notes": [
-      "current_plan.md ALWAYS holds the LATEST accepted plan version (canonical source of truth).",
-      "Every version is immutable and archived under .ai-agent/plans/v{n}_plan.md.",
-      "history.json is the ONLY structured state (versions + diffs); it is upserted on every revision.",
-      "The canonical file is derived from history.json (get_current().content) and MUST NOT diverge from it.",
-      "Schema version 1.0 history files remain loadable; the module upgrades to 1.1 on persist."
+      "current_plan.md always contains the latest canonical plan body.",
+      "plans/v{N}_plan.md are immutable archives.",
+      "plans/history.json is the ONLY structured state and holds versions + diffs.",
+      "The canonical file MUST NOT diverge from get_current().content.",
+      "Upgrade from 1.0 to 1.1 is tolerant \u2014 legacy history files are loaded and bootstrapped from the canonical file when history.json is absent."
+    ],
+    "notes_addendum": [
+      "Version numbers are monotonic; every accepted plan increments the version.",
+      "source_version / target_version semantics are unchanged."
     ]
   },
   "plan_version": {
@@ -23,10 +47,10 @@
     "required": ["version", "content", "created_at"],
     "additionalProperties": false,
     "properties": {
-      "version": {"type": "integer", "minimum": 1, "description": "Monotonic version number. First version is 1."},
-      "content": {"type": "string", "description": "Full markdown plan text (the value placed into current_plan.md and v{n}_plan.md)."},
-      "summary": {"type": "string", "description": "One-line summary of deltas from the previous version (empty on initial version)."},
-      "created_at": {"type": "string", "format": "date-time", "description": "ISO-8601 timestamp when the version was registered."}
+      "version": {"type": "integer", "minimum": 1, "description": "Monotonic 1-based version number."},
+      "content": {"type": "string", "description": "Full canonical plan body at this version (no markers, no wrappers, no diff hunks)."},
+      "summary": {"type": "string", "description": "Optional human-readable summary of what changed."},
+      "created_at": {"type": "string", "format": "date-time", "description": "ISO-8601 timestamp when the version was created."}
     }
   },
   "plan_diff": {
@@ -34,20 +58,25 @@
     "required": ["from_version", "to_version", "hunks"],
     "additionalProperties": false,
     "properties": {
-      "from_version": {"type": "integer", "minimum": 1},
-      "to_version": {"type": "integer", "minimum": 1},
+      "from_version": {"type": "integer", "minimum": 1, "description": "Previous plan version the diff applies to."},
+      "to_version": {"type": "integer", "minimum": 1, "description": "New plan version produced by applying the diff."},
       "hunks": {
         "type": "array",
+        "description": "Ordered list of unified-diff hunks.",
         "items": {
           "type": "object",
           "required": ["old_start", "old_lines", "new_start", "new_lines", "lines"],
           "additionalProperties": false,
           "properties": {
-            "old_start": {"type": "integer", "minimum": 1, "description": "1-indexed first line in from_version affected by this hunk."},
-            "old_lines": {"type": "integer", "minimum": 0, "description": "Number of context+removed lines from from_version. 0 means pure insertion."},
-            "new_start": {"type": "integer", "minimum": 1, "description": "1-indexed first line in to_version affected by this hunk."},
-            "new_lines": {"type": "integer", "minimum": 0, "description": "Number of context+added lines in to_version."},
-            "lines": {"type": "array", "items": {"type": "string"}, "description": "Unified-diff body lines. Prefixes: ' ' unchanged, '-' removed from from_version, '+' added in to_version."}
+            "old_start": {"type": "integer", "minimum": 1, "description": "1-based start line in the previous plan."},
+            "old_lines": {"type": "integer", "minimum": 0, "description": "Number of old-side lines; 0 for pure insertion."},
+            "new_start": {"type": "integer", "minimum": 1, "description": "1-based start line in the new plan."},
+            "new_lines": {"type": "integer", "minimum": 0, "description": "Number of new-side lines; 0 for pure deletion."},
+            "lines": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Body lines with a mandatory prefix character (' ' context, '-' removal, '+' addition)."
+            }
           }
         }
       }
@@ -59,68 +88,78 @@
     "additionalProperties": false,
     "properties": {
       "schema_version": {"type": "string", "const": "1.1"},
-      "current_version": {"type": "integer", "minimum": 0, "description": "0 when no plan exists yet; otherwise the highest accepted version number."},
+      "current_version": {"type": "integer", "minimum": 0},
       "versions": {"type": "array", "items": {"$ref": "#/plan_version"}},
       "diffs": {"type": "array", "items": {"$ref": "#/plan_diff"}}
     }
   },
   "numbered_plan_view": {
     "format": "NNNN| <line>",
-    "description": "Line-numbered rendering of the previous canonical plan that is supplied to Pre-filter planning revisions.",
+    "description": "Stable line-numbered rendering of the current canonical plan for advisory contexts. Numbers are 1-based, zero-padded to 4 digits. The format is advisory only; it is not part of the canonical plan body.",
     "rules": [
-      "Line numbers are 1-based and zero-padded to 4 digits.",
-      "Empty physical lines are still numbered.",
-      "Line numbers refer ONLY to the last canonical plan version passed to Pre-filter.",
-      "The numbering is advisory for humans/models; it is not part of the canonical plan body."
+      "Line numbers are 1-based and zero-padded to exactly 4 digits.",
+      "Empty physical lines are numbered too.",
+      "Numbering is advisory and refers ONLY to the last canonical plan version.",
+      "The line-number prefixes are NEVER part of the canonical body."
     ]
   },
   "operations": {
-    "full_rewrite": {
-      "description": "Return an entirely new canonical plan inside ###Plan##### markers. Always allowed."
-    },
-    "replace_range": {
-      "description": "Replace lines [start_line, end_line] (1-based inclusive) of the previous plan with the supplied lines."
-    },
-    "insert_before": {
-      "description": "Insert the supplied lines immediately before start_line of the previous plan."
-    },
-    "insert_after": {
-      "description": "Insert the supplied lines immediately after end_line of the previous plan."
-    },
-    "delete_range": {
-      "description": "Delete lines [start_line, end_line] (1-based inclusive) of the previous plan."
-    }
+    "full_rewrite": {"description": "Replace the entire canonical plan with a complete new body. Always allowed."},
+    "replace_range": {"description": "Replace the inclusive line range [start_line, end_line] with new lines."},
+    "insert_before": {"description": "Insert new lines immediately before start_line."},
+    "insert_after": {"description": "Insert new lines immediately after end_line."},
+    "delete_range": {"description": "Delete the inclusive line range [start_line, end_line]."}
   },
   "line_ranges": {
     "semantics": "1-based inclusive",
-    "start_rule": "start_line must be within the previous plan's physical lines",
-    "count_rule": "count == 0 means pure insertion at start_line",
-    "end_rule": "end_line is inclusive; end_line >= start_line for a non-empty range"
+    "start_rule": "start_line is 1-based inclusive.",
+    "count_rule": "count == 0 means pure insertion; count == 0 on the old side means the hunk inserts new lines only.",
+    "end_rule": "end_line >= start_line for non-empty ranges."
   },
   "full_rewrite_rules": {
     "always_allowed": true,
     "diff_only_optional": true,
     "full_wins_if_both": true,
     "canonical_body_rules": [
-      "Full-plan text must be the canonical plan content.",
-      "Must NOT include ###Plan##### / ###PlanDiff##### markers.",
-      "Must NOT include @@ diff headers or '_build_prefilter_advice_section_agent' wrappers.",
-      "Must NOT include '[USER PLAN FEEDBACK]' audit markers."
-    ]
+      "Canonical plan text only \u2014 no markers, no wrappers.",
+      "The body MUST NOT contain ###Plan##### / ###PlanDiff##### markers.",
+      "The body MUST NOT contain @@ hunk headers or _build_prefilter_advice_section_agent wrappers.",
+      "The body MUST NOT contain [USER PLAN FEEDBACK] audit markers."
+    ],
+    "description": "Full rewrites are always accepted and always win over diff-only responses when both are present.",
+    "markers": "###Plan##### ... ###Plan#####",
+    "unterminated_marker_recovery": "If exactly one PLAN_MARKER is present and the response does NOT also contain a completed PLAN_DIFF_MARKER...PLAN_DIFF_MARKER pair (first start + following end per _extract_between semantics), the text after the single marker is recovered as the full-plan body (one-marker full-rewrite recovery). When a completed diff pair IS present, the diff branch takes precedence.",
+    "trailing_marker_line_trim": "After extraction, trailing physical lines whose entire content equals PLAN_MARKER or PLAN_DIFF_MARKER are trimmed from the full-plan body. Markers embedded inside normal prose lines are not touched. If the trimmed body is empty, the response is rejected as missing_plan."
   },
   "diff_rules": {
+    "description": "Diff-only responses apply a unified diff to the previous canonical plan.",
     "marker": "###PlanDiff#####",
     "optional_version_lines": ["--- vN", "+++ vN+1"],
     "mandatory_hunk_header": "@@ -start,count +new_start,new_count @@",
-    "body_prefixes": {"context": " ", "removal": "-", "addition": "+"},
-    "context_verification": "Context and removal lines MUST match the previous plan line-for-line after stripping only the unified-diff prefix.",
+    "body_prefixes": {
+      "context": " ",
+      "removal": "-",
+      "addition": "+"
+    },
+    "context_verification": "For each hunk, the old-side context/removal lines MUST match the previous plan byte-for-byte at the given range; mismatch is a hard error (conflict) with no partial write.",
     "no_line_number_prefixes_in_body": true,
     "monotonic_non_overlapping": true,
     "notes": [
-      "hunk start/count are 1-based inclusive against the previous plan.",
-      "count == 0 means insertion at start_line.",
-      "Trailing newline preservation and CRLF/CR normalization are tolerated; no other content normalization is applied."
-    ]
+      "Hunk starts are 1-based inclusive.",
+      "count == 0 on the old side means pure insertion.",
+      "CRLF/CR are normalised to LF before parsing; line endings do not contribute to errors."
+    ],
+    "version_line_position_rule": "Optional '--- vN' / '+++ vN+1' lines are ignored ONLY outside a hunk (before the first '@@' header) OR after a completed hunk where the next significant line is an '@@' header. A '-'-prefixed removal payload whose content begins with '--...' inside a hunk is retained as a '-' body line.",
+    "body_indentation": "Body lines MUST use column-0 prefixes: ' ' (context), '-' (removal), '+' (addition). The only allowed leading space is a single ' ' context prefix. Visually indented diff bodies (2+ leading spaces followed by '-', '+', or '@') are rejected as unreadable_diff with a 'column 0' hint.",
+    "no_line_number_prefixes_in_body_hint": "Hunk body lines that contain a 'NNNN|' zero-padded 4-digit line-number prefix are rejected as unreadable_diff. The error message includes the 'NNNN|' / 'no_line_number_prefixes_in_body' hint."
+  },
+  "canonical_file_rules": {
+    "content": "Only the latest canonical plan body (no markers, no wrappers, no diff hunks).",
+    "atomic_write": "Same-directory temporary file plus os.replace.",
+    "read_back_verification": "Mandatory; mismatch raises PlanStateError.",
+    "on_failure": "Hard error (PlanStateError); no silent degradation.",
+    "atomic_write_details": "Write to a same-directory temp file and os.replace it into place; fsync where possible.",
+    "read_back_verification_details": "After writing, read the file back and compare byte-for-byte with the intended content; raise PlanStateError on mismatch (no partial write)."
   },
   "error_rules": {
     "codes": [
@@ -131,16 +170,12 @@
       "persistence_error",
       "plan_write_failed"
     ],
-    "requirement": "All invalid cases must produce a PlanUpdateResult with success=false, mode='error', a populated error string, and MUST NOT cause any partial write to current_plan.md."
-  },
-  "canonical_file_rules": {
-    "content": "Only the latest canonical plan body (no markers, no wrappers, no diff hunks).",
-    "atomic_write": "Same-directory temporary file plus os.replace.",
-    "read_back_verification": "Mandatory; mismatch raises PlanStateError.",
-    "on_failure": "Hard error (PlanStateError); no silent degradation."
+    "requirement": "All invalid cases must produce a PlanUpdateResult with success=false, mode='error', a populated error string, and MUST NOT cause any partial write to current_plan.md.",
+    "legacy_fail_closed_guard": "In the legacy full-rewrite fallback (no valid full block and no diff marker) responses that contain an unresolved PLAN_DIFF_MARKER, any column-0 '@@' hunk header, standalone marker lines, or 'NNNN|' zero-padded line-number prefixes are REJECTED as mode='error' (unreadable_diff / missing_plan) and never written to disk."
   },
   "display_rules": {
     "tui_cli": "TUI and CLI MUST display the full updated canonical plan without truncation.",
-    "downstream": "Orchestrator and Tester MUST receive the latest accepted canonical plan formatted through the existing advisory wrapper (never a raw diff-only response)."
+    "downstream": "Orchestrator and Tester MUST receive the latest accepted canonical plan formatted through the existing advisory wrapper (never a raw diff-only response).",
+    "downstream_canonical_note": "Downstream consumers receive the LATEST canonical plan through the existing advisory wrapper. Raw diff blocks (PlanDiff markers, @@ hunk headers, NNNN| prefixes) are never forwarded downstream."
   }
 }

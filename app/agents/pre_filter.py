@@ -26,7 +26,9 @@ from enum import Enum
 from app.tools.tool_definitions import ORCHESTRATOR_TOOLS
 from app.tools.tool_executor import ToolExecutor, parse_tool_call
 from app.tools.dependency_manager import list_installed_packages_tool
-from app.llm.api_client import call_llm_with_tools, call_llm, get_model_for_role
+from app.llm.api_client import call_llm_with_tools, call_llm
+from app.agents.plan_state import PLAN_MARKER, PLAN_DIFF_MARKER  # noqa: F401
+# from app.agents.plan_state import PLAN_MARKER, PLAN_DIFF_MARKER
 from app.llm.prompt_templates import (
     _build_prefilter_analysis_system_prompt_normal,
     _build_prefilter_analysis_system_prompt_advanced,
@@ -38,6 +40,77 @@ from app.llm.prompt_templates import (
 from config.settings import cfg
 from app.services.project_map_builder import get_project_map_for_prompt
 from app.utils.token_counter import TokenCounter
+
+_NEW_PLAN_SESSION_OVERRIDE = """NEW PLAN SESSION — FINAL OUTPUT POLICY
+
+This policy applies when force_new_plan=True. It OVERRIDES any older or generic wording that only says "always enclose the plan in ###Plan##### markers" by clarifying that this new-session mode requires exactly one COMPLETE full-rewrite block.
+
+REQUIRED OUTPUT FOR THIS MODE:
+- Produce a FULL REWRITE only.
+- The full rewrite MUST use a COMPLETE ###Plan##### ... ###Plan##### marker pair (both the opening and the closing marker must be present).
+- Diff-only responses (a line-numbered unified diff instead of a full plan) MUST NOT be produced in this mode and will be rejected.
+- Do NOT rely on, quote, or reference any previous physical plan, any previous session plan, or any numbered previous-plan section. None of these are provided in this mode; the new plan must stand on its own.
+
+PHYSICAL PLAN LIFECYCLE (unchanged):
+- Prompt construction does NOT delete, reset, or touch the existing physical plan file (.ai-agent/current_plan.md).
+- The physical old plan is replaced ONLY when plan_state.commit_plan(...) successfully commits a new valid plan.
+- If your response is invalid (diff-only, empty, or unreadable), no partial write occurs and the previous canonical plan stays exactly as it was.
+
+CONSISTENCY WITH FINAL USER INSTRUCTION:
+- In this mode the final user instruction about ###Plan##### markers is CONSISTENT WITH this policy (it is NOT overridden by it): exactly one COMPLETE ###Plan##### ... ###Plan##### pair is required. Diff-only output is rejected.
+
+OUTPUT REQUIREMENT:
+- Exactly one complete full-rewrite block:
+
+###Plan#####
+<complete, self-contained new plan — no line-number prefixes, no diff markers>
+###Plan#####
+
+- The plan body MUST NOT contain the markers themselves, 'NNNN|' line-number prefixes, or '@@' hunk headers.
+"""
+
+_PLAN_REVISION_CONTRACT_OVERRIDE = """PLAN REVISION CONTRACT — FINAL RESPONSE POLICY
+
+THIS SECTION EXPLICITLY OVERRIDES EARLIER OR GENERIC FINAL WORDING THAT DEMANDS ONLY ###Plan##### MARKERS.
+When a previous canonical plan version exists, your FINAL response must be EXACTLY ONE valid output according to this revision contract:
+
+OPTION A — FULL REWRITE (always allowed):
+###Plan#####
+<complete, self-contained revised plan — no line-number prefixes, no diff markers>
+###Plan#####
+
+OPTION B — DIFF-ONLY revision (optional):
+###PlanDiff#####
+--- vN
++++ vN+1
+@@ -2,2 +2,3 @@
+ context line kept unchanged
+-removed line
++added line
++another added line
+###PlanDiff#####
+
+IF BOTH a valid full ###Plan##### block and a valid ###PlanDiff##### block are present, the FULL REWRITE WINS.
+
+NEUTRALISATION OF EARLIER MARKERS-ONLY WORDING:
+- In this revision mode, the earlier base-prompt wording «You must ENCLOSE your plan with the marker ###Plan##### … This is MANDATORY» applies ONLY to OPTION A (full rewrite). OPTION B (a diff-only ###PlanDiff##### response) is explicitly permitted and contains no ###Plan##### markers.
+- The final user instruction «Enclose it within ###Plan##### markers» is likewise superseded for OPTION B: a diff-only ###PlanDiff##### response is permitted.
+
+DIFF SYNTAX (must match app/agents/plan_diff_contract.json):
+- Optional '--- vN' / '+++ vN+1' lines are allowed ONLY before the first hunk or between completed hunks when the next significant line is an '@@' header.
+- Hunk headers use: @@ -start,count +new_start,new_count @@
+- Body prefixes MUST start at column 0: a single leading space for context, '-' for removal, '+' for addition.
+- The ONLY allowed leading space in a body line is the single context prefix.
+- No visual indentation in examples.
+- No 'NNNN|' line-number prefixes in diff body lines.
+- No raw 'NNNN|' prefixes, markers, or '@@' lines are to be forwarded downstream.
+
+DOWNSTREAM BEHAVIOUR (unchanged):
+- app/agents/plan_state.parse_plan_response remains the canonical parser (it resolves either a full rewrite or a diff).
+- Downstream consumers receive the LATEST canonical plan body only — never raw diff blocks (no markers, no '@@' headers, no 'NNNN|' prefixes).
+- Invalid diff responses produce NO partial write; the previous canonical plan stays intact.
+- The canonical plan is physically replaced only after a successful commit_plan(...) call.
+"""
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +345,7 @@ async def analyze_query(
     model: str = None,
     is_planning: bool = False,
     is_new_project: bool = False,
+    force_new_plan: bool = False,
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
         preferred_provider: Optional[str] = None,
         on_token: Optional[Callable[[str], None]] = None,
@@ -286,9 +360,17 @@ async def analyze_query(
         index: Полный семантический индекс
         mode: Режим работы (NORMAL или ADVANCED)
         model: Модель для использования (если None, используется из конфига)
+        is_planning: Planning mode (advanced + agent).
+        is_new_project: New-project flag.
+        force_new_plan: True → previous physical plan is NOT used as revision
+            context, effective prompt requires a complete ``###Plan#####`` full
+            rewrite, and a successful response still commits as the next
+            monotonic version in the project's existing history.
+        on_tool_call: Tool-call streaming callback.
         preferred_provider: Per-role provider chosen together with the model
             (overrides cfg.get_selected_agent_provider()). Used only when model
             is explicitly provided; otherwise the dynamic selection's provider is used.
+        on_token: Token streaming callback.
 
     Returns:
         PreFilterAdvice с анализом и рекомендациями
@@ -309,7 +391,9 @@ async def analyze_query(
         
         logger.info(f"[PRE-FILTER] analyze_query called: mode={mode.value}, model={model}")
         
-        # Load versioned plan context (planning mode only)
+        # Load versioned plan context (planning mode only) — ALWAYS build a
+        # resolution context carrying previous_plan / previous_version /
+        # next_version, even when there is no previous plan yet.
         _plan_ctx: Optional[Dict[str, Any]] = None
         _plan_state_mod = None
         if is_planning and mode == PreFilterMode.ADVANCED and project_dir:
@@ -317,18 +401,28 @@ async def analyze_query(
                 from app.agents import plan_state as _ps_bootstrap
                 _plan_state_mod = _ps_bootstrap
                 _existing = _ps_bootstrap.load_or_init(project_dir)
-                _cur_v = _existing.get_current()
-                _nxt_v = _existing.next_version_number()
-                if _cur_v is not None and _cur_v.content.strip():
-                    _plan_ctx = {
-                        "previous_plan": _cur_v.content,
-                        "previous_version": _cur_v.version,
-                        "next_version": _nxt_v,
-                    }
-                    logger.info(
-                        f"[PRE-FILTER] Plan revision context loaded: "
-                        f"prev=v{_cur_v.version}, next=v{_nxt_v}"
-                    )
+                _current_v = _existing.get_current()
+                _current_version = int(getattr(_existing, "current_version", 0) or 0)
+                _next_v = _existing.next_version_number()
+                if force_new_plan:
+                    _prev_plan = ""
+                    _prev_version = _current_version
+                else:
+                    if _current_v is not None and _current_v.content.strip():
+                        _prev_plan = _current_v.content
+                        _prev_version = _current_v.version
+                    else:
+                        _prev_plan = ""
+                        _prev_version = _current_version
+                _plan_ctx = {
+                    "previous_plan": _prev_plan,
+                    "previous_version": _prev_version,
+                    "next_version": _next_v,
+                }
+                logger.info(
+                    f"[PRE-FILTER] Plan context: force_new_plan={force_new_plan}, "
+                    f"prev=v{_prev_version}, next=v{_next_v}"
+                )
             except Exception as _plc_err:
                 logger.debug(f"[PRE-FILTER] plan context load failed: {_plc_err}")
                 _plan_ctx = None
@@ -344,8 +438,59 @@ async def analyze_query(
             # Если формат не удался или плейсхолдера нет - оставляем как есть
             pass
 
-        # Append plan-revision section (only when a previous plan version exists)
-        if _plan_ctx is not None:
+        # Neutralise the base "PLAN REVISION CONTRACT" section for force_new_plan
+        # ONLY — the base prompt still teaches OPTION A/OPTION B diff-only
+        # revisions, which directly contradicts the NEW PLAN SESSION override.
+        # This is a pure string operation on the local `system_prompt`, done
+        # AFTER `.format(...)` (brace safety) and BEFORE the override is
+        # appended. It removes ONLY the delimited "🔁 PLAN REVISION CONTRACT"
+        # section (heading + body, up to but not including the next section's
+        # separator line); every other base-prompt section is preserved
+        # verbatim. Revision mode (`force_new_plan=False`) is unaffected
+        # because the condition below is False there. Absence of the heading
+        # is a safe no-op.
+        if is_planning and mode == PreFilterMode.ADVANCED and force_new_plan:
+            try:
+                _pr_head = "🔁 PLAN REVISION CONTRACT"
+                if _pr_head in system_prompt:
+                    _pr_lines = system_prompt.split("\n")
+                    _pr_head_idx = None
+                    for _i, _ln in enumerate(_pr_lines):
+                        if _pr_head in _ln:
+                            _pr_head_idx = _i
+                            break
+                    if _pr_head_idx is not None:
+                        _pr_start = None
+                        for _j in range(_pr_head_idx - 1, -1, -1):
+                            if _pr_lines[_j].strip().startswith("━"):
+                                _pr_start = _j
+                                break
+                        _pr_hdr_sep = None
+                        for _j in range(_pr_head_idx + 1, len(_pr_lines)):
+                            if _pr_lines[_j].strip().startswith("━"):
+                                _pr_hdr_sep = _j
+                                break
+                        _pr_end_sep = None
+                        if _pr_hdr_sep is not None:
+                            for _j in range(_pr_hdr_sep + 1, len(_pr_lines)):
+                                if _pr_lines[_j].strip().startswith("━"):
+                                    _pr_end_sep = _j
+                                    break
+                        if _pr_start is not None and _pr_end_sep is not None:
+                            system_prompt = "\n".join(
+                                _pr_lines[:_pr_start] + _pr_lines[_pr_end_sep:]
+                            )
+                            logger.debug(
+                                "[PRE-FILTER] Neutralised base PLAN REVISION "
+                                "CONTRACT section for force_new_plan=True"
+                            )
+            except Exception as _pr_err:
+                logger.debug(
+                    f"[PRE-FILTER] plan-revision neutralisation skipped: {_pr_err}"
+                )
+        # Append plan-revision section (only when a previous plan version exists
+        # and force_new_plan is False).
+        if _plan_ctx is not None and not force_new_plan and _plan_ctx.get("previous_plan"):
             try:
                 from app.llm.prompt_templates import _build_plan_revision_section
                 _revision_section = _build_plan_revision_section(
@@ -361,6 +506,14 @@ async def analyze_query(
                     )
             except Exception as _rev_err:
                 logger.debug(f"[PRE-FILTER] plan revision section append failed: {_rev_err}")
+
+        # Append plan-contract override — appended AFTER `.format(...)` so brace
+        # placeholders in the override text cannot break the format chain.
+        if is_planning and mode == PreFilterMode.ADVANCED:
+            if force_new_plan:
+                system_prompt = system_prompt + "\n\n" + _NEW_PLAN_SESSION_OVERRIDE
+            elif _plan_ctx is not None and _plan_ctx.get("previous_plan"):
+                system_prompt = system_prompt + "\n\n" + _PLAN_REVISION_CONTRACT_OVERRIDE
         
         # Сформировать user промпт
         user_prompt = _get_prefilter_analysis_user_prompt(
@@ -402,7 +555,25 @@ async def analyze_query(
             tool_executor = ToolExecutor(project_dir=project_dir, index=index)
             
             if is_planning:
-                # Режим планирования: используем run_planning_loop
+                # Режим планирования: используем run_planning_loop.
+                # Derive a policy string from the already-computed plan context so
+                # the final user message never conflicts with the active contract.
+                _policy_prev_plan = ""
+                if _plan_ctx is not None:
+                    _policy_prev_plan = str(_plan_ctx.get("previous_plan", "") or "")
+                if force_new_plan or not _policy_prev_plan.strip():
+                    _final_response_policy = (
+                        "You MUST return exactly one COMPLETE full-rewrite plan "
+                        "enclosed in a matching ###Plan##### ... ###Plan##### pair "
+                        "(both opening and closing markers required). Diff-only output "
+                        "is rejected in this mode."
+                    )
+                else:
+                    _final_response_policy = (
+                        "Return exactly one valid output according to the PLAN "
+                        "REVISION CONTRACT: OPTION A full rewrite in ###Plan##### "
+                        "markers or OPTION B a diff-only ###PlanDiff##### block."
+                    )
                 final_response, tool_calls_made, final_model = await run_planning_loop(
                                     messages=messages,
                                     model=model,
@@ -411,59 +582,65 @@ async def analyze_query(
                                     on_tool_call=on_tool_call,
                                     preferred_provider=model_provider,
                                     on_token=on_token,
+                                    final_response_policy=_final_response_policy,
                                 )
                 elapsed = time.time() - start_time
                 logger.info(f"[PRE-FILTER] Planning mode completed in {elapsed:.1f}s, tool_calls={tool_calls_made}, model={final_model}")
-                
-                # Извлекаем план
-                plan = extract_plan(final_response)
 
-                # Resolve canonical plan body via parse_plan_response when a previous plan exists.
-                # When `_plan_ctx` is absent, `extract_plan` above is the deterministic legacy path —
-                # a diff-only response without a previous plan is treated as a failed resolution.
+                # Single authoritative resolution — parse_plan_response is the
+                # canonical source (never extract_plan). When there is no plan
+                # context at all, resolve using neutral defaults so a pure
+                # full-rewrite response is still accepted while a diff-only
+                # response is rejected as missing_plan.
                 from app.agents import plan_state as _ps_resolve
-                if _plan_ctx is not None:
-                    try:
-                        _result = _ps_resolve.parse_plan_response(
-                            response=final_response,
-                            previous_plan=_plan_ctx["previous_plan"],
-                            previous_version=int(_plan_ctx["previous_version"]),
-                            next_version=int(_plan_ctx["next_version"]),
-                        )
-                    except Exception as _parse_err:
-                        logger.warning(
-                            f"[PRE-FILTER] parse_plan_response raised: {_parse_err}"
-                        )
-                        _result = None
-                    if _result is not None and getattr(_result, "success", False):
+                _context = _plan_ctx or {
+                    "previous_plan": "",
+                    "previous_version": 0,
+                    "next_version": 1,
+                }
+                _prev_plan = _context.get("previous_plan", "") or ""
+                _prev_version = int(_context.get("previous_version", 0) or 0)
+                _next_version = int(_context.get("next_version", 1) or 1)
+
+                plan = ""
+                try:
+                    _result = _ps_resolve.parse_plan_response(
+                        response=final_response,
+                        previous_plan=_prev_plan,
+                        previous_version=_prev_version,
+                        next_version=_next_version,
+                    )
+                    if getattr(_result, "success", False):
                         plan = _result.content or ""
                     else:
-                        _resolution_error = (
-                            getattr(_result, "error", None)
-                            if _result is not None
-                            else "parse_plan_response raised"
-                        )
+                        _resolution_error = getattr(_result, "error", None)
                         logger.warning(
                             f"[PRE-FILTER] Plan resolution failed: {_resolution_error}"
                         )
                         plan = ""
-                else:
-                    # Guard: a diff-only response without a previous plan must not
-                    # corrupt the canonical file — treat it as a failed resolution.
+                except Exception as _parse_err:
+                    logger.warning(
+                        f"[PRE-FILTER] parse_plan_response raised: {_parse_err}"
+                    )
+                    # Safe fallback ONLY when the raw response has no diff-like
+                    # artifacts (no PLAN_DIFF_MARKER, no column-0 '@@', no NNNN|).
+                    _raw = final_response or ""
                     try:
-                        _raw = final_response or ""
-                        if (
+                        _has_diff_artifacts = bool(
                             _ps_resolve.PLAN_DIFF_MARKER in _raw
-                            and _ps_resolve.PLAN_MARKER not in _raw
-                        ):
-                            logger.warning(
-                                "[PRE-FILTER] Diff-only response without previous plan; "
-                                "treating as failed resolution (empty canonical)."
-                            )
-                            plan = ""
+                            or re.search(r"^@@", _raw, re.MULTILINE)
+                            or re.search(r"\d{4}\|", _raw)
+                        )
                     except Exception:
-                        pass
-                
+                        _has_diff_artifacts = True
+                    if not _has_diff_artifacts:
+                        try:
+                            plan = extract_plan(_raw)
+                        except Exception:
+                            plan = ""
+                    else:
+                        plan = ""
+
                 advice = PreFilterAdvice(
                     clarified_query=user_query,
                     possible_cause="[Planning Mode]",
@@ -475,15 +652,18 @@ async def analyze_query(
                     full_response=final_response,
                     model_used=final_model
                 )
-                # Versioned plan persistence (canonical current_plan.md + archive + history)
+                # Versioned plan persistence (canonical current_plan.md + archive + history).
                 try:
                     if project_dir and plan:
                         if _plan_state_mod is None:
                             from app.agents import plan_state as _ps_fallback
                             _plan_state_mod = _ps_fallback
-                        _summary = "Initial plan"
-                        if _plan_ctx and int(_plan_ctx.get("previous_version", 0) or 0) > 0:
+                        if force_new_plan:
+                            _summary = "New plan session"
+                        elif _plan_ctx and int(_plan_ctx.get("previous_version", 0) or 0) > 0:
                             _summary = f"Revision from v{_plan_ctx['previous_version']}"
+                        else:
+                            _summary = "Initial plan"
                         _new_state = _plan_state_mod.commit_plan(
                             project_dir, plan, summary=_summary
                         )
@@ -572,6 +752,7 @@ async def analyze_query(
             tool_calls_made=0,
             raw_response="",
         )
+
 
 async def _run_advanced_prefilter(
     messages: List[Dict[str, str]],
@@ -797,6 +978,7 @@ async def run_planning_loop(
     on_tool_call: Optional[Callable[[str, Dict[str, Any], str, bool], None]] = None,
         preferred_provider: Optional[str] = None,
         on_token: Optional[Callable[[str], None]] = None,
+        final_response_policy: str = "",
     ) -> tuple:
     """Запускает продвинутый цикл планирования с graceful degradation.
 
@@ -866,7 +1048,7 @@ async def run_planning_loop(
 
             if not tool_calls:
                 if not content.strip() and retry_count == 0:
-                    logger.warning(f"[PRE-FILTER] Empty response. Retrying...")
+                    logger.warning("[PRE-FILTER] Empty response. Retrying...")
                     retry_count += 1
                     continue
                 elif not content.strip():
@@ -921,9 +1103,20 @@ async def run_planning_loop(
                     "content": tr["content"],
                 })
 
+        _default_final_sentence = (
+            "Please provide your final implementation plan now based on the gathered information. "
+            "Enclose it within ###Plan##### markers."
+        )
+        if final_response_policy:
+            _final_user_content = (
+                "Please provide your final implementation plan now based on the gathered information. "
+                + final_response_policy
+            )
+        else:
+            _final_user_content = _default_final_sentence
         messages.append({
             "role": "user",
-            "content": "Please provide your final implementation plan now based on the gathered information. Enclose it within ###Plan##### markers.",
+            "content": _final_user_content,
         })
 
         # === LIMIT-RECOVERY HOOK (tool-call exhaustion) ===
@@ -1716,7 +1909,7 @@ def _parse_prefilter_response(response: str, max_chunks: int) -> List[Dict]:
     json_str = _extract_json_from_response(response)
     
     if not json_str:
-        logger.warning(f"Pre-filter: could not extract JSON from response")
+        logger.warning("Pre-filter: could not extract JSON from response")
         return _try_regex_extraction(response, max_chunks)
     
     try:

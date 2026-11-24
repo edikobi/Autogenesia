@@ -25,6 +25,11 @@ import os
 from typing import Optional, List, Dict, Any, Set
 from config.settings import Config
 # (пока выключим импорт) from app.advice.advice_loader import get_catalog_for_prompt
+from config.settings import Config
+from config.settings import Config
+# (пока выключим импорт) from app.advice.advice_loader import get_catalog_for_prompt
+from config.settings import Config
+# (пока выключим импорт) from app.advice.advice_loader import get_catalog_for_prompt
 from pathlib import Path
 
 
@@ -44,6 +49,23 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 MAX_WEB_SEARCH_CALLS = 3  # Maximum web_search calls per session
+
+# ============================================================================
+# FULLY-SUPPORTED LANGUAGE WHITELIST (Generator diff-mode injection)
+# ============================================================================
+
+#: Lowercase file extensions for which the Generator has fully implemented,
+#: language-specific DIFF-mode guidance. Every other extension (including
+#: .sql, .md, .html, .css, .tcss, .json, .yaml, .yml, .toml, .ini, .cfg,
+#: .txt, .csv, .xml, .rs, .cpp, .c, .h, .sh, .ps1, unknown and no-extension
+#: files) is treated as unsupported.
+FULLY_SUPPORTED_CODE_EXTENSIONS = frozenset(
+    {".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt", ".kts", ".go"}
+)
+
+#: Marker that must appear verbatim inside the generic unsupported-language
+#: injection text so tests can assert on it.
+GENERIC_UNSUPPORTED_LANGUAGE_MARKER: str = "GENERIC UNSUPPORTED-LANGUAGE DIFF PROTOCOL"
 
 
 # ============================================================================
@@ -7184,6 +7206,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("TARGET_CLASS: UserService")
     parts.append("TARGET_METHOD: update_profile")
     parts.append("INSERT_AFTER: if not user:")
+    parts.append("REPLACE_PATTERN_LINE: 23")                                          # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("        # Log the update attempt")
@@ -7252,6 +7275,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("        'Content-Type': 'application/json',")
     parts.append("        'Accept': 'application/json',")
     parts.append("    }")
+    parts.append("REPLACE_PATTERN_LINE: 8")                                             # ⭐ ДОБАВЛЕНО
+    parts.append("REPLACE_PATTERN_LINE_END: 11")                                        # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("    DEFAULT_HEADERS = {")
@@ -7300,6 +7325,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("TARGET_CLASS: Settings")
     parts.append("TARGET_METHOD: assemble_db_connection")
     parts.append("REPLACE_PATTERN: return PostgresDsn.build(") # The line(s) to find
+    parts.append("REPLACE_PATTERN_LINE: 42")                                            # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("        # Replaces only the matching pattern lines:")
@@ -7330,6 +7356,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("        choice = Prompt.ask('Choice', choices=['0', '1', '2'])")
     parts.append("    except BackException:")
     parts.append("        raise")
+    parts.append("REPLACE_PATTERN_LINE: 28")                                            # ⭐ ДОБАВЛЕНО
+    parts.append("REPLACE_PATTERN_LINE_END: 32")                                        # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("    # Removed duplicate menu block — flow continues to next handler")
@@ -7370,6 +7398,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("MODE: REPLACE_IN_FUNCTION")
     parts.append("TARGET_FUNCTION: process_data")
     parts.append("REPLACE_PATTERN: data = json.load(f)")
+    parts.append("REPLACE_PATTERN_LINE: 18")                                            # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("    # Replaces only the matching pattern line within the function body")
@@ -7391,6 +7420,8 @@ def _get_python_prompt_injection() -> str:
     parts.append("    with open(path) as f:")
     parts.append("        data = json.load(f)")
     parts.append("        return data")
+    parts.append("REPLACE_PATTERN_LINE: 12")                                            # ⭐ ДОБАВЛЕНО
+    parts.append("REPLACE_PATTERN_LINE_END: 14")                                        # ⭐ ДОБАВЛЕНО
     parts.append("")
     parts.append("```python")
     parts.append("    with open(path, encoding='utf-8') as f:")
@@ -7400,7 +7431,6 @@ def _get_python_prompt_injection() -> str:
     parts.append("```")
     parts.append("")
     parts.append("⚠️ Multi-line REPLACE_PATTERN rules:")
-    parts.append("• Include 2–10 consecutive lines from the original file")
     parts.append("• Copy indentation EXACTLY as it appears in the file (byte-for-byte)")
     parts.append("• Do NOT use multi-line REPLACE_PATTERN to replace an entire function")
     parts.append("  (use REPLACE_FUNCTION instead)")
@@ -7417,6 +7447,7 @@ def _get_python_prompt_injection() -> str:
     parts.append("TARGET_FUNCTION: startup_event")
     parts.append("INSERT_BEFORE: return") # Insert before the return statement
     parts.append("")
+    parts.append("REPLACE_PATTERN_LINE: 35")                                            # ⭐ ДОБАВЛЕНО
     parts.append("```python")
     parts.append("    await init_db()")
     parts.append("    logger.info('Database initialized')")
@@ -7683,6 +7714,27 @@ def format_code_generator_prompt_agent(
             system_prompt = system_prompt + "\n" + lang_examples
     
     # Build user prompt
+
+    # === Conditional generic unsupported-language injection ===
+    # Appended exactly once per request when at least one target path (a
+    # file_contents key or a path mentioned in the instruction) has an
+    # extension outside FULLY_SUPPORTED_CODE_EXTENSIONS. If all paths are
+    # supported, or no paths exist, nothing is appended.
+    target_paths = _collect_target_paths(file_contents, orchestrator_instruction)
+    if _has_unsupported_language_target(target_paths):
+        logger.info(
+            "Injecting generic unsupported-language diff prompt for paths: "
+            + ", ".join(target_paths)
+        )
+        system_prompt = (
+            system_prompt
+            + "\n"
+            + _get_generic_unsupported_language_prompt_injection()
+        )
+    else:
+        logger.debug(
+            "No generic unsupported-language injection: all target paths fully supported"
+        )
     user_prompt = _build_user_prompt_with_files(
         orchestrator_instruction=orchestrator_instruction,
         formatted_files=formatted_files,
@@ -7962,6 +8014,174 @@ def format_orchestrator_prompt_new_project_agent(
         "system": system_prompt,
         "user": user_prompt,
     }
+
+
+
+
+def _normalize_target_path(path: str) -> str:
+    """Normalize a candidate target path for extension checks.
+
+    Strips an optional ``CREATE:`` prefix, surrounding backticks/quotes and
+    whitespace. Pure string handling — no I/O.
+    """
+    cleaned = (path or "").strip()
+    if cleaned.upper().startswith("CREATE:"):
+        cleaned = cleaned[len("CREATE:"):].strip()
+    cleaned = cleaned.strip("`\"'").strip()
+    return cleaned
+
+
+def _is_fully_supported_language_path(path: str) -> bool:
+    """Return True only for paths whose extension is fully supported.
+
+    Normalizes the path (``CREATE:`` prefix, backticks/quotes, whitespace),
+    extracts the lowercase extension via ``os.path.splitext`` and checks it
+    against ``FULLY_SUPPORTED_CODE_EXTENSIONS``. Unknown and no-extension
+    paths return False. Pure function — no I/O, no logging side effects.
+    """
+    cleaned = _normalize_target_path(path)
+    if not cleaned:
+        return False
+    ext = os.path.splitext(cleaned)[1].lower()
+    return ext in FULLY_SUPPORTED_CODE_EXTENSIONS
+
+
+#: Shared path-extraction regex list — single source of truth so both
+#: ``_collect_target_paths`` and ``_detect_languages_from_instruction`` stay
+#: consistent (FILE:/CREATE: forms, backticked paths, quoted paths, path|file).
+_TARGET_PATH_PATTERNS = [
+    r'FILE:\s*[`"]?([^\s`"]+\.[a-z]+)',
+    r'`([^\s`]+\.[a-z]+)`',
+    r'"([^\s"]+\.[a-z]+)"',
+    r'(?:path|file)[\s:]*([^\s,\]]+\.[a-z]+)',
+    r'CREATE:\s*[`"]?([^\s`"]+\.[a-z]+)',
+]
+
+
+def _collect_target_paths(
+    file_contents: Optional[Dict[str, str]], instruction: str
+) -> List[str]:
+    """Collect ALL target paths for the current Generator request.
+
+    Combines every key of ``file_contents`` with every path mentioned in the
+    orchestrator instruction, extracted with the same regex list already used
+    by ``_detect_languages_from_instruction``. Duplicates are de-duplicated
+    while preserving first-seen order; ``file_contents=None`` is valid.
+    Returns ``[]`` when nothing is found.
+    """
+    collected: List[str] = []
+    seen: set = set()
+
+    def _add(candidate: str) -> None:
+        """Add a normalized candidate path if new and non-empty."""
+        cleaned = _normalize_target_path(candidate)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            collected.append(cleaned)
+
+    for key in (file_contents or {}).keys():
+        _add(str(key))
+
+    for pattern in _TARGET_PATH_PATTERNS:
+        try:
+            for match in re.finditer(pattern, instruction or "", re.IGNORECASE):
+                _add(match.group(1))
+        except Exception:
+            continue
+
+    return collected
+
+
+def _has_unsupported_language_target(paths: List[str]) -> bool:
+    """Return True iff the list is non-empty and at least one path is unsupported.
+
+    An empty list returns False so generic chat / undefined requests never
+    receive the generic unsupported-language injection. An all-supported set
+    also returns False.
+    """
+    if not paths:
+        return False
+    return any(not _is_fully_supported_language_path(p) for p in paths)
+
+
+
+def _get_generic_unsupported_language_prompt_injection() -> str:
+    """Return the generic unsupported-language diff protocol injection string.
+
+    Appended to the Generator system prompt exactly once per request when at
+    least one target path has an extension outside
+    ``FULLY_SUPPORTED_CODE_EXTENSIONS``. Teaches ONLY the two already
+    implemented non-Python diff modes (``DIFF_REPLACE`` / ``DIFF_INSERT``,
+    backed by ``FileModifier.apply_multilang_diff`` / ``DIFF_MODES``) through
+    exactly two complete CODE_BLOCK examples, each carrying a mandatory
+    1-indexed ``REPLACE_PATTERN_LINE`` hint (plus ``REPLACE_PATTERN_LINE_END``
+    on the multi-line replace example). ``REPLACE_FILE`` is mentioned only as
+    the already-implemented exception, never as a third taught example.
+
+    Truncation-proof construction: the returned value is assembled as a list of
+    individual line expressions joined with a single newline, and the four
+    fence lines plus the two CODE_BLOCK opener/closer marker lines are composed
+    at runtime from the local tokens ``fence`` / ``cb`` / ``ce``. The Python
+    source of this function therefore contains zero three-consecutive-backtick
+    sequences and zero contiguous occurrences of the raw opener/closer marker
+    lines — a literal fence in the source would terminate the enclosing
+    code-block parser prematurely (the exact cause of the previous three
+    truncations).
+
+    Pure function: no I/O, no logging, no global mutation; returns the same
+    string on every call. The returned text is a single complete,
+    self-contained string beginning with ``GENERIC_UNSUPPORTED_LANGUAGE_MARKER``
+    and ending exactly with the terminator ``END OF GENERIC UNSUPPORTED-LANGUAGE DIFF PROTOCOL`` — never an incomplete clause, a placeholder or a trailing newline.
+    """
+    fence = chr(96) * 3
+    cb = "### " + "CODE_BLOCK"
+    ce = "### " + "END_CODE_BLOCK"
+    lines: List[str] = [
+        GENERIC_UNSUPPORTED_LANGUAGE_MARKER,
+        "=" * 60,
+        "",
+        "One or more target files have an extension OUTSIDE the fully-supported language whitelist (.py .js .jsx .mjs .cjs .ts .tsx .java .kt .kts .go). For these unsupported files/languages use ONLY two existing non-Python diff modes: DIFF_REPLACE (replace exact existing lines) and DIFF_INSERT (insert new code relative to an exact anchor).",
+        "Both modes are implemented by FileModifier.apply_multilang_diff / DIFF_MODES for plain-text targets; no structural syntax validation is applied. Do NOT introduce a third taught mode. REPLACE_FILE remains only the ALREADY-IMPLEMENTED exception for brand-new files or an explicit full-file rewrite — never use it to dodge a surgical diff.",
+        "Files whose extension IS in the whitelist above keep their OWN language-specific modes from earlier in this system prompt; this protocol never overrides them.",
+        "",
+        "🚨 MANDATORY 1-INDEXED LINE NUMBER ON EVERY SUCH CODE_BLOCK:",
+        "Every DIFF_REPLACE and DIFF_INSERT block MUST carry the REPLACE_PATTERN_LINE field with a 1-indexed line number of the pattern/anchor in <existing_code>; when the pattern/anchor spans multiple lines ALSO carry the REPLACE_PATTERN_LINE_END field with the inclusive end line.",
+        "Python-only modes are FORBIDDEN here (never emit them): REPLACE_METHOD, REPLACE_FUNCTION, REPLACE_CLASS, REPLACE_GLOBAL, INSERT_CLASS, INSERT_FILE, APPEND_FILE, ADD_NEW_FUNCTION, PATCH_METHOD, REPLACE_IN_METHOD, REPLACE_IN_FUNCTION, INSERT_IN_FUNCTION, INSERT_IMPORT, REPLACE_IMPORT, INSERT_IN_CLASS, REPLACE_IN_CLASS.",
+        "REPLACE_PATTERN, INSERT_AFTER and INSERT_BEFORE must be exact byte-for-byte text copied from <existing_code> (indentation preserved). Use the CODE_BLOCK grammar accepted by parse_agent_code_blocks — no invented fields, modes or aliases.",
+        "",
+        "EXAMPLE 1 — DIFF_REPLACE (replace two exact lines, with a mandatory line range):",
+        cb,
+        "FILE: docs/README.md",
+        "MODE: DIFF_REPLACE",
+        "REPLACE_PATTERN: Status: draft",
+        "Owner: unassigned",
+        "REPLACE_PATTERN_LINE: 12",
+        "REPLACE_PATTERN_LINE_END: 13",
+        "",
+        fence + "markdown",
+        "Status: published",
+        "Owner: docs-team",
+        fence,
+        ce,
+        "",
+        "EXAMPLE 2 — DIFF_INSERT (insert new content after an exact anchor, with a mandatory line number):",
+        cb,
+        "FILE: docs/README.md",
+        "MODE: DIFF_INSERT",
+        "INSERT_AFTER: ## Install",
+        "REPLACE_PATTERN_LINE: 8",
+        "",
+        fence + "markdown",
+        "Run pip install -r requirements.txt first.",
+        fence,
+        ce,
+        "",
+        "END OF GENERIC UNSUPPORTED-LANGUAGE DIFF PROTOCOL",
+    ]
+    return "\n".join(lines)
+
+
+
 
 
 

@@ -32,7 +32,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +488,15 @@ _HUNK_RE = re.compile(r"^@@\s+-(\d+),(\d+)\s+\+(\d+),(\d+)\s+@@\s*$")
 
 
 def _extract_between(text: str, start_marker: str, end_marker: str) -> Optional[str]:
-    """Return the text strictly between the first start marker and the next end marker."""
+    """Return the text strictly between the first start marker and the next end marker.
+
+    Only leading CR/LF characters are stripped (``lstrip("\\r\\n")``) so that a
+    body beginning with ``\\n--- v1\\n+++ v2\\n@@ ...`` starts at ``--- v1``.
+    All other characters — especially a line consisting of a single space (a
+    valid unified-diff empty context line) and all trailing whitespace — are
+    preserved byte-for-byte. ``None`` is returned when either marker is
+    missing (search semantics unchanged: first start marker, next end marker).
+    """
     start = text.find(start_marker)
     if start == -1:
         return None
@@ -496,19 +504,56 @@ def _extract_between(text: str, start_marker: str, end_marker: str) -> Optional[
     end = text.find(end_marker, start)
     if end == -1:
         return None
-    return text[start:end]
+    return text[start:end].lstrip("\r\n")
+
 
 
 def _extract_plan_block(text: str) -> Optional[str]:
-    """Extract the region between the first and last ``###Plan#####`` markers."""
-    positions = [m.start() for m in re.finditer(re.escape(PLAN_MARKER), text)]
-    if len(positions) < 2:
+    """Extract the region between ``###Plan#####`` standalone marker lines (deterministic table).
+
+    Only standalone marker lines count as delimiters: a physical line
+    (split on ``\\n`` after CRLF/CR normalisation) whose ``.strip()`` equals
+    ``PLAN_MARKER``. ``PLAN_MARKER`` embedded inside other text is never a
+    delimiter.
+
+    Behaviour:
+      - ``>=2`` standalone marker lines: return text strictly between the end
+        of the first standalone line's marker and the start of the last
+        standalone line's marker (the full-rewrite block always wins).
+      - Exactly 1 standalone marker line:
+          * if the response ALSO contains a completed
+            ``###PlanDiff##### ... ###PlanDiff#####`` pair (first start +
+            following end, per ``_extract_between`` semantics), return ``None``
+            so ``parse_plan_response`` takes the diff branch;
+          * otherwise return the substring after that marker's end as
+            one-marker full-rewrite recovery.
+      - 0 standalone marker lines: return ``None`` — embedded marker
+        substrings inside prose are never treated as delimiters.
+    """
+    if not text:
         return None
-    first_end = positions[0] + len(PLAN_MARKER)
-    last_start = positions[-1]
-    if last_start < first_end:
-        return None
-    return text[first_end:last_start]
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    positions: List[int] = []
+    offset = 0
+    for line in normalized.split("\n"):
+        if line.strip() == PLAN_MARKER:
+            leading = len(line) - len(line.lstrip())
+            positions.append(offset + leading)
+        offset += len(line) + 1
+    if len(positions) >= 2:
+        first_end = positions[0] + len(PLAN_MARKER)
+        last_start = positions[-1]
+        if last_start < first_end:
+            return None
+        return normalized[first_end:last_start]
+    if len(positions) == 1:
+        # Defer to the diff branch when a COMPLETED diff pair is also present.
+        if _extract_between(normalized, PLAN_DIFF_MARKER, PLAN_DIFF_MARKER) is not None:
+            return None
+        return normalized[positions[0] + len(PLAN_MARKER):]
+    return None
+
+
 
 
 def _finalize_hunk(raw: Dict[str, Any]) -> PlanDiffHunk:
@@ -536,21 +581,62 @@ def _finalize_hunk(raw: Dict[str, Any]) -> PlanDiffHunk:
 
 
 def _parse_diff_hunks(body: str) -> List[PlanDiffHunk]:
-    """Parse a PlanDiff body into validated hunks (raises ``_DiffError``)."""
+    """Parse a PlanDiff body into validated hunks (raises ``_DiffError``).
+
+    CRLF/CR are normalised to LF before splitting. Leading and trailing fully
+    empty lines (``""``) of the block are discarded; a line that is exactly
+    ``" "`` is never discarded — it is a valid unified-diff empty context line.
+    Optional ``--- vN`` / ``+++ vN+1`` version lines are ignored whenever they
+    are not part of a hunk body (no hunk started yet, or the following
+    significant line is a ``@@`` header); repeated pairs between hunks are
+    tolerated. A removal payload whose content begins with ``--...`` (i.e. a
+    ``-`` prefix immediately followed by ``--``) inside a hunk is retained as a
+    ``-`` body line, not skipped. Any other non-empty line before the first
+    ``@@`` still raises ``_DiffError("unreadable_diff", ...)``. Inside a hunk,
+    only truly empty lines (``line == ""``) are skipped; a ``" "`` line is
+    appended to the hunk body and therefore counted by ``_finalize_hunk`` as
+    both an old-side and a new-side line. Visually indented diff bodies that
+    omit the mandatory column-0 prefix are rejected with a ``"column 0"`` hint.
+    Hunk body lines containing a ``NNNN|`` zero-padded line-number prefix are
+    rejected with the ``no_line_number_prefixes_in_body`` hint. All range and
+    context validation in ``_finalize_hunk`` and ``_apply_hunks`` is unchanged
+    (no partial write on error).
+    """
     lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    hunks: List[PlanDiffHunk] = []
-    i = 0
-    # Skip optional --- vN / +++ vN+1 lines
-    while i < len(lines) and (lines[i].startswith("---") or lines[i].startswith("+++")):
-        i += 1
+
+    # Discard only fully empty leading/trailing lines of the block.
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    def _next_significant_is_header(idx: int) -> bool:
+        """Return True when the next non-fully-empty line is a ``@@`` header."""
+        j = idx
+        while j < len(lines):
+            if lines[j] != "":
+                return bool(_HUNK_RE.match(lines[j]))
+            j += 1
+        return False
 
     current: Optional[Dict[str, Any]] = None
     pending: List[PlanDiffHunk] = []
+    i = 0
     while i < len(lines):
         line = lines[i]
-        if line.strip() == "":
+        if line == "":
+            # Truly empty separator line — skipped (never a context payload).
             i += 1
             continue
+        if line.startswith("---") or line.startswith("+++"):
+            # Optional --- vN / +++ vN+1 version line: ignored when it is not
+            # part of a hunk body (no hunk started yet, or the next
+            # significant line is the following @@ header). A removal payload
+            # whose content begins with '--...' inside a hunk is retained as a
+            # '-' body line, not skipped.
+            if current is None or _next_significant_is_header(i + 1):
+                i += 1
+                continue
         match = _HUNK_RE.match(line)
         if match:
             if current is not None:
@@ -565,14 +651,56 @@ def _parse_diff_hunks(body: str) -> List[PlanDiffHunk]:
             i += 1
             continue
         if current is None:
+            # No hunk started yet — this line is not part of any hunk body.
+            _hint = ""
+            if line[:1] in (" ", "\t"):
+                _stripped = line.lstrip(" \t")
+                if _stripped.startswith("@@"):
+                    _hint = (
+                        " (diff appears visually indented; hunk headers and body "
+                        "lines must start at column 0)"
+                    )
             raise _DiffError(
                 "unreadable_diff",
-                f"Unexpected content outside hunk: {line[:60]!r}",
+                f"Unexpected content outside hunk: {line[:60]!r}{_hint}",
             )
         if not line or line[0] not in (" ", "-", "+"):
+            _hint = ""
+            if line[:1] in (" ", "\t"):
+                _hint = (
+                    " (body lines must start at column 0 with a ' ', '-', or '+' "
+                    "prefix; visual indentation is not allowed)"
+                )
             raise _DiffError(
                 "unreadable_diff",
-                f"Invalid body line prefix: {line[:60]!r}",
+                f"Invalid body line prefix: {line[:60]!r}{_hint}",
+            )
+        # Detect visually indented diff body presented without column-0
+        # prefixes: a body line beginning with 2+ whitespace characters whose
+        # stripped form is '-xxx', '+xxx' or '@xxx' strongly indicates the
+        # author did not use the mandatory column-0 prefix.
+        if line[0] == " " and len(line) > 1 and line[1] in (" ", "\t"):
+            _stripped2 = line.lstrip(" \t")
+            _prefix_count = len(line) - len(_stripped2)
+            if _prefix_count > 1 and _stripped2[:1] in ("-", "+", "@"):
+                raise _DiffError(
+                    "unreadable_diff",
+                    (
+                        "Invalid diff body line: leading whitespace detected, "
+                        "but diff body lines must start at column 0. "
+                        f"Got: {line[:60]!r}"
+                    ),
+                )
+        # Reject NNNN| line-number prefixes inside the body.
+        _body_content = line[1:] if len(line) > 1 else ""
+        if re.search(r"\d{4}\|", _body_content):
+            raise _DiffError(
+                "unreadable_diff",
+                (
+                    "Diff body line contains a 'NNNN|' line-number prefix; body "
+                    "lines must not contain line-number prefixes "
+                    f"(no_line_number_prefixes_in_body). Got: {line[:60]!r}"
+                ),
             )
         current["body"].append(line)
         i += 1
@@ -586,6 +714,8 @@ def _parse_diff_hunks(body: str) -> List[PlanDiffHunk]:
             raise _DiffError("conflict", "non-monotonic hunks")
         prev_start = hunk.old_start
     return pending
+
+
 
 
 def _apply_hunks(previous_plan: str, hunks: List[PlanDiffHunk]) -> str:
@@ -642,6 +772,37 @@ def _apply_hunks(previous_plan: str, hunks: List[PlanDiffHunk]) -> str:
     return out
 
 
+
+def _looks_like_unresolved_diff(text: str) -> bool:
+    """Return True when text carries artifacts of an unresolved plan diff.
+
+    Fail-closed guard used by the legacy full-rewrite fallback in
+    ``parse_plan_response``: responses that still contain an unresolved
+    ``PLAN_DIFF_MARKER``, a column-0 ``@@`` hunk header, a standalone marker
+    line, or a line-anchored ``NNNN|`` zero-padded 4-digit line-number prefix
+    must be rejected rather than persisted as raw diffs.
+    """
+    if not text:
+        return False
+    if PLAN_DIFF_MARKER in text:
+        return True
+    try:
+        if re.search(r"^@@", text, re.MULTILINE):
+            return True
+    except Exception:
+        pass
+    for _line in text.split("\n"):
+        if _line.strip() in (PLAN_MARKER, PLAN_DIFF_MARKER):
+            return True
+    try:
+        if re.search(r"^[ \t]*\d{4}\|", text, re.MULTILINE):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+
 def _error_result(code: str, message: str, previous_version: int, next_version: int) -> PlanUpdateResult:
     """Build a ``PlanUpdateResult`` in error mode."""
     return PlanUpdateResult(
@@ -667,9 +828,11 @@ def parse_plan_response(
       - Full rewrite enclosed in ``###Plan#####`` markers (always wins).
       - Diff-only ``###PlanDiff#####`` block applied to ``previous_plan``.
       - Empty diff meaning unchanged plan (``mode="empty_diff"``).
-      - Legacy full-rewrite fallback when non-empty and no diff marker.
+      - Legacy full-rewrite fallback (non-empty, no markers, no diff artifacts).
     All invalid cases return ``PlanUpdateResult(success=False, mode="error")`` with
-    no write side effects.
+    no write side effects. The full-plan branch strips standalone trailing marker
+    lines and rejects an empty body. The legacy fallback fails closed on
+    diff-like responses via ``_looks_like_unresolved_diff``.
     """
     text = response or ""
 
@@ -677,6 +840,16 @@ def parse_plan_response(
     full_block = _extract_plan_block(text)
     if full_block is not None:
         content = full_block.strip("\n")
+        # Trim trailing standalone marker-only lines.
+        while content:
+            _lines = content.split("\n")
+            if not _lines:
+                break
+            _last = _lines[-1].strip()
+            if _last in (PLAN_MARKER, PLAN_DIFF_MARKER):
+                content = "\n".join(_lines[:-1]).rstrip("\n")
+                continue
+            break
         if not content.strip():
             return _error_result("missing_plan", "Full-plan block is empty", previous_version, next_version)
         diff = None
@@ -741,9 +914,16 @@ def parse_plan_response(
             diff=diff_model,
         )
 
-    # 3. Legacy full rewrite fallback (non-empty response).
+    # 3. Legacy full rewrite fallback — reject diff-like responses.
     stripped = text.strip()
     if stripped:
+        if _looks_like_unresolved_diff(text):
+            return _error_result(
+                "unreadable_diff",
+                "Diff-like response without a valid PlanDiff block (fail-closed)",
+                previous_version,
+                next_version,
+            )
         diff = None
         try:
             diff = compute_diff(previous_plan or "", stripped, previous_version, next_version)
@@ -764,6 +944,7 @@ def parse_plan_response(
     return _error_result("missing_plan", "Empty plan response", previous_version, next_version)
 
 
+
 # ---------------------------------------------------------------------------
 # Convenience helpers
 # ---------------------------------------------------------------------------
@@ -773,6 +954,59 @@ def load_or_init(project_dir: Optional[str]) -> PlanState:
     if not project_dir:
         return PlanState()
     return PlanState.load_from_disk(project_dir)
+
+
+
+def reconcile_plan_state(
+    project_dir: Optional[str],
+    strategy: str = "report",
+) -> Optional[PlanState]:
+    """Read-only diagnostic / explicit reconciliation for divergent plan state.
+
+    Compares the canonical ``current_plan.md`` with the persisted history's
+    current version. The default strategy ``"report"`` returns ``None`` and logs
+    a diagnostic when the two diverge — never writing anything. ``"use_disk"``
+    accepts externally-applied canonical content and commits it as the next
+    monotonic version (archives + atomically rewrites ``current_plan.md``).
+    ``"use_history"`` explicitly restores the canonical file from history.
+    Callers MUST make the choice explicit; no automatic session startup or test
+    invokes it with a mutating strategy.
+    """
+    if not project_dir:
+        return None
+    try:
+        disk_current = read_current_plan(project_dir)
+        state = load_or_init(project_dir)
+        _cur = state.get_current()
+        history_current = _cur.content if _cur is not None else ""
+        if disk_current == history_current:
+            return state
+        # Divergence detected — the choice MUST be explicit.
+        if strategy == "report":
+            logger.warning(
+                f"reconcile_plan_state: canonical/history divergence at "
+                f"{project_dir} (disk={len(disk_current)} chars, history="
+                f"{len(history_current)} chars). No changes written (report mode)."
+            )
+            return None
+        if strategy == "use_disk":
+            return commit_plan(
+                project_dir,
+                disk_current,
+                summary="Reconcile externally modified canonical plan",
+            )
+        if strategy == "use_history":
+            write_current_plan(project_dir, history_current)
+            return state
+        logger.warning(
+            f"reconcile_plan_state: unknown strategy {strategy!r}; no changes written"
+        )
+        return None
+    except PlanStateError:
+        raise
+    except Exception as exc:
+        logger.warning(f"reconcile_plan_state failed: {exc}")
+        return None
 
 
 def commit_plan(

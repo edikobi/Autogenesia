@@ -43,22 +43,11 @@ _STATUS_LABELS: Dict[str, str] = {
 class WorkspacePane(TabPane):
     """Одна вкладка воркспейса: изолированный пайплайн + UI-виджеты."""
 
-    def on_mount(self) -> None:
-        """Периодический слив токенов, настройка бара и фокус (best-effort)."""
-        self.set_interval(0.1, self._flush_tokens)
-        try:
-            self._configure_action_bar(None)
-        except Exception:
-            self._log(logging.DEBUG, "configure action bar on mount failed", exc_info=True)
-        try:
-            self._update_session_status()
-        except Exception:
-            pass
-        # Focus is best-effort behind the startup menu when setup is incomplete.
-        try:
-            self.query_one("#query-input", Input).focus()
-        except Exception:
-            self._log(logging.DEBUG, "focus query-input failed", exc_info=True)
+    # NOTE: the first duplicate ``on_mount`` (periodic token flush, action-bar
+    # configuration, session-status update and best-effort ``#query-input``
+    # focus) was dead code — the later ``on_mount`` declared below overrides it
+    # and remains the sole lifecycle handler verbatim. ``on_mount`` is now
+    # declared exactly once (Ruff F811 resolved).
     def __init__(
         self,
         app: Any,
@@ -369,13 +358,26 @@ class WorkspacePane(TabPane):
             self.bridge.resolve_gate(text)
             return
 
-        # Setup guard: block query until configuration is complete
+        # Setup guard: block query until configuration is complete.
+        # Deterministic and test-tolerant: blocks only ordinary (non-"/")
+        # chat submits when setup is EXPLICITLY incomplete (both wizard
+        # markers present); slash commands and gate input always pass. The
+        # getattr defaults keep legacy/pilot states without wizard markers
+        # behaving as before (allowed).
         if gate_kind is None:
             try:
                 setup_ready = bool(getattr(self.state, "setup_complete", True))
             except Exception:
                 setup_ready = True
-            if not setup_ready and not text.startswith("/"):
+            try:
+                setup_stage = str(getattr(self.state, "setup_stage", "DONE"))
+            except Exception:
+                setup_stage = "DONE"
+            if (
+                not setup_ready
+                and setup_stage != "DONE"
+                and not text.startswith("/")
+            ):
                 self.app.notify(
                     "Сначала завершите настройку (F2 → Мастер настройки)",
                     severity="warning",

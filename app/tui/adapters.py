@@ -59,7 +59,6 @@ class StateAdapter:
     # Wizard state markers (setup flow progress)
     setup_complete: bool = False
     setup_stage: str = "IDLE"
-    pending_stage: str = "IDLE"
 
     def get_current_orchestrator_model(self) -> Optional[str]:
         """Текущая модель оркестратора (None — работает роутер)."""

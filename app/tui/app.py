@@ -6,7 +6,7 @@
 """
 
 from __future__ import annotations
-from .setup_wizard import SetupResult, run_setup_wizard
+from .setup_wizard import SetupResult
 
 import asyncio
 import json
@@ -192,6 +192,9 @@ class AutogenesiaTUIApp(App):
         self._startup_setup_complete: bool = False
         self._startup_wizard_in_progress: bool = False
 
+        # Single live ensure-live-ui worker handle (no un-awaited coroutines).
+        self._ensure_live_ui_worker: Optional[Any] = None
+
     # ------------------------------------------------------------- compose
 
     def compose(self) -> ComposeResult:
@@ -320,6 +323,11 @@ class AutogenesiaTUIApp(App):
         необходимости), присутствие `#tabs`/`#app-status`/`#query-input` и
         обновление статуса. Легитимные активные модалки пользователя
         сохраняются; произвольный верхний экран никогда не снимается.
+
+        Перед созданием bootstrap-воркспейса метод детерминированно проверяет
+        доступность `_base_tabs()`: отсутствие базового `#tabs` во время
+        teardown/shutdown — ожидаемое состояние (workspace-создание
+        пропускается с DEBUG-логом, без ERROR и без мутаций `screen_stack[0]`).
         """
         if self._repair_in_progress:
             return
@@ -333,12 +341,26 @@ class AutogenesiaTUIApp(App):
                         self.push_screen(base)
                     except Exception:
                         logger.debug("ensure_live_ui: base push failed", exc_info=True)
-                if not self._workspace_panes():
+                # Deterministic bootstrap guard: a missing base `#tabs` during
+                # teardown/shutdown is an expected state — workspace creation
+                # is skipped with DEBUG logging only (no ERROR log, and
+                # `screen_stack[0]` is never removed).
+                if self._base_tabs() is None:
+                    logger.debug(
+                        "ensure_live_ui: base #tabs unavailable "
+                        "(teardown/shutdown) — workspace bootstrap skipped"
+                    )
+                elif not self._workspace_panes():
                     try:
                         default_project = os.getcwd() or None
                         await self._create_workspace(default_project, is_new=False)
                     except Exception:
-                        logger.exception("ensure_live_ui: workspace bootstrap failed")
+                        # Expected teardown/shutdown failure: DEBUG only — an
+                        # ERROR/exception record is never emitted here.
+                        logger.debug(
+                            "ensure_live_ui: workspace bootstrap skipped",
+                            exc_info=True,
+                        )
                 try:
                     self._activate_last_tab()
                 except Exception:
@@ -359,6 +381,48 @@ class AutogenesiaTUIApp(App):
                     logger.debug("ensure_live_ui: focus skipped", exc_info=True)
         finally:
             self._repair_in_progress = False
+
+    def _schedule_ensure_live_ui(self) -> None:
+        """Single safe scheduler for the live-UI bootstrap worker.
+
+        Thread-safe: when invoked off the UI/main thread it re-dispatches
+        itself via ``self.call_from_thread(self._schedule_ensure_live_ui)``
+        and returns. Before creating any coroutine it checks whether
+        ``_ensure_live_ui_worker`` is still live (not ``None`` and not
+        finished); if so it returns immediately — no coroutine is created, so
+        ``RuntimeWarning: coroutine '_ensure_live_ui' was never awaited`` is
+        impossible. The ``_ensure_live_ui()`` coroutine is created only on the
+        branch that actually calls ``run_worker(..., group="ensure-live-ui",
+        exclusive=False)`` and the returned worker is stored in
+        ``_ensure_live_ui_worker``. A PENDING worker is never cancelled (no
+        ``exclusive=True``). Never pushes splash, never dismisses user modals
+        and never pops ``screen_stack[0]``.
+        """
+        try:
+            import threading as _threading
+
+            if _threading.current_thread() is not _threading.main_thread():
+                try:
+                    self.call_from_thread(self._schedule_ensure_live_ui)
+                except Exception:
+                    logger.debug("ensure-live-ui re-dispatch failed", exc_info=True)
+                return
+        except Exception:
+            pass
+        worker = getattr(self, "_ensure_live_ui_worker", None)
+        if worker is not None:
+            try:
+                if not bool(getattr(worker, "is_finished", True)):
+                    # A live worker already exists — no new coroutine needed.
+                    return
+            except Exception:
+                pass
+        try:
+            self._ensure_live_ui_worker = self.run_worker(
+                self._ensure_live_ui(), group="ensure-live-ui", exclusive=False
+            )
+        except Exception:
+            logger.debug("ensure_live_ui schedule failed", exc_info=True)
 
     def request_splash_dismiss(self, source: str = "manual") -> None:
         """ЕДИНСТВЕННЫЙ владелец снятия сплеша (только UI-loop; thread-safe).
@@ -384,9 +448,7 @@ class AutogenesiaTUIApp(App):
         splash = self._splash_screen
         if splash is None:
             try:
-                self.run_worker(
-                    self._ensure_live_ui(), group="ensure-live-ui", exclusive=True
-                )
+                self._schedule_ensure_live_ui()
             except Exception:
                 pass
             return
@@ -405,9 +467,7 @@ class AutogenesiaTUIApp(App):
             logger.debug("splash stack inspection failed", exc_info=True)
         self._splash_screen = None
         try:
-            self.run_worker(
-                self._ensure_live_ui(), group="ensure-live-ui", exclusive=True
-            )
+            self._schedule_ensure_live_ui()
         except Exception:
             logger.debug("ensure_live_ui schedule failed", exc_info=True)
         try:
@@ -442,6 +502,38 @@ class AutogenesiaTUIApp(App):
         except Exception:
             logger.debug("push user screen failed", exc_info=True)
 
+    def _base_tabs(self) -> Optional[TabbedContent]:
+        """Return the ``TabbedContent`` with id ``#tabs`` on the BASE screen.
+
+        The query is executed on ``self._base_screen`` (falling back to
+        ``screen_stack[0]`` when available) — never on ``self.screen`` /
+        ``self.query_one``, which target the active (possibly menu/modal)
+        screen and produce ``NoMatches: '#tabs'``. Returns ``None`` when the
+        base screen is absent or the widget is not found; the
+        ``self.query_one`` fallback runs only when no base screen reference
+        exists at all. ``screen_stack[0]`` is never removed or mutated.
+        """
+        base = getattr(self, "_base_screen", None)
+        if base is None:
+            try:
+                stack = list(getattr(self, "screen_stack", []) or [])
+                if stack:
+                    base = stack[0]
+            except Exception:
+                base = None
+        if base is not None:
+            try:
+                return base.query_one("#tabs", TabbedContent)
+            except Exception:
+                logger.debug("base screen has no #tabs", exc_info=True)
+                return None
+        # No base screen reference at all — best-effort fallback.
+        try:
+            return self.query_one("#tabs", TabbedContent)
+        except Exception:
+            logger.debug("no #tabs found anywhere", exc_info=True)
+            return None
+
     # ------------------------------------------------------------- helpers
 
     def _ensure_history_manager(self) -> Optional[Any]:
@@ -458,7 +550,7 @@ class AutogenesiaTUIApp(App):
     def _workspace_panes(self) -> List[WorkspacePane]:
         """Все воркспейсы (TabPane-наследники) в TabbedContent."""
         try:
-            tabs = self.query_one("#tabs", TabbedContent)
+            tabs = self._base_tabs()
             return list(tabs.query(WorkspacePane))
         except Exception:
             return []
@@ -467,7 +559,7 @@ class AutogenesiaTUIApp(App):
     def active_workspace(self) -> Optional[WorkspacePane]:
         """Активный воркспейс (или None)."""
         try:
-            tabs = self.query_one("#tabs", TabbedContent)
+            tabs = self._base_tabs()
             pane = getattr(tabs, "active_pane", None)
             if isinstance(pane, WorkspacePane):
                 return pane
@@ -483,7 +575,7 @@ class AutogenesiaTUIApp(App):
     def _activate_last_tab(self) -> None:
         """Активировать последнюю добавленную вкладку (best-effort)."""
         try:
-            tabs = self.query_one("#tabs", TabbedContent)
+            tabs = self._base_tabs()
             tabs_widget = getattr(tabs, "tabs", None)
             if tabs_widget is None:
                 return
@@ -541,7 +633,11 @@ class AutogenesiaTUIApp(App):
             except Exception:
                 pass
         try:
-            self.query_one("#app-status", Static).update(text)
+            base = getattr(self, "_base_screen", None)
+            if base is not None:
+                base.query_one("#app-status", Static).update(text)
+            else:
+                self.query_one("#app-status", Static).update(text)
         except Exception:
             pass
 
@@ -599,11 +695,24 @@ class AutogenesiaTUIApp(App):
                     project_index=project_index,
                 ),
             )
-            try:
-                tabs = self.query_one("#tabs", TabbedContent)
-                await tabs.add_pane(pane)
-            except Exception:
-                logger.exception("failed to restore workspace tab")
+            tabs = self._base_tabs()
+            if tabs is None:
+                # Expected teardown/shutdown state: skip pane attachment with
+                # DEBUG logging only — never an ERROR/exception log, and
+                # `screen_stack[0]` is never touched.
+                logger.debug(
+                    "restore skipped: base #tabs unavailable (teardown/shutdown)"
+                )
+            else:
+                try:
+                    await tabs.add_pane(pane)
+                except Exception:
+                    # Expected teardown/shutdown failure: DEBUG only — no
+                    # ERROR record is emitted for a detached base UI.
+                    logger.debug(
+                        "workspace tab restore skipped (teardown/shutdown)",
+                        exc_info=True,
+                    )
         self._activate_last_tab()
         self._update_app_status()
 
@@ -647,7 +756,7 @@ class AutogenesiaTUIApp(App):
         self,
         project_path: Optional[str],
         is_new: bool = False,
-        setup_result: Optional["SetupResult"] = None,
+        setup_result: Optional[SetupResult] = None,
         setup_pending: bool = False,
     ) -> WorkspacePane:
         """Создать воркспейс, добавить вкладку, активировать и сохранить сессию."""
@@ -683,11 +792,23 @@ class AutogenesiaTUIApp(App):
                 await self._apply_setup_result(pane, setup_result)
             except Exception:
                 logger.debug("apply_setup_result during create failed", exc_info=True)
-        tabs = self.query_one("#tabs", TabbedContent)
-        try:
-            await tabs.add_pane(pane)
-        except Exception:
-            logger.exception("add_pane failed")
+        tabs = self._base_tabs()
+        if tabs is None:
+            # Expected teardown/shutdown state: the pane is returned to the
+            # caller without UI attachment (DEBUG log only, never an ERROR).
+            logger.debug(
+                "add_pane skipped: base #tabs unavailable (teardown/shutdown)"
+            )
+        else:
+            try:
+                await tabs.add_pane(pane)
+            except Exception:
+                # Base UI detached/unmounting (teardown/shutdown): the pane is
+                # still returned and only a DEBUG record is ever emitted.
+                logger.debug(
+                    "add_pane skipped: base UI detached (teardown/shutdown)",
+                    exc_info=True,
+                )
         self._activate_last_tab()
         try:
             session = sessions_db.new_session(
@@ -731,14 +852,22 @@ class AutogenesiaTUIApp(App):
             await ws.close_workspace()
         except Exception:
             logger.exception("close_workspace failed")
-        tabs = self.query_one("#tabs", TabbedContent)
-        try:
-            await tabs.remove_pane(ws)
-        except Exception:
+        tabs = self._base_tabs()
+        if tabs is None:
+            # Expected teardown/shutdown state: fall back to direct pane
+            # removal without dereferencing None (DEBUG only, no ERROR).
             try:
                 await ws.remove()
             except Exception:
                 logger.debug("pane removal failed", exc_info=True)
+        else:
+            try:
+                await tabs.remove_pane(ws)
+            except Exception:
+                try:
+                    await ws.remove()
+                except Exception:
+                    logger.debug("pane removal failed", exc_info=True)
         if ws.session_id:
             try:
                 await sessions_db.delete_session(ws.session_id)
@@ -795,9 +924,7 @@ class AutogenesiaTUIApp(App):
             self._startup_menu_in_progress = False
             self._main_menu_in_progress = False
             try:
-                self.run_worker(
-                    self._ensure_live_ui(), group="ensure-live-ui", exclusive=True
-                )
+                self._schedule_ensure_live_ui()
             except Exception:
                 logger.debug("ensure_live_ui after menu failed", exc_info=True)
 
@@ -940,7 +1067,7 @@ class AutogenesiaTUIApp(App):
             pass
         return True
 
-    async def _apply_setup_result(self, ws: "WorkspacePane", result: "SetupResult") -> None:
+    async def _apply_setup_result(self, ws: "WorkspacePane", result: SetupResult) -> None:
         """Apply a SetupResult to a WorkspacePane (no new tab)."""
         try:
             state = ws.state

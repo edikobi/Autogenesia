@@ -304,6 +304,10 @@ class WorkspacePipeline:
         self._bg_tasks: set = set()
         self._last_result: Any = None
         self._last_canonical_plan: str = ""
+
+        # First prefilter call of the session starts a fresh plan session
+        # (previous physical plan is NOT used as revision context).
+        self._plan_session_new: bool = True
         self._history_manager = history_manager
         # Асинхронный гейт пользовательского ввода (контрольные точки)
         self._gate: Optional[asyncio.Future] = None
@@ -397,6 +401,7 @@ class WorkspacePipeline:
                 else PipelineAdapter(new_pipeline)
             )
             self._last_canonical_plan = ""
+            self._plan_session_new = True
             self.sync_models_to_pipeline()
             self.dispatch("session_status", {})
             logger.info(f"[{self.tab_key}] rebind_project → {project_dir}")
@@ -1220,7 +1225,22 @@ class WorkspacePipeline:
         prefilter_advice = ""
         if self.state.project_dir:
             try:
-                prefilter_advice = await self._run_prefilter(user_request)
+                # The FIRST prefilter call of the session starts a fresh plan
+                # session; subsequent feedback regenerations are revisions.
+                _first_new_plan = bool(getattr(self, "_plan_session_new", True))
+                self._plan_session_new = False
+
+                # The one-shot new-plan-session flag may only be consumed by
+                # a planning ("advanced") prefilter call. A non-planning call
+                # ("normal" or any other mode) must NOT consume it: restore
+                # exactly the pre-call state via the existing setter and force
+                # force_new_plan=False for this call.
+                if getattr(self.state, "prefilter_mode", "normal") != "advanced":
+                    self._plan_session_new = _first_new_plan
+                    _first_new_plan = False
+                prefilter_advice = await self._run_prefilter(
+                    user_request, force_new_plan=_first_new_plan
+                )
             except Exception as e:
                 logger.warning(f"pre-filter skipped: {e}")
                 self.dispatch("log", f"⚠️ Pre-filter пропущен: {e}")
@@ -1274,7 +1294,8 @@ class WorkspacePipeline:
                         _version_before = 0
                     try:
                         _new_advice = await self._run_prefilter(
-                            user_request + "\n\n[USER PLAN FEEDBACK]\n" + _gm
+                            user_request + "\n\n[USER PLAN FEEDBACK]\n" + _gm,
+                            force_new_plan=False,
                         )
                         if _new_advice:
                             prefilter_advice = _new_advice
@@ -1339,16 +1360,15 @@ class WorkspacePipeline:
         if self.state.prefilter_mode == "advanced":
             _canon = str(self._last_canonical_plan or "").strip()
             if not _canon:
-                self.dispatch("log", "❌ План не сформирован — отмена запроса")
+                # Restored fault tolerance for advanced prefilter mode: an
+                # empty canonical plan must NOT cancel the request or mark it
+                # FAILED — continue with the raw/formatted prefilter advice.
                 self.dispatch(
-                    "status",
-                    {
-                        "status": PipelineStatus.FAILED.value,
-                        "message": "Пустой план",
-                    },
+                    "log",
+                    "⚠️ Канонический план пуст, продолжаем без плана / с сырым advice",
                 )
-                return
-            _process_advice = self._format_canonical_plan_for_orchestrator(_canon)
+            else:
+                _process_advice = self._format_canonical_plan_for_orchestrator(_canon)
 
         result = await self.pipeline.process_request(
             user_request=user_request,
@@ -1516,8 +1536,15 @@ class WorkspacePipeline:
 
     # ------------------------------------------------------------- pre-filter
 
-    async def _run_prefilter(self, query: str) -> str:
-        """Pre-filter анализ (отказоустойчивый) → строка советов для Оркестратора."""
+    async def _run_prefilter(self, query: str, force_new_plan: bool = False) -> str:
+        """Pre-filter анализ (отказоустойчивый) → строка советов для Оркестратора.
+
+        Args:
+            query: User query (may include revision feedback markers).
+            force_new_plan: When True, the previous physical plan is NOT used as
+                revision context — the effective prompt requires a complete
+                full rewrite.
+        """
         if not self.state.project_dir:
             return ""
         try:
@@ -1549,6 +1576,7 @@ class WorkspacePipeline:
                 on_tool_call=lambda n, a, r, s: self.on_tool_call(n, a, r, s),
                 preferred_provider=self.state.prefilter_provider,
                 on_token=self.on_token,
+                force_new_plan=force_new_plan,
             )
             if advice is None:
                 self._last_canonical_plan = ""
@@ -2369,3 +2397,79 @@ class WorkspacePipeline:
                 _loop_ref.call_soon_threadsafe(_timeout_resolve)
         except Exception:
             logger.debug("timeout resolve schedule failed", exc_info=True)
+
+    def _plan_session_token(self) -> Any:
+        """Return a stable identity token for the currently bound session.
+
+        Uses ``state.thread_id`` when present, falling back to
+        ``state.project_dir``. Every attribute access is defensive via
+        ``getattr`` with safe defaults, so this helper never raises even for a
+        ``StateAdapter`` lacking ``thread_id`` or when ``self.state is None``.
+        """
+        try:
+            _state = getattr(self, "state", None)
+        except Exception:
+            _state = None
+        if _state is None:
+            return (None, None)
+        try:
+            _thread_id = getattr(_state, "thread_id", None)
+        except Exception:
+            _thread_id = None
+        try:
+            _project_dir = getattr(_state, "project_dir", None)
+        except Exception:
+            _project_dir = None
+        return (_thread_id, _project_dir)
+
+    @property
+    def _plan_session_new(self) -> bool:
+        """Session-identity-aware new-plan-session flag (getter).
+
+        Returns True when no request has yet consumed the flag in this
+        session; otherwise compares the currently bound session identity
+        against the identity recorded at the last consumption and returns True
+        on any difference, else False. Every ``state`` attribute read is
+        defensive (see ``_plan_session_token``).
+        """
+        try:
+            _seen = bool(getattr(self, "_plan_session_new_seen", False))
+        except Exception:
+            _seen = False
+        if not _seen:
+            return True
+        try:
+            _current = self._plan_session_token()
+        except Exception:
+            return True
+        try:
+            _previous = getattr(self, "_plan_session_new_token", None)
+        except Exception:
+            _previous = None
+        try:
+            return bool(_current != _previous)
+        except Exception:
+            return True
+
+    @_plan_session_new.setter
+    def _plan_session_new(self, value: bool) -> None:
+        """Session-identity-aware new-plan-session flag (setter).
+
+        ``True`` ⇒ mark "fresh / not yet consumed"; ``False`` ⇒ record the
+        current session identity as the consumed token. No other state
+        mutation. Tolerant of being called during ``__init__`` before the
+        companion fields exist (they are created here on first call).
+        """
+        try:
+            if bool(value):
+                self._plan_session_new_seen = False
+                self._plan_session_new_token = None
+            else:
+                self._plan_session_new_seen = True
+                try:
+                    self._plan_session_new_token = self._plan_session_token()
+                except Exception:
+                    self._plan_session_new_token = None
+        except Exception:
+            # Defensive: property setter must never raise for legacy stubs.
+            pass
